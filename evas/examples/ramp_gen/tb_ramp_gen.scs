@@ -13,7 +13,7 @@ Vrst_n (rst_n 0) vsource type=pwl \
 
 // DUT: 12-bit ramp, up from 0 to 127, step=1, start after 2 cycles
 // code[11:0] MSB-first: code_11 code_10 ... code_0
-XDUT (clk_dtc rst_n \
+IDUT (clk_dtc rst_n \
       code_11 code_10 code_9 code_8 code_7 code_6 code_5 code_4 \
       code_3 code_2 code_1 code_0) \
       ramp_gen DIRECTION=1 MIN_CODE=0 MAX_CODE=127 STEP_SIZE=1 \

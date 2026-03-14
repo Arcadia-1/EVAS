@@ -38,7 +38,7 @@ Vd14 (d14 0) vsource type=pwl wave=[0 0 799n 0 800n 0.9 3000n 0.9]
 Vd15 (d15 0) vsource type=pwl wave=[0 0 799n 0 800n 0.9 3000n 0.9]
 
 // DUT: ports din_therm[15:0] rst_n vout (MSB-first bus)
-XDUT (d15 d14 d13 d12 d11 d10 d9 d8 d7 d6 d5 d4 d3 d2 d1 d0 \
+IDUT (d15 d14 d13 d12 d11 d10 d9 d8 d7 d6 d5 d4 d3 d2 d1 d0 \
       rst_n vout) dac_therm_16b vstep=1.0 vth=0.4
 
 tran tran stop=2000n maxstep=1n

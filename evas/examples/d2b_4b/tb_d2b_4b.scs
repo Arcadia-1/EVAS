@@ -13,7 +13,7 @@ ahdl_include "d2b_4b.va"
 //   bin_o[3:0]      bin_n_o[3:0]
 //   onehot_o[15:0]  onehot_n_o[15:0]
 //   therm_o[14:0]   therm_n_o[14:0]
-XDUT (bin_o_3 bin_o_2 bin_o_1 bin_o_0 \
+IDUT (bin_o_3 bin_o_2 bin_o_1 bin_o_0 \
       bin_n_o_3 bin_n_o_2 bin_n_o_1 bin_n_o_0 \
       onehot_o_15 onehot_o_14 onehot_o_13 onehot_o_12 onehot_o_11 onehot_o_10 \
       onehot_o_9 onehot_o_8 onehot_o_7 onehot_o_6 onehot_o_5 onehot_o_4 \

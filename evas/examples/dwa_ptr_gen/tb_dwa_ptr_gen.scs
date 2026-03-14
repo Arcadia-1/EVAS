@@ -29,7 +29,7 @@ Vcode2 (code_msb_i_2 0) vsource type=pwl \
 Vcode3 (code_msb_i_3 0) vsource type=dc dc=0
 
 // DUT: ports clk_i rst_ni code_msb_i[3:0] cell_en_o[15:0] ptr_o[15:0]
-XDUT (clk_i rst_ni \
+IDUT (clk_i rst_ni \
       code_msb_i_3 code_msb_i_2 code_msb_i_1 code_msb_i_0 \
       cell_en_15 cell_en_14 cell_en_13 cell_en_12 cell_en_11 cell_en_10 cell_en_9 cell_en_8 \
       cell_en_7 cell_en_6 cell_en_5 cell_en_4 cell_en_3 cell_en_2 cell_en_1 cell_en_0 \

@@ -1,36 +1,29 @@
-"""Analyze 4-stage inverter chain: td=100ps, tr=50ps per stage.
-
-Runs the simulation and saves a waterfall plot showing delay propagation.
-"""
+"""Analyze 4-stage inverter chain: td=100ps, tr=50ps per stage."""
+import time
 from pathlib import Path
 
 import matplotlib
 import numpy as np
-import time
 
 matplotlib.use('Agg')
-
 import matplotlib.pyplot as plt
 
 from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent
-_DEFAULT_BASE = HERE.parent.parent / 'output' / 'digital_basics'
+_DEFAULT_BASE = HERE.parent.parent.parent / 'output' / 'digital_basics'
 
 
 def analyze(out_dir: Path = _DEFAULT_BASE) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-
     out_dir_chain = out_dir / 'inverter_chain'
 
-    # ── 1. Simulate ───────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
     evas_simulate(str(HERE / 'tb_inverter_chain.scs'), output_dir=str(out_dir_chain))
-    sim_s = time.perf_counter() - t0
+    wall_s = time.perf_counter() - t0
 
-    # ── 2. Load ───────────────────────────────────────────────────────────────────
     data = np.genfromtxt(out_dir_chain / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
-    t  = data['time'] * 1e9   # ns
+    t = data['time'] * 1e9
 
     signals = [
         ('in',  'IN',   'tab:blue'),
@@ -40,31 +33,29 @@ def analyze(out_dir: Path = _DEFAULT_BASE) -> None:
         ('out', 'OUT4', 'tab:purple'),
     ]
 
-    # ── 3. Waterfall plot — IN at top, OUT4 at bottom ────────────────────────────
-    OFFSET = 1.1   # V between rows
+    OFFSET = 1.1
     N = len(signals)
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
     for i, (col, label, color) in enumerate(signals):
-        offset = (N - 1 - i) * OFFSET          # top → bottom
+        offset = (N - 1 - i) * OFFSET
         ax.plot(t, data[col] + offset, color=color, linewidth=1, label=label)
         ax.axhline(offset,       color=color, linewidth=1, linestyle='--', alpha=0.4)
         ax.axhline(offset + 0.8, color=color, linewidth=1, linestyle='--', alpha=0.4)
 
     ax.set_xlabel('Time (ns)')
     ax.set_ylabel('Voltage (V)  +  stage offset')
-    ax.set_title(f'4-stage inverter chain  —  td=100 ps, tr=50 ps per stage  [{sim_s:.3f} s]')
+    ax.set_title(f'4-stage inverter chain  —  td=100 ps, tr=50 ps per stage  |  wall clock: {wall_s:.4f} s')
+    ax.set_xlim(t[0], t[-1])
 
-    # Y ticks: label the 0 V and 0.8 V reference for each row
-    yticks  = []
-    ylabels = []
+    yticks, ylabels = [], []
     for i, (_, label, _) in enumerate(signals):
         yticks.append((N - 1 - i) * OFFSET)
         ylabels.append(label)
     ax.set_yticks(yticks)
     ax.set_yticklabels(ylabels, fontsize=8)
-    ax.set_ylim(-0.3, len(signals) * OFFSET + 0.2)
+    ax.set_ylim(-0.3, N * OFFSET + 0.2)
 
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(True, alpha=0.3)

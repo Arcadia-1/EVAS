@@ -28,15 +28,15 @@ Vrst_n (rst_n 0) vsource type=pwl wave=[0 0  1.5n 0  2n vdd  65n vdd]
 Vvin (vin 0) vsource type=sine sinedc=0.45 ampl=0.44 freq=fin
 
 // ADC: vin clk vdd vss rst_n -> dout[3:0]
-XADC (vin clk vdd vss rst_n dout_3 dout_2 dout_1 dout_0) \
+IADC (vin clk vdd vss rst_n dout_3 dout_2 dout_1 dout_0) \
       adc_ideal_4b
 
 // DAC: din[3:0] vdd vss rst_n -> vout  (combinational)
-XDAC (dout_3 dout_2 dout_1 dout_0 vdd vss rst_n vout) \
+IDAC (dout_3 dout_2 dout_1 dout_0 vdd vss rst_n vout) \
       dac_ideal_4b
 
 // S&H: samples vin on same rising clk edge as ADC -> vin_sh
-XSH (vin clk vdd vss rst_n vin_sh) sh_ideal
+ISH (vin clk vdd vss rst_n vin_sh) sh_ideal
 
 tran tran stop=65n maxstep=200p
 save vin:3f vin_sh:3f clk:2e rst_n:d vout:3f dout_3:d dout_2:d dout_1:d dout_0:d

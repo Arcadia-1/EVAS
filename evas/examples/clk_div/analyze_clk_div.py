@@ -1,5 +1,4 @@
 """Analyze clk_div: clock divider — one plot per ratio."""
-import os
 import time
 from pathlib import Path
 
@@ -12,8 +11,7 @@ import matplotlib.pyplot as plt
 from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent
-_DEFAULT_OUT = Path(os.environ.get('EVAS_OUTPUT_DIR') or
-                    (HERE.parent.parent.parent / 'output' / 'clk_div'))
+_DEFAULT_OUT = HERE.parent.parent.parent / 'output' / 'clk_div'
 
 _RATIOS = [
     (2, 'div2', 'tb_clk_div_div2.scs'),
@@ -72,6 +70,7 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
         ax1.set_ylim(ylim)
         ax1.grid(True, alpha=0.3)
         ax1.set_xlabel('Time (ns)')
+        ax0.set_xlim(t_ns[0], t_ns[-1])
 
         fig.suptitle(
             f'clk_div  ÷{ratio}  —  '

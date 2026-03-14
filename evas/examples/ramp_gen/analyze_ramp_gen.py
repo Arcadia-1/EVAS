@@ -1,4 +1,5 @@
-"""Analyze ramp_gen: 12-bit up-ramp from 0 to 15 (step=1, N_CYCLE_START=2)."""
+"""Analyze ramp_gen: up-ramp from 0 to MAX (DIRECTION=1, STEP=1, N_CYCLE_START=2)."""
+import time
 from pathlib import Path
 
 import matplotlib
@@ -10,39 +11,36 @@ import matplotlib.pyplot as plt
 from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent
-_DEFAULT_OUT = HERE.parent.parent / 'output' / 'ramp_gen'
+_DEFAULT_OUT = HERE.parent.parent.parent / 'output' / 'ramp_gen'
 
 
 def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Simulate
+    t0 = time.perf_counter()
     evas_simulate(str(HERE / 'tb_ramp_gen.scs'), output_dir=str(out_dir))
+    wall_s = time.perf_counter() - t0
 
-    # 2. Load results
     data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
-    t  = data['time'] * 1e9  # -> ns
+    t   = data['time'] * 1e9
+    vdd = max(data[c].max() for c in ['clk_dtc', 'rst_n'])
 
-    # Decode 12-bit code
     code_cols = [f'code_{i}' for i in range(12)]
     ramp_code = np.zeros(len(data), dtype=int)
     for i, col in enumerate(code_cols):
         if col in list(data.dtype.names):
             ramp_code += ((data[col] > 0.45).astype(int) << i)
 
-    # 3. Plot
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
 
     axes[0].plot(t, data['clk_dtc'], linewidth=1.0, drawstyle='steps-post', label='clk_dtc')
     axes[0].plot(t, data['rst_n'],   linewidth=1.0, drawstyle='steps-post', label='rst_n', alpha=0.7)
-    vdd = max(data[c].max() for c in ['clk_dtc', 'rst_n'])
     axes[0].set_ylabel('Control (V)')
     axes[0].set_ylim(-vdd * 0.1, vdd * 1.2)
     axes[0].legend(fontsize=8)
-    axes[0].set_title('ramp_gen (DIRECTION=1, MIN=0, MAX=127, STEP=1, N_CYCLE_START=2)')
+    axes[0].set_title(f'ramp_gen (DIRECTION=1, MIN=0, MAX=127, STEP=1, N_CYCLE_START=2)  |  wall clock: {wall_s:.4f} s')
     axes[0].grid(True, alpha=0.3)
 
-    # Show individual bits
     for i in [0, 1, 2, 3]:
         col = f'code_{i}'
         if col in list(data.dtype.names):
@@ -56,6 +54,7 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     axes[2].set_ylim(-1, 132)
     axes[2].grid(True, alpha=0.3)
 
+    axes[0].set_xlim(t[0], t[-1])
     axes[-1].set_xlabel('Time (ns)')
     fig.tight_layout()
     fig.savefig(str(out_dir / 'analyze_ramp_gen.png'), dpi=150, bbox_inches='tight')

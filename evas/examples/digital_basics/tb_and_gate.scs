@@ -17,7 +17,7 @@ VB (b 0) vsource type=pwl wave=[0 0  1.985n 0  2.015n 0.8 \
                                  3.985n 0.8  4.015n 0 \
                                  5.985n 0    6.015n 0.8  8n 0.8]
 
-XDUT (a b y) and_gate
+IDUT (a b y) and_gate
 
 tran tran stop=8n maxstep=0.1n
 save a:2e b:2e y:2e

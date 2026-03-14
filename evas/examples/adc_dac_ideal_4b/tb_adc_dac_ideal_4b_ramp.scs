@@ -26,11 +26,11 @@ Vrst_n (rst_n 0) vsource type=pwl wave=[0 0  9.5n 0  10n vdd  200n vdd]
 Vvin (vin 0) vsource type=pwl wave=[0 0  50n 0.9]
 
 // ADC: vin clk vdd vss rst_n -> dout[3:0]
-XADC (vin clk vdd vss rst_n dout_3 dout_2 dout_1 dout_0) \
+IADC (vin clk vdd vss rst_n dout_3 dout_2 dout_1 dout_0) \
       adc_ideal_4b
 
 // DAC: din[3:0] vdd vss rst_n -> vout  (combinational)
-XDAC (dout_3 dout_2 dout_1 dout_0 vdd vss rst_n vout) \
+IDAC (dout_3 dout_2 dout_1 dout_0 vdd vss rst_n vout) \
       dac_ideal_4b
 
 tran tran stop=50n maxstep=100p

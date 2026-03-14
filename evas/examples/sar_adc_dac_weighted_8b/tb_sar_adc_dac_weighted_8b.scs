@@ -30,11 +30,11 @@ Vrst_n (rst_n 0) vsource type=pwl wave=[0 0  19.5n 0  20n vdd  20020n vdd]
 Vvin (vin 0) vsource type=sine sinedc=0.45 ampl=0.44 freq=fin
 
 // ADC: VIN CLKS RST_N → DOUT[7:0]  (dout_7=MSB, dout_0=LSB)
-XADC (vin clks rst_n dout_7 dout_6 dout_5 dout_4 dout_3 dout_2 dout_1 dout_0) \
+IADC (vin clks rst_n dout_7 dout_6 dout_5 dout_4 dout_3 dout_2 dout_1 dout_0) \
       sar_adc_weighted_8b vdd=vdd
 
 // DAC: DIN[7:0] → VOUT  (combinatorial reconstruction)
-XDAC (dout_7 dout_6 dout_5 dout_4 dout_3 dout_2 dout_1 dout_0 vout) \
+IDAC (dout_7 dout_6 dout_5 dout_4 dout_3 dout_2 dout_1 dout_0 vout) \
       dac_weighted_8b vdd=vdd
 
 tran tran stop=20u maxstep=500p

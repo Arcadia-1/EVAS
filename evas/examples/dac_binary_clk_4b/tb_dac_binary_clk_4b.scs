@@ -50,7 +50,7 @@ Vdin0 (din0 0) vsource type=pwl wave=[ \
         599.9e-9 0  600e-9 0.9  640e-9 0.9]
 
 // DUT (port order: DIN3 DIN2 DIN1 DIN0 RDY AOUT)
-XDUT (din3 din2 din1 din0 rdy aout) dac_binary_clk_4b vref=vdd vth=vth
+IDUT (din3 din2 din1 din0 rdy aout) dac_binary_clk_4b vref=vdd vth=vth
 
 tran tran stop=660n maxstep=200p
 save rdy:2e din3:d din2:d din1:d din0:d aout:3f

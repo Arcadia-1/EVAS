@@ -2,8 +2,9 @@
 `include "constants.vams"
 `include "disciplines.vams"
 
-// Comparator with regeneration-delay model: td = td_scale / |Vdiff_eff|
-// Models metastability: smaller differential input → longer output delay.
+// Comparator with log-linear regeneration delay: td = td_0 + tau * ln(VDD / |Vdiff_eff|)
+// Physical model: output grows as Vout(t) = Vdiff * exp(t/tau), resolves when Vout = VDD.
+// Calibrated: vin=10mV → td≈40ps, vin=1mV → td≈50ps  (tau=4.34ps, td_0=20.5ps)
 module cmp_delay (
     input  electrical CLK,
     input  electrical VINN,
@@ -16,10 +17,11 @@ module cmp_delay (
     inout  electrical VDD
 );
 
-parameter real voffset  = 0.0;
-parameter real td_scale = 1e-12;   // [V·s]:  td = td_scale / |Vdiff|
-parameter real td_min   = 50e-12;  // minimum delay (floor)
-parameter real td_max   = 8e-9;    // maximum delay (ceiling)
+parameter real voffset = 0.0;
+parameter real tau     = 4.34e-12;   // regeneration time constant [s]
+parameter real td_0    = 20.5e-12;   // base delay offset [s]
+parameter real td_min  = 20e-12;     // minimum delay floor [s]
+parameter real td_max  = 200e-12;    // maximum delay ceiling [s]
 
 real vdd;
 integer xoutp, xoutn;
@@ -36,8 +38,8 @@ analog begin
     @(cross(V(CLK) - vdd*0.5, +1)) begin
         vdiff_eff = V(VINP) - V(VINN) - voffset;
         if (vdiff_eff < 0) vdiff_eff = -vdiff_eff;
-        if (vdiff_eff < 1e-6) vdiff_eff = 1e-6;
-        td = td_scale / vdiff_eff;
+        if (vdiff_eff < 1e-9) vdiff_eff = 1e-9;  // floor at 1nV to avoid ln(0)
+        td = td_0 + tau * ln(vdd / vdiff_eff);
         if (td < td_min) td = td_min;
         if (td > td_max) td = td_max;
 
@@ -48,8 +50,8 @@ analog begin
             xoutp = 0;
             xoutn = 1;
         end
-        $strobe("[cmp_delay] t=%.3f ns | diff=%.4fmV | td=%.3f ns | dec=%d",
-                $abstime*1e9, (V(VINP)-V(VINN))*1e3, td*1e9, xoutp);
+        $strobe("[cmp_delay] t=%.3f ns | diff=%.5fmV | td=%.1f ps | dec=%d",
+                $abstime*1e9, (V(VINP)-V(VINN))*1e3, td*1e12, xoutp);
     end
 
     @(cross(V(CLK) - vdd*0.5, -1)) begin
