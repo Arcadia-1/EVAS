@@ -1,5 +1,6 @@
 """Analyze clk_div: clock divider — one plot per ratio."""
 import os
+import time
 from pathlib import Path
 
 import matplotlib
@@ -12,7 +13,7 @@ from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent
 _DEFAULT_OUT = Path(os.environ.get('EVAS_OUTPUT_DIR') or
-                    (HERE.parent.parent / 'output' / 'clk_div'))
+                    (HERE.parent.parent.parent / 'output' / 'clk_div'))
 
 _RATIOS = [
     (2, 'div2', 'tb_clk_div_div2.scs'),
@@ -34,11 +35,14 @@ def _measure_period_ns(t_ns: np.ndarray, sig: np.ndarray, thresh: float = 0.45) 
 def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run all three simulations
+    # Run all three simulations, record wall-clock time per run
+    wall_times: dict[int, float] = {}
     for ratio, subdir, tb_file in _RATIOS:
         sim_out = out_dir / subdir
         sim_out.mkdir(parents=True, exist_ok=True)
+        t0 = time.perf_counter()
         evas_simulate(str(HERE / tb_file), output_dir=str(sim_out))
+        wall_times[ratio] = time.perf_counter() - t0
 
     # One plot per ratio
     for (ratio, subdir, _), color in zip(_RATIOS, _COLORS):
@@ -46,15 +50,15 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
             out_dir / subdir / 'tran.csv',
             delimiter=',', names=True, dtype=None, encoding='utf-8',
         )
-        t_ns   = data['time'] * 1e9
-        t_s    = data['time'][-1]           # simulation duration in seconds
+        t_ns    = data['time'] * 1e9
         clk_in  = data['clk_in']
         clk_out = data['clk_out']
-        vdd    = clk_in.max()
-        ylim   = (-0.1 * vdd, 1.2 * vdd)
+        vdd     = clk_in.max()
+        ylim    = (-0.1 * vdd, 1.2 * vdd)
 
         period_out_ns = _measure_period_ns(t_ns, clk_out)
         period_in_ns  = _measure_period_ns(t_ns, clk_in)
+        wall_ms       = wall_times[ratio] * 1e3
 
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
 
@@ -72,7 +76,7 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
         fig.suptitle(
             f'clk_div  ÷{ratio}  —  '
             f'in {period_in_ns:.0f} ns / out {period_out_ns:.0f} ns  |  '
-            f'sim duration: {t_s:.2e} s',
+            f'wall clock: {wall_ms:.1f} ms',
             fontsize=10,
         )
         fig.tight_layout()
