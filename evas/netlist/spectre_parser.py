@@ -56,6 +56,8 @@ class SpectreTran:
     stop: float
     step: Optional[float] = None  # maxstep or computed
     name: str = 'tran'
+    refine_factor: int = 16   # step divisor after a cross event
+    refine_steps: int = 8     # number of refined steps after a cross event
 
 
 @dataclass
@@ -96,6 +98,7 @@ class SpectreNetlist:
     includes: List[SpectreInclude] = field(default_factory=list)
     tran: Optional[SpectreTran] = None
     save_signals: List[str] = field(default_factory=list)
+    save_formats: Dict[str, str] = field(default_factory=dict)  # sig -> fmt e.g. '6e', '10e', 'd'
     temp: float = 27.0
     source_dir: str = ''
 
@@ -435,22 +438,28 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             idx += 1
             continue
 
-        # save statement
-        if low.startswith('save'):
-            parts = line.split()
-            for sig in parts[1:]:
-                sig = sig.strip()
-                if sig and not sig.startswith('options'):
-                    netlist.save_signals.append(sig)
-            idx += 1
-            continue
-
         # saveOptions, info, finalTimeOP, etc. — skip
         if low.startswith('saveoptions') or low.startswith('info ') or \
            low.startswith('finaltimeop') or low.startswith('modelparameter') or \
            low.startswith('element ') or low.startswith('outputparameter') or \
            low.startswith('designparamvals') or low.startswith('primitives ') or \
            low.startswith('subckts '):
+            idx += 1
+            continue
+
+        # save statement
+        if low.startswith('save'):
+            parts = line.split()
+            for sig in parts[1:]:
+                sig = sig.strip()
+                if not sig or sig.startswith('options'):
+                    continue
+                if ':' in sig:
+                    name, fmt = sig.split(':', 1)
+                    netlist.save_signals.append(name)
+                    netlist.save_formats[name] = fmt
+                else:
+                    netlist.save_signals.append(sig)
             idx += 1
             continue
 
@@ -513,6 +522,9 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
     # Default step: stop / 1000
     step = maxstep if maxstep is not None else float(stop) / 1000.0
 
+    refine_factor = int(params.get('refine_factor', 16))
+    refine_steps  = int(params.get('refine_steps',  8))
+
     # Find analysis name (first token that's not a key=value)
     name = 'tran'
     for tok in tokens[1:]:
@@ -520,7 +532,8 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
             name = tok
             break
 
-    netlist.tran = SpectreTran(stop=float(stop), step=float(step), name=name)
+    netlist.tran = SpectreTran(stop=float(stop), step=float(step), name=name,
+                               refine_factor=refine_factor, refine_steps=refine_steps)
 
 
 def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
@@ -572,7 +585,21 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
     params = _parse_named_params(param_str.split(), 0, variables)
 
     if wave_data is not None:
-        params['wave'] = wave_data
+        # Evaluate each wave token; parameter refs (e.g. 'vdd') use variables
+        wave_vals = []
+        for tok in wave_data.split():
+            tok = tok.strip()
+            if not tok:
+                continue
+            val = _parse_suffix_number(tok)
+            if val is None:
+                try:
+                    val = evaluate_expr(tok, variables)
+                except (ValueError, ZeroDivisionError):
+                    val = None
+            if val is not None:
+                wave_vals.append(val)
+        params['wave'] = wave_vals
 
     src = _build_source(name, node_pos, node_neg, params)
     netlist.sources.append(src)

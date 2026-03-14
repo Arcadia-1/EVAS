@@ -158,6 +158,12 @@ class Source:
     node: str
     waveform: Callable[[float], float]  # time → voltage
 
+    def next_breakpoint(self, time: float) -> Optional[float]:
+        bpfn = getattr(self.waveform, '_next_breakpoint', None)
+        if bpfn is None:
+            return None
+        return bpfn(time)
+
 
 @dataclass
 class SimResult:
@@ -191,7 +197,9 @@ class Simulator:
             self.recorded_signals[n] = []
 
     def run(self, tstop: float, tstep: float = None,
-            max_step: float = None) -> SimResult:
+            max_step: float = None,
+            refine_factor: int = 16,
+            refine_steps: int = 8) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -223,6 +231,14 @@ class Simulator:
                 refine_steps_left -= 1
             else:
                 dt = min(tstep, tstop - time)
+
+            # Check for breakpoints from sources (PWL knees, pulse edges)
+            for src in self.sources:
+                bp = src.next_breakpoint(time)
+                if bp is not None and bp > time and bp < time + dt:
+                    dt = bp - time
+                    if dt < 1e-18:
+                        dt = 1e-18
 
             # Check for breakpoints from transition operators
             for model in self.models:
@@ -257,15 +273,9 @@ class Simulator:
                 if cross_fired:
                     break
 
-            if cross_fired and refine_steps_left == 0 and dt > tstep / 16:
-                # Cross detected on a normal-sized step.
-                # Roll back: save current outputs, restore state to before this step,
-                # then re-approach with smaller steps.
-                # For simplicity, we don't roll back — instead we refine AFTER the cross
-                # to capture the transition accurately. And next time, the cross
-                # detector's prev_val is updated so it won't re-fire.
-                refine_dt = dt / 16
-                refine_steps_left = 8  # 8 small steps after the cross event
+            if cross_fired and refine_steps_left == 0 and dt > tstep / refine_factor:
+                refine_dt = dt / refine_factor
+                refine_steps_left = refine_steps
 
             self._record_point(time)
             self._step_sizes.append(dt)
@@ -290,12 +300,14 @@ class Simulator:
 
 def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0):
     """Create a pulse waveform function."""
+    t_hi = period * duty
+    knees = sorted([0.0, rise, t_hi, t_hi + fall])
+
     def wfn(t):
         t_eff = t - delay
         if t_eff < 0:
             return v_lo
         t_mod = t_eff % period
-        t_hi = period * duty
         if t_mod < rise:
             frac = t_mod / rise if rise > 0 else 1.0
             return v_lo + frac * (v_hi - v_lo)
@@ -306,6 +318,23 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0):
             return v_hi - frac * (v_hi - v_lo)
         else:
             return v_lo
+
+    def _bpfn(t):
+        if period <= 0:
+            return None
+        if t < delay:
+            return delay
+        t_eff = t - delay
+        n = int(t_eff / period)
+        for _ in range(2):
+            for k in knees:
+                candidate = delay + n * period + k
+                if candidate > t + 1e-18:
+                    return candidate
+            n += 1
+        return None
+
+    wfn._next_breakpoint = _bpfn
     return wfn
 
 
@@ -321,6 +350,8 @@ def sine(offset, amplitude, freq, phase=0.0):
 
 def pwl(times, values):
     """Create a piecewise-linear waveform."""
+    sorted_t = sorted(set(times))
+
     def wfn(t):
         if t <= times[0]:
             return values[0]
@@ -331,6 +362,14 @@ def pwl(times, values):
                 frac = (t - times[i]) / (times[i + 1] - times[i])
                 return values[i] + frac * (values[i + 1] - values[i])
         return values[-1]
+
+    def _bpfn(t):
+        for kt in sorted_t:
+            if kt > t + 1e-18:
+                return kt
+        return None
+
+    wfn._next_breakpoint = _bpfn
     return wfn
 
 

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evas-sim"
+version = "0.1.0"
+description = "Event-driven Verilog-A Simulator — pure-Python behavioral simulation"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Zhishuai Zhang" }]
+keywords = ["verilog-a", "simulation", "mixed-signal", "eda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = ["numpy", "matplotlib", "pandas"]
+
+[project.urls]
+Homepage = "https://evas.tokenzhang.com"
+Documentation = "https://evas.tokenzhang.com"
+Repository = "https://github.com/Arcadia-1/EVAS"
+"Bug Tracker" = "https://github.com/Arcadia-1/EVAS/issues"
+
+[project.scripts]
+evas = "evas.cli:main"
+
+[project.optional-dependencies]
+dev  = ["pytest>=7.0", "pytest-cov", "ruff"]
+docs = ["sphinx>=7.0", "furo", "sphinx-autodoc-typehints", "myst-parser"]
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evas*"]
+
+[tool.setuptools.package-data]
+"evas.examples" = ["**/*"]
+"evas.vams"     = ["*.vams"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

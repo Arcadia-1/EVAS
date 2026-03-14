@@ -1,0 +1,13 @@
+// clk_div: Clock divider by ratio
+simulator lang=spectre
+global 0
+
+ahdl_include "clk_div.va"
+
+// Input clock: 50ns period (20 MHz)
+Vclk (clk_in 0) vsource type=pulse val0=0 val1=0.9 period=50n delay=5n rise=1n fall=1n width=24n
+
+XDUT (clk_in clk_out) clk_div ratio=4 vdd=0.9 tt=10p td=0
+
+tran tran stop=2000n maxstep=1n
+save clk_in:2e clk_out:2e

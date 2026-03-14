@@ -110,7 +110,13 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str) -> None
 
     elif stype == 'pwl':
         wave = params.get('wave', '')
-        vals = [float(t) for t in wave.split()] if isinstance(wave, str) and wave else []
+        if isinstance(wave, list):
+            vals = wave
+        elif isinstance(wave, str) and wave:
+            vals = [_parse_suffix_number(t) for t in wave.split()]
+            vals = [v for v in vals if v is not None]
+        else:
+            vals = []
         times = vals[0::2]
         values = vals[1::2]
         sim.add_source(node, pwl(times, values))
@@ -217,29 +223,30 @@ def _derive_bus_signals(result: SimResult) -> Dict[str, np.ndarray]:
 # CSV output
 # ---------------------------------------------------------------------------
 
-def _is_digital_signal(data: np.ndarray) -> bool:
-    """Return True if a signal only takes two distinct levels (0 and VDD)."""
-    unique = np.unique(np.round(data, decimals=6))
-    return len(unique) <= 2
+def _fmt_value(v: float, fmt: str) -> str:
+    """Format a single value according to format string ('6e', '4f', 'd', etc.)."""
+    if fmt == 'd':
+        return str(int(round(v)))
+    if fmt.endswith('f') or fmt.endswith('F'):
+        try:
+            n = int(fmt[:-1])
+        except ValueError:
+            n = 6
+        return f"{v:.{n}f}"
+    try:
+        n = int(fmt.rstrip('eE'))
+    except ValueError:
+        n = 6
+    return f"{v:.{n}e}"
 
 
-def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str]) -> None:
+def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
+               save_formats: Dict[str, str] = None) -> None:
     """Write simulation results to CSV file."""
+    if save_formats is None:
+        save_formats = {}
     signal_names = save_signals if save_signals else sorted(result.signals.keys())
     valid_signals = [s for s in signal_names if s in result.signals]
-
-    is_int: Dict[str, bool] = {}
-    for sig in valid_signals:
-        if sig.endswith('_code'):
-            is_int[sig] = True
-        else:
-            is_int[sig] = _is_digital_signal(result.signals[sig])
-
-    vdd_map: Dict[str, float] = {}
-    for sig in valid_signals:
-        if is_int[sig] and not sig.endswith('_code'):
-            peak = float(np.max(result.signals[sig]))
-            vdd_map[sig] = peak if peak > 0 else 1.0
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -248,14 +255,11 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str]) -> No
             row = [f"{result.time[i]:.6e}"]
             for sig in valid_signals:
                 v = result.signals[sig][i]
-                if not is_int[sig]:
-                    row.append(f"{v:.6e}")
-                elif sig.endswith('_code'):
-                    row.append(str(int(round(v))))
-                elif vdd_map[sig] > 0:
-                    row.append(str(int(round(v / vdd_map[sig]))))
+                if sig.endswith('_code'):
+                    fmt = save_formats.get(sig, 'd')
                 else:
-                    row.append('0')
+                    fmt = save_formats.get(sig, '6e')
+                row.append(_fmt_value(v, fmt))
             writer.writerow(row)
 
 
@@ -365,7 +369,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         cls, module = models_by_name[inst.model_name]
         model = cls()
         model.node_map = _build_node_map(inst, module)
-        model.params.update(inst.params)
+        # Case-insensitive param update: netlist keys are lowercased, model keys
+        # preserve the original VA case. Match by lowercase to update correctly.
+        lower_to_model_key = {k.lower(): k for k in model.params}
+        for k, v in inst.params.items():
+            model_key = lower_to_model_key.get(k.lower(), k)
+            model.params[model_key] = v
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
 
@@ -405,7 +414,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write("")
 
     t_sim_start = time.time()
-    result = sim.run(tstop, tstep=tstep)
+    result = sim.run(tstop, tstep=tstep,
+                     refine_factor=netlist.tran.refine_factor,
+                     refine_steps=netlist.tran.refine_steps)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
@@ -439,7 +450,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     # 7. Write CSV
     csv_path = out_dir / 'tran.csv'
     save_with_derived = list(netlist.save_signals) + list(derived.keys())
-    _write_csv(csv_path, result, save_with_derived)
+    _write_csv(csv_path, result, save_with_derived, netlist.save_formats)
 
     signal_names = save_with_derived if save_with_derived else sorted(result.signals.keys())
     log.write("")

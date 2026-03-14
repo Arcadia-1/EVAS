@@ -7,6 +7,7 @@ and state variable management.
 """
 import math
 import os
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -72,7 +73,12 @@ class CompiledModel:
         """Evaluate a transition operator."""
         if key not in self.transitions:
             self.transitions[key] = TransitionState(current_val=target)
+            return target
         ts = self.transitions[key]
+        # Advance current_val to the actual value at this time before updating target.
+        # Without this, a new target set at t overwrites the in-progress transition
+        # before evaluate() can commit its endpoint into current_val.
+        ts.evaluate(time)
         ts.set_target(time, target, delay, rise, fall, self.default_transition)
         return ts.evaluate(time)
 
@@ -101,7 +107,7 @@ class CompiledModel:
             msg = (fmt % args) if args else fmt
         except Exception as e:
             msg = f"{fmt}  [format error: {e}]"
-        self._strobe_log.append(f"t={time:.6e}  {msg}")
+        self._strobe_log.append(msg)
 
 
 def compile_module(module: Module, default_transition: float = None) -> type:
@@ -223,6 +229,7 @@ class _ModuleCompiler:
         namespace = {
             'CompiledModel': CompiledModel,
             'math': math,
+            'random': random,
             'pow': pow,
             'abs': abs,
             'int': int,
@@ -449,6 +456,8 @@ class _ModuleCompiler:
             # Check if it's a special constant
             if name == 'inf':
                 return "float('inf')"
+            if name == '$abstime':
+                return "time"
             return f"self.state[{name!r}]"
 
         if isinstance(expr, ArrayAccess):
@@ -565,8 +574,19 @@ class _ModuleCompiler:
             return f"math.floor({args[0]})"
         if name == 'ceil':
             return f"math.ceil({args[0]})"
+        if name == '$rdist_normal':
+            # $rdist_normal(seed, mean, std_dev) — ignore seed, use random.gauss
+            mean = args[1] if len(args) > 1 else "0.0"
+            std  = args[2] if len(args) > 2 else "1.0"
+            return f"random.gauss({mean}, {std})"
+        if name == '$random':
+            return "random.randint(-2147483648, 2147483647)"
+        if name == '$dist_uniform':
+            lo = args[1] if len(args) > 1 else "0.0"
+            hi = args[2] if len(args) > 2 else "1.0"
+            return f"random.uniform({lo}, {hi})"
 
-        return f"0.0  # unknown function: {name}"
+        return f"0.0"  # unknown function: {name}
 
     def _compile_method_call(self, expr: MethodCall) -> str:
         """Compile method calls like conf.substr(i, i)."""
