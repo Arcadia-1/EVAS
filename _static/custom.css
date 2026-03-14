@@ -148,3 +148,6 @@ tr:hover td { background: var(--color-background-secondary); }
     opacity: 0.8;
 }
 .lang-switch:hover { opacity: 1; }
+
+/* ⚠️ TEMP TEST — remove after confirming deploy works */
+body { background-color: #ff4444 !important; }
