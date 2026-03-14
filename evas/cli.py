@@ -2,24 +2,20 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
 
 
 def _get_examples_root() -> Path:
-    """Return the path to the bundled examples directory."""
+    """Return the bundled examples directory."""
     try:
         from importlib.resources import files
-        pkg = files("evas.examples")
-        # On Python 3.9-3.10 with zip-safe=false, this returns a real Path
-        p = Path(str(pkg))
+        p = Path(str(files("evas.examples")))
         if p.is_dir():
             return p
     except Exception:
         pass
-    # Fallback: locate relative to this file (editable installs)
     return Path(__file__).parent / "examples"
 
 
@@ -31,6 +27,24 @@ def _list_examples() -> list[str]:
         d.name for d in root.iterdir()
         if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
     )
+
+
+def _pick_scs(dst: Path, name: str, tb: str | None) -> Path | None:
+    """Return the .scs file to simulate, or None on error."""
+    if tb:
+        scs_file = dst / tb
+        if not scs_file.exists():
+            print(f"Error: testbench '{tb}' not found in {dst}", file=sys.stderr)
+            return None
+        return scs_file
+    preferred = dst / f"tb_{name}.scs"
+    if preferred.exists():
+        return preferred
+    scs_files = sorted(dst.glob("*.scs"))
+    if not scs_files:
+        print(f"Error: no .scs testbench found in {dst}", file=sys.stderr)
+        return None
+    return scs_files[0]
 
 
 def cmd_list(_args: argparse.Namespace) -> int:
@@ -62,63 +76,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Available: {', '.join(available)}", file=sys.stderr)
         return 1
 
-    # Copy example files to <cwd>/<name>/
-    dst = Path.cwd() / name
+    # Copy example files to <cwd>/evas-run/<name>/
+    dst = Path.cwd() / "evas-run" / name
     dst.mkdir(parents=True, exist_ok=True)
-
     for f in src.iterdir():
         if f.is_file() and not f.name.startswith("_"):
             shutil.copy2(f, dst / f.name)
 
-    # Determine which .scs to run
-    if args.tb:
-        scs_file = dst / args.tb
-        if not scs_file.exists():
-            print(f"Error: testbench '{args.tb}' not found in {dst}", file=sys.stderr)
-            return 1
-    else:
-        # Prefer tb_<name>.scs; fall back to any single .scs
-        preferred = dst / f"tb_{name}.scs"
-        if preferred.exists():
-            scs_file = preferred
-        else:
-            scs_files = sorted(dst.glob("*.scs"))
-            if not scs_files:
-                print(f"Error: no .scs testbench found in {dst}", file=sys.stderr)
-                return 1
-            scs_file = scs_files[0]
-
-    output_dir = Path.cwd() / "output" / name
+    # Simulate directly — no subprocess, no env vars
+    output_dir = Path.cwd() / "evas-run" / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Running example '{name}': {scs_file.name} → {output_dir}")
-    env_backup = os.environ.get("EVAS_OUTPUT_DIR")
-    os.environ["EVAS_OUTPUT_DIR"] = str(output_dir)
-
-    try:
-        ok = evas_simulate(str(scs_file), output_dir=str(output_dir))
-    finally:
-        if env_backup is None:
-            os.environ.pop("EVAS_OUTPUT_DIR", None)
-        else:
-            os.environ["EVAS_OUTPUT_DIR"] = env_backup
-
-    if not ok:
+    scs_file = _pick_scs(dst, name, args.tb)
+    if scs_file is None:
         return 1
 
-    # Run analyze_<name>.py if present
-    analyze = dst / f"analyze_{name}.py"
-    if analyze.exists():
-        import subprocess
-        print(f"Running analysis: {analyze.name}")
-        result = subprocess.run(
-            [sys.executable, str(analyze)],
-            cwd=str(dst),
-            env={**os.environ, "EVAS_OUTPUT_DIR": str(output_dir)},
-        )
-        return result.returncode
-
-    return 0
+    print(f"Running example '{name}': {scs_file.name} → {output_dir}")
+    ok = evas_simulate(str(scs_file), output_dir=str(output_dir))
+    if ok:
+        print(f"Output: {output_dir}")
+    return 0 if ok else 1
 
 
 def main() -> None:

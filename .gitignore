@@ -39,8 +39,12 @@ htmlcov/
 *.tar.gz
 *.zip
 
+# Linter cache
+.ruff_cache/
+
 # Simulation output
 output/
+evas-run/
 
 # Test fixtures (local only)
 tests/tb/

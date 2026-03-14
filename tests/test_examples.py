@@ -11,7 +11,7 @@ import pytest
 
 from evas.netlist.runner import evas_simulate
 
-EXAMPLES = Path(__file__).parent.parent / "examples"
+EXAMPLES = Path(__file__).parent.parent / "evas" / "examples"
 
 
 # ---------------------------------------------------------------------------

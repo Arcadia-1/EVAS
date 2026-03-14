@@ -1,5 +1,5 @@
 # Configuration file for the Sphinx documentation builder.
-# Primary language: Simplified Chinese (zh_CN)
+# Secondary language: Simplified Chinese (zh_CN)
 import os
 import sys
 
@@ -27,10 +27,10 @@ html_theme = "furo"
 html_theme_options = {
     "source_repository": "https://github.com/Arcadia-1/EVAS/",
     "source_branch": "main",
-    "source_directory": "docs/",
+    "source_directory": "docs_zh/",
     "announcement": (
-        "📖 This page is in Chinese. "
-        "<a href='/en/'>Switch to English</a>"
+        "📖 本页为中文版。"
+        "<a href='/'>Switch to English / 切换到英文版</a>"
     ),
     "footer_icons": [
         {

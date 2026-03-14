@@ -18,16 +18,16 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[docs]"
 
-      # Build Chinese docs → root
-      - name: Build Chinese docs
-        run: sphinx-build -b html docs/ docs/_build/html
-
-      # Build English docs → /en/ subdirectory
+      # Build English docs → root
       - name: Build English docs
-        run: sphinx-build -b html docs_en/ docs/_build/html/en
+        run: sphinx-build -b html docs_en/ docs_en/_build/html
+
+      # Build Chinese docs → /zh/ subdirectory
+      - name: Build Chinese docs
+        run: sphinx-build -b html docs_zh/ docs_en/_build/html/zh
 
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/_build/html
+          publish_dir: docs_en/_build/html
           cname: evas.tokenzhang.com
