@@ -9,7 +9,7 @@ Expected:
   - out_p and out_n are always complementary at settled clock phases.
 """
 from pathlib import Path
-import numpy as np
+
 import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'cmp_strongarm'
