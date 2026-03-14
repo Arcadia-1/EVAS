@@ -8,18 +8,17 @@ Expected post-reset (t > 3ns):
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'lfsr'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    t_ns = df['time'].values * 1e9
-    dpn  = df['dpn'].values
-    vdd  = df[['rstb', 'clk', 'dpn']].max().max()
+    t_ns = data['time'] * 1e9
+    dpn  = data['dpn']
+    vdd = max(data[c].max() for c in ['rstb', 'clk', 'dpn'])
     vth  = vdd * 0.5
 
     post = t_ns > 3.0

@@ -3,33 +3,32 @@ import re
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-OUT = Path(__file__).parent.parent.parent / 'output' / 'cmp_offset_search'
+OUT = Path(__file__).parent.parent.parent / 'output' / 'comparator' / 'cmp_offset_search'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
     # CLK should reach 0.8V
-    if df['CLK'].max() < 0.7:
+    if data['CLK'].max() < 0.7:
         print("FAIL: CLK never reached VDD")
         failures += 1
 
     # VINP and VINN should exist and be near VCM=0.4V
     for sig in ['vinp_node', 'vinn_node']:
-        mean_v = df[sig].mean()
+        mean_v = data[sig].mean()
         if abs(mean_v - 0.4) > 0.15:
             print(f"FAIL: {sig} mean={mean_v:.3f}V, expected near 0.4V (VCM)")
             failures += 1
 
     # After convergence (last 20% of simulation), differential should converge
     # toward the comparator offset (~10mV for this testbench)
-    t = df['time'].values
+    t = data['time']
     late_mask = t > t[-1] * 0.7
     if late_mask.sum() > 5:
-        vdiff_late = (df['vinp_node'].values[late_mask] - df['vinn_node'].values[late_mask]) * 1e3
+        vdiff_late = (data['vinp_node'][late_mask] - data['vinn_node'][late_mask]) * 1e3
         final_diff = float(np.mean(vdiff_late))
         # Should converge to ~10mV offset; allow ±20mV tolerance
         if abs(final_diff - 10.0) > 20.0:

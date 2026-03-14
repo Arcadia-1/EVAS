@@ -5,7 +5,7 @@ All four circuits are validated against pre-computed expected values.
 """
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 
 BASE = Path(__file__).parent.parent.parent / 'output' / 'digital_basics'
 VTH  = 0.4   # VDD/2
@@ -16,10 +16,10 @@ def _high(v: float) -> bool:
     return v > VTH
 
 
-def _sample(df: pd.DataFrame, t_ns: float):
+def _sample(data, t_ns: float):
     """Return the row closest to t_ns nanoseconds."""
-    idx = (df['time'] * 1e9 - t_ns).abs().idxmin()
-    return df.iloc[idx]
+    idx = int(np.argmin(np.abs(data['time'] * 1e9 - t_ns)))
+    return data[idx]
 
 
 # ── AND gate ──────────────────────────────────────────────────────────────────
@@ -32,10 +32,10 @@ _AND_TRUTH = [
 ]
 
 def validate_and(out_dir: Path = BASE / 'and_gate') -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
     for t_ns, exp_a, exp_b, exp_y in _AND_TRUTH:
-        row = _sample(df, t_ns)
+        row = _sample(data, t_ns)
         got_y = _high(row['y'])
         if got_y != exp_y:
             print(f"FAIL AND @{t_ns}ns: A={int(exp_a)} B={int(exp_b)} "
@@ -55,10 +55,10 @@ _OR_TRUTH = [
 ]
 
 def validate_or(out_dir: Path = BASE / 'or_gate') -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
     for t_ns, exp_a, exp_b, exp_y in _OR_TRUTH:
-        row = _sample(df, t_ns)
+        row = _sample(data, t_ns)
         got_y = _high(row['y'])
         if got_y != exp_y:
             print(f"FAIL OR @{t_ns}ns: A={int(exp_a)} B={int(exp_b)} "
@@ -79,10 +79,10 @@ _NOT_TRUTH = [
 ]
 
 def validate_not(out_dir: Path = BASE / 'not_gate') -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
     for t_ns, exp_a, exp_y in _NOT_TRUTH:
-        row = _sample(df, t_ns)
+        row = _sample(data, t_ns)
         got_y = _high(row['y'])
         if got_y != exp_y:
             print(f"FAIL NOT @{t_ns}ns: A={int(exp_a)} "
@@ -110,10 +110,10 @@ _DFF_SEQ = [
 ]
 
 def validate_dff(out_dir: Path = BASE / 'dff_rst') -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
     for t_ns, exp_d, exp_rst, exp_q in _DFF_SEQ:
-        row = _sample(df, t_ns)
+        row = _sample(data, t_ns)
         got_q    = _high(row['q'])
         got_qbar = _high(row['qbar'])
         if got_q != exp_q:

@@ -10,7 +10,6 @@ Checkpoints (ones count -> vout):
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'dac_therm_16b'
 
@@ -25,20 +24,20 @@ _TOL = 0.1
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    t_ns = df['time'].values * 1e9
+    t_ns = data['time'] * 1e9
 
     for t_check, exp_ones, exp_vout in _CHECKPOINTS:
         idx = int(np.argmin(np.abs(t_ns - t_check)))
-        got_vout = float(df['vout'].iloc[idx])
+        got_vout = float(data['vout'][idx])
         if abs(got_vout - exp_vout) > _TOL:
             print(f"FAIL: at t={t_check}ns (ones={exp_ones}): vout={got_vout:.3f}V, expected {exp_vout:.3f}V")
             failures += 1
 
     # vout should be monotonically non-decreasing after reset
-    active = df['vout'].values[t_ns > 10.0]
+    active = data['vout'][t_ns > 10.0]
     diffs = np.diff(active)
     if np.any(diffs < -0.1):
         print("FAIL: vout decreased unexpectedly")

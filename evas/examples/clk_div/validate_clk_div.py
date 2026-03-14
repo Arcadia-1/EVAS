@@ -2,18 +2,22 @@
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'clk_div'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    # analyze_clk_div now writes ratio=4 results into the 'div4' subdirectory
+    csv_path = out_dir / 'div4' / 'tran.csv'
+    if not csv_path.exists():
+        # fall back to legacy flat layout
+        csv_path = out_dir / 'tran.csv'
+    data = np.genfromtxt(csv_path, delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    t = df['time'].values
-    clk_in  = df['clk_in'].values
-    clk_out = df['clk_out'].values
+    t = data['time']
+    clk_in  = data['clk_in']
+    clk_out = data['clk_out']
 
     # Both signals should reach VDD=0.9V
     if clk_in.max() < 0.8:

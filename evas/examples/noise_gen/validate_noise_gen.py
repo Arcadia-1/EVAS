@@ -2,7 +2,6 @@
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'noise_gen'
 
@@ -11,11 +10,11 @@ _SIGMA = 0.1
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    vin  = df['vin_i'].values
-    vout = df['vout_o'].values
+    vin  = data['vin_i']
+    vout = data['vout_o']
 
     # Input should be constant at 1.0V
     if np.abs(vin - _VIN_NOMINAL).max() > 0.01:
@@ -24,7 +23,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # Output mean should be close to vin (zero-mean noise)
     vout_mean = float(np.mean(vout))
-    if abs(vout_mean - _VIN_NOMINAL) > 3 * _SIGMA / np.sqrt(len(vout)):
+    if abs(vout_mean - _VIN_NOMINAL) > 3 * _SIGMA / np.sqrt(len(data)):
         # More lenient: just check it is within 5*sigma of expected
         if abs(vout_mean - _VIN_NOMINAL) > 5 * _SIGMA:
             print(f"FAIL: vout mean={vout_mean:.4f}V, expected ~{_VIN_NOMINAL}V")

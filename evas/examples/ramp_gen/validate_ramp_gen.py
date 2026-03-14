@@ -9,7 +9,6 @@ import re
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'ramp_gen'
 
@@ -19,21 +18,21 @@ _DIRECTION = 1
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    t_ns = df['time'].values * 1e9
+    t_ns = data['time'] * 1e9
 
     # Decode 12-bit code
     code_cols = [f'code_{i}' for i in range(12)]
-    available = [c for c in code_cols if c in df.columns]
+    available = [c for c in code_cols if c in list(data.dtype.names)]
     if not available:
         print("FAIL: no code_* columns found")
         return 1
 
-    ramp_code = np.zeros(len(df), dtype=int)
+    ramp_code = np.zeros(len(data), dtype=int)
     for i, col in enumerate(available):
-        ramp_code += ((df[col].values > 0.45).astype(int) << i)
+        ramp_code += ((data[col] > 0.45).astype(int) << i)
 
     # After startup (t > 400ns), code should be > 0
     active_mask = t_ns > 400.0

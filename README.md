@@ -49,8 +49,27 @@ evas run digital_basics --tb tb_not_gate.scs
 evas simulate path/to/tb.scs -o output/mydesign
 ```
 
-Output lands in `./evas-run/output/<name>/` (bundled) or the `-o` directory (custom).
-Each run produces `tran.csv` (waveforms), `tran.png` (plot), and `strobe.txt` (log messages).
+Output lands in `./output/<name>/` (bundled) or the `-o` directory (custom).
+Each run produces `tran.csv` (waveforms), one or more `.png` plots, and `strobe.txt` (log messages).
+
+## Bundled Examples
+
+| Name | Description |
+|------|-------------|
+| `clk_div` | Clock divider |
+| `clk_burst_gen` | Clock burst generator |
+| `lfsr` | Linear feedback shift register |
+| `noise_gen` | Noise signal generator |
+| `ramp_gen` | Ramp signal generator |
+| `edge_interval_timer` | Edge-interval timer |
+| `d2b_4b` | 4-bit thermometer-to-binary decoder |
+| `dac_binary_clk_4b` | 4-bit binary DAC (clocked) |
+| `dac_therm_16b` | 16-bit thermometer DAC |
+| `adc_dac_ideal_4b` | 4-bit ideal ADC + DAC with sample-hold |
+| `comparator` | StrongARM comparator + offset search algorithm |
+| `dwa_ptr_gen` | DWA pointer generator |
+| `sar_adc_dac_weighted_8b` | 8-bit weighted SAR ADC + DAC |
+| `digital_basics` | AND / OR / NOT gates, D flip-flop, inverter chain |
 
 ## Supported Verilog-A
 

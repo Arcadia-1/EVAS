@@ -1,29 +1,28 @@
 """Validate cmp_strongarm: clocked StrongARM comparator.
 
-Testbench: vinp=0.5V (const), vinn steps 0.3V→0.7V at t=5ns.
+Testbench: VCM=0.45V (VDD/2), diff=1mV (VINP=450.5mV, VINN=449.5mV), polarity swaps at 5ns.
 Clock: 1GHz, VDD=0.9V.
 
 Expected:
-  - Before vinn step (t < 4ns):  vinp > vinn  → out_p HIGH, out_n LOW
-  - After  vinn step (t > 6ns):  vinp < vinn  → out_p LOW,  out_n HIGH
-  - out_p and out_n are always complementary at settled clock phases.
+  - Before swap (t < 4ns):  vinp > vinn (+1mV) → out_p HIGH, out_n LOW
+  - After  swap (t > 6ns):  vinp < vinn (-1mV) → out_p LOW,  out_n HIGH
 """
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 
-OUT = Path(__file__).parent.parent.parent / 'output' / 'cmp_strongarm'
+OUT = Path(__file__).parent.parent.parent / 'output' / 'comparator' / 'cmp_strongarm'
 
 _VTH = 0.45   # half of VDD=0.9
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    t_ns   = df['time'].values * 1e9
-    out_p  = df['out_p'].values
-    out_n  = df['out_n'].values
+    t_ns   = data['time'] * 1e9
+    out_p  = data['out_p']
+    out_n  = data['out_n']
 
     # Both outputs must toggle (non-trivial comparator decisions)
     if out_p.max() - out_p.min() < _VTH:

@@ -18,7 +18,6 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
-import pandas as pd
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -49,11 +48,11 @@ def validate_csv(out_dir=None):
         out_dir = OUT / 'sine'
     out_dir = Path(out_dir)
 
-    df    = pd.read_csv(out_dir / 'tran.csv')
-    post  = df['time'].values > RST_END_SINE_S
-    code  = df['dout_code'].values.astype(float)[post]
-    vout  = df['vout'].values[post]
-    vin   = df['vin'].values[post]
+    data  = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    post  = data['time'] > RST_END_SINE_S
+    code  = data['dout_code'].astype(float)[post]
+    vout  = data['vout'][post]
+    vin   = data['vin'][post]
 
     failures = 0
 
@@ -114,14 +113,14 @@ if __name__ == '__main__':
     print(f"Validation: {failures} failure(s)")
 
     # ── Figure 1: Ramp ────────────────────────────────────────────────────────
-    df_r  = pd.read_csv(OUT_RAMP / 'tran.csv')
-    t_ns  = df_r['time'].values * 1e9
+    df_r  = np.genfromtxt(OUT_RAMP / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    t_ns  = df_r['time'] * 1e9
     post  = t_ns > RST_END_RAMP_NS
     t_r   = t_ns[post]
-    clk_r = df_r['clk'].values[post]
-    vin_r = df_r['vin'].values[post]
-    vout_r = df_r['vout'].values[post]
-    code_r = df_r['dout_code'].values.astype(float)[post]
+    clk_r = df_r['clk'][post]
+    vin_r = df_r['vin'][post]
+    vout_r = df_r['vout'][post]
+    code_r = df_r['dout_code'].astype(float)[post]
 
     fig1, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True,
                               gridspec_kw={'height_ratios': [1, 1.5, 2]})
@@ -161,14 +160,14 @@ if __name__ == '__main__':
     print(f"Saved: {p1}")
 
     # ── Figure 2: Sine (first 3 post-reset cycles) ────────────────────────────
-    df_s   = pd.read_csv(OUT_SINE / 'tran.csv')
-    t_ns   = df_s['time'].values * 1e9
+    df_s   = np.genfromtxt(OUT_SINE / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    t_ns   = df_s['time'] * 1e9
     win3   = t_ns > RST_END_SINE_NS
     t_w    = t_ns[win3]
-    vin_w  = df_s['vin'].values[win3]
-    vinsh_w = df_s['vin_sh'].values[win3]
-    vout_w = df_s['vout'].values[win3]
-    code_w = df_s['dout_code'].values.astype(float)[win3]
+    vin_w  = df_s['vin'][win3]
+    vinsh_w = df_s['vin_sh'][win3]
+    vout_w = df_s['vout'][win3]
+    code_w = df_s['dout_code'].astype(float)[win3]
 
     fig2, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True,
                               gridspec_kw={'height_ratios': [2, 1.5, 2]})
@@ -210,14 +209,14 @@ if __name__ == '__main__':
     print(f"Saved: {p2}")
 
     # -- Figure 3: Sine 1000 samples/cycle (1 post-reset cycle) ---------------
-    df_s3    = pd.read_csv(OUT_SINE1000 / 'tran.csv')
-    t_ns     = df_s3['time'].values * 1e9
+    df_s3    = np.genfromtxt(OUT_SINE1000 / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    t_ns     = df_s3['time'] * 1e9
     win1     = t_ns > RST_END_SINE_NS
     t_w3     = t_ns[win1]
-    vin_w3   = df_s3['vin'].values[win1]
-    vinsh_w3 = df_s3['vin_sh'].values[win1]
-    vout_w3  = df_s3['vout'].values[win1]
-    code_w3  = df_s3['dout_code'].values.astype(float)[win1]
+    vin_w3   = df_s3['vin'][win1]
+    vinsh_w3 = df_s3['vin_sh'][win1]
+    vout_w3  = df_s3['vout'][win1]
+    code_w3  = df_s3['dout_code'].astype(float)[win1]
 
     fig3, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True,
                               gridspec_kw={'height_ratios': [2, 1.5, 2]})

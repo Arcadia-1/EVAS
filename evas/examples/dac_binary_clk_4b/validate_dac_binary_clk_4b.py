@@ -11,28 +11,27 @@ Expected:
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'dac_binary_clk_4b'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
-    vdd = df[['din3', 'din2', 'din1', 'din0', 'aout']].max().max()
+    vdd = max(data[c].max() for c in ['din3', 'din2', 'din1', 'din0', 'aout'])
     lsb = vdd / 16.0
 
     # Decode input code
     thr = vdd * 0.5
     code = (
-        (df['din3'].values > thr).astype(int) * 8 +
-        (df['din2'].values > thr).astype(int) * 4 +
-        (df['din1'].values > thr).astype(int) * 2 +
-        (df['din0'].values > thr).astype(int) * 1
+        (data['din3'] > thr).astype(int) * 8 +
+        (data['din2'] > thr).astype(int) * 4 +
+        (data['din1'] > thr).astype(int) * 2 +
+        (data['din0'] > thr).astype(int) * 1
     )
 
-    aout = df['aout'].values
+    aout = data['aout']
     levels = {}
     for c in range(16):
         mask = code == c

@@ -16,7 +16,6 @@ import numpy as np
 matplotlib.use('Agg')
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-import pandas as pd
 from matplotlib.colors import ListedColormap
 
 from evas.netlist.runner import evas_simulate
@@ -89,8 +88,8 @@ for code in CODES:
         print("FAILED")
         continue
 
-    df   = pd.read_csv(sim_out / 'tran.csv')
-    last = df.iloc[-1]
+    df   = np.genfromtxt(sim_out / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    last = df[-1]
     rows[code] = last
     print(f"done  ({len(df)} rows)")
 
@@ -99,7 +98,10 @@ VDD    = 0.9
 THRESH = VDD * 0.5
 
 def bit(row, col):
-    v = row.get(col, 0.0)
+    try:
+        v = row[col]
+    except (ValueError, KeyError):
+        v = 0.0
     return 1 if float(v) > THRESH else 0
 
 bin_mat      = np.array([[bit(rows[n], f'bin_o_{i}')      for i in range(4)]  for n in CODES])

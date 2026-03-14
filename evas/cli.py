@@ -83,8 +83,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         if f.is_file() and not f.name.startswith("_"):
             shutil.copy2(f, dst / f.name)
 
+    # Resolve cross-example ahdl_include paths (e.g. "../other/file.va")
+    # and copy the referenced files so relative paths work from dst.
+    import re
+    _ahdl_re = re.compile(r'ahdl_include\s+"([^"]+)"')
+    for scs in dst.glob("*.scs"):
+        for m in _ahdl_re.finditer(scs.read_text(encoding="utf-8")):
+            inc_path = Path(m.group(1))
+            if inc_path.parts[0] == "..":
+                resolved = (src / inc_path).resolve()
+                target = (dst / inc_path).resolve()
+                if resolved.exists() and not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(resolved, target)
+
     # Simulate directly — no subprocess, no env vars
-    output_dir = Path.cwd() / "evas-run" / "output" / name
+    output_dir = Path.cwd() / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scs_file = _pick_scs(dst, name, args.tb)
@@ -93,9 +107,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"Running example '{name}': {scs_file.name} → {output_dir}")
     ok = evas_simulate(str(scs_file), output_dir=str(output_dir))
-    if ok:
-        print(f"Output: {output_dir}")
-    return 0 if ok else 1
+    if not ok:
+        return 1
+
+    print(f"Output: {output_dir}")
+
+    # Run analyze scripts if present
+    import importlib.util
+    for analyze_script in sorted(src.glob("analyze_*.py")):
+        spec = importlib.util.spec_from_file_location(f"_analyze_{analyze_script.stem}", str(analyze_script))
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+            mod.analyze(output_dir)
+        except Exception as e:
+            print(f"Warning: {analyze_script.name} failed: {e}")
+
+    return 0
 
 
 def main() -> None:

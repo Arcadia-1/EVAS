@@ -23,7 +23,6 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
-import pandas as pd
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -85,13 +84,13 @@ def validate_csv(out_dir=None):
         out_dir = OUT
     out_dir = Path(out_dir)
 
-    df   = pd.read_csv(out_dir / 'tran.csv')
-    t_us = df['time'].values * 1e6
+    df   = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    t_us = df['time'] * 1e6
 
     # Exclude reset period
     post = t_us > T_RST_US
-    code = df['dout_code'].values[post].astype(float)
-    vout = df['vout'].values[post].astype(float)
+    code = df['dout_code'][post].astype(float)
+    vout = df['vout'][post].astype(float)
 
     failures = 0
 
@@ -127,7 +126,7 @@ def validate_csv(out_dir=None):
     # ~1.6 LSBs per clock sample near the zero crossing (fin=1 MHz, fs=500 MHz),
     # producing alternating over/under-count artefacts that do not reflect actual
     # ADC nonlinearity.
-    vin_post = df['vin'].values[post]
+    vin_post = df['vin'][post]
     _, dnl, _ = compute_dnl_inl(vin_post, code)
 
     if failures == 0:
@@ -148,11 +147,11 @@ if __name__ == '__main__':
     failures = validate_csv(OUT)
     print(f"Validation: {failures} failure(s)")
 
-    df   = pd.read_csv(OUT / 'tran.csv')
-    t_us = df['time'].values * 1e6
-    vin  = df['vin'].values
-    vout = df['vout'].values
-    code = df['dout_code'].values.astype(float)
+    df   = np.genfromtxt(OUT / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    t_us = df['time'] * 1e6
+    vin  = df['vin']
+    vout = df['vout']
+    code = df['dout_code'].astype(float)
 
     # Post-reset mask for figures: exclude reset + first SAR conversion.
     # Reset releases at 20 ns; first valid code appears after 8 clock cycles

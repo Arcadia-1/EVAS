@@ -2,36 +2,35 @@
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'clk_burst_gen'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
     failures = 0
 
     # CLK should reach VDD=0.9V
-    if df['CLK'].max() < 0.8:
+    if data['CLK'].max() < 0.8:
         print("FAIL: CLK never reached VDD")
         failures += 1
 
     # RST_N should be high for most of simulation
-    if df['RST_N'].max() < 0.8:
+    if data['RST_N'].max() < 0.8:
         print("FAIL: RST_N never went high")
         failures += 1
 
     # CLK_OUT should be present (max > 0.8)
-    if df['CLK_OUT'].max() < 0.8:
+    if data['CLK_OUT'].max() < 0.8:
         print("FAIL: CLK_OUT never went high")
         failures += 1
 
     # CLK_OUT should be 0 for most of the time (only 2 of 8 cycles are high)
     # After reset is active, fraction of time CLK_OUT is high should be ~2/8 = 25%
-    t_ns = df['time'].values * 1e9
+    t_ns = data['time'] * 1e9
     active_mask = t_ns > 200.0  # skip initial transient and reset
     if active_mask.sum() > 10:
-        clk_out_active = df['CLK_OUT'].values[active_mask]
+        clk_out_active = data['CLK_OUT'][active_mask]
         frac_high = np.mean(clk_out_active > 0.45)
         # Expect roughly 25% high (2/8 cycles * 50% duty = 12.5%), allow generous range
         if frac_high > 0.5:

@@ -6,7 +6,7 @@ Each test simulates the example and runs the corresponding validate_*.py checks.
 import importlib.util
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 import pytest
 
 from evas.netlist.runner import evas_simulate
@@ -18,15 +18,15 @@ EXAMPLES = Path(__file__).parent.parent / "evas" / "examples"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _simulate(tb_rel: str, tmp_path: Path) -> pd.DataFrame:
-    """Run simulation and return the resulting tran.csv as a DataFrame."""
+def _simulate(tb_rel: str, tmp_path: Path):
+    """Run simulation and return the resulting tran.csv as a numpy structured array."""
     tb = EXAMPLES / tb_rel
     assert tb.exists(), f"Testbench not found: {tb}"
     ok = evas_simulate(str(tb), output_dir=str(tmp_path))
     assert ok, f"evas_simulate returned False for {tb.name}"
     csv = tmp_path / "tran.csv"
     assert csv.exists(), "tran.csv was not created"
-    return pd.read_csv(csv)
+    return np.genfromtxt(csv, delimiter=',', names=True, dtype=None, encoding='utf-8')
 
 
 def _load_validate(tb_dir_name: str):

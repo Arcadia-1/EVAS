@@ -13,7 +13,7 @@ Also verifies the $strobe INIT line.
 import re
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'd2b_4b'
 
@@ -27,14 +27,14 @@ def _high(v: float) -> bool:
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
-    df = pd.read_csv(out_dir / 'tran.csv')
-    last = df.iloc[-1]
+    data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
+    last = data[-1]
     failures = 0
     n = _TRIM_CODE  # 9
 
     # --- bin_o: binary active-high (9 = 0b1001) ---
     bin_cols = [f'bin_o_{i}' for i in range(4)]
-    missing = [c for c in bin_cols if c not in df.columns]
+    missing = [c for c in bin_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1
@@ -47,7 +47,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # --- bin_n_o: binary active-low (inverted) ---
     bin_n_cols = [f'bin_n_o_{i}' for i in range(4)]
-    missing = [c for c in bin_n_cols if c not in df.columns]
+    missing = [c for c in bin_n_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1
@@ -60,7 +60,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # --- onehot_o: one-hot active-high (only bit 9 high) ---
     onehot_cols = [f'onehot_o_{i}' for i in range(16)]
-    missing = [c for c in onehot_cols if c not in df.columns]
+    missing = [c for c in onehot_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1
@@ -74,7 +74,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # --- onehot_n_o: one-cold active-low (only bit 9 low) ---
     onehot_n_cols = [f'onehot_n_o_{i}' for i in range(16)]
-    missing = [c for c in onehot_n_cols if c not in df.columns]
+    missing = [c for c in onehot_n_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1
@@ -88,7 +88,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # --- therm_o: thermometer active-high (bits 0..8 high) ---
     therm_cols = [f'therm_o_{i}' for i in range(15)]
-    missing = [c for c in therm_cols if c not in df.columns]
+    missing = [c for c in therm_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1
@@ -106,7 +106,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # --- therm_n_o: thermometer active-low (bits 0..8 low) ---
     therm_n_cols = [f'therm_n_o_{i}' for i in range(15)]
-    missing = [c for c in therm_n_cols if c not in df.columns]
+    missing = [c for c in therm_n_cols if c not in list(data.dtype.names)]
     if missing:
         print(f"FAIL: missing columns: {missing}")
         return 1

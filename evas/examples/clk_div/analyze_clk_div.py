@@ -1,8 +1,9 @@
-"""Analyze clk_div: clock divider by ratio=4."""
+"""Analyze clk_div: clock divider — one plot per ratio."""
+import os
 from pathlib import Path
 
 import matplotlib
-import pandas as pd
+import numpy as np
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -10,29 +11,77 @@ import matplotlib.pyplot as plt
 from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent
-OUT  = HERE.parent.parent / 'output' / 'clk_div'
+_DEFAULT_OUT = Path(os.environ.get('EVAS_OUTPUT_DIR') or
+                    (HERE.parent.parent / 'output' / 'clk_div'))
 
-# 1. Simulate
-evas_simulate(str(HERE / 'tb_clk_div.scs'), output_dir=str(OUT))
+_RATIOS = [
+    (2, 'div2', 'tb_clk_div_div2.scs'),
+    (4, 'div4', 'tb_clk_div.scs'),
+    (8, 'div8', 'tb_clk_div_div8.scs'),
+]
 
-# 2. Load results
-df = pd.read_csv(OUT / 'tran.csv')
-t  = df['time'].values * 1e9  # -> ns
+_COLORS = ['#e07b39', '#2ca02c', '#9467bd']
 
-# 3. Plot
-signals = ['clk_in', 'clk_out']
-fig, axes = plt.subplots(len(signals), 1, figsize=(12, 5), sharex=True)
 
-for i, sig in enumerate(signals):
-    axes[i].plot(t, df[sig], linewidth=1.0, drawstyle='steps-post')
-    axes[i].set_ylabel(sig)
-    axes[i].set_ylim(-df[sig].max() * 0.1, df[sig].max() * 1.2)
-    axes[i].grid(True, alpha=0.3)
-    if i == 0:
-        axes[i].set_title('clk_div (ratio=4: output period = 4x input period)')
+def _measure_period_ns(t_ns: np.ndarray, sig: np.ndarray, thresh: float = 0.45) -> float:
+    above = sig > thresh
+    edges = np.where(np.diff(above.astype(int)) > 0)[0]
+    if len(edges) < 2:
+        return float('nan')
+    return float(np.mean(np.diff(t_ns[edges])))
 
-axes[-1].set_xlabel('Time (ns)')
-fig.tight_layout()
-fig.savefig(str(OUT / 'analyze_clk_div.png'), dpi=150, bbox_inches='tight')
-plt.close(fig)
-print(f"Plot saved: {OUT / 'analyze_clk_div.png'}")
+
+def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run all three simulations
+    for ratio, subdir, tb_file in _RATIOS:
+        sim_out = out_dir / subdir
+        sim_out.mkdir(parents=True, exist_ok=True)
+        evas_simulate(str(HERE / tb_file), output_dir=str(sim_out))
+
+    # One plot per ratio
+    for (ratio, subdir, _), color in zip(_RATIOS, _COLORS):
+        data = np.genfromtxt(
+            out_dir / subdir / 'tran.csv',
+            delimiter=',', names=True, dtype=None, encoding='utf-8',
+        )
+        t_ns   = data['time'] * 1e9
+        t_s    = data['time'][-1]           # simulation duration in seconds
+        clk_in  = data['clk_in']
+        clk_out = data['clk_out']
+        vdd    = clk_in.max()
+        ylim   = (-0.1 * vdd, 1.2 * vdd)
+
+        period_out_ns = _measure_period_ns(t_ns, clk_out)
+        period_in_ns  = _measure_period_ns(t_ns, clk_in)
+
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+
+        ax0.plot(t_ns, clk_in, linewidth=1.0, drawstyle='steps-post', color='steelblue')
+        ax0.set_ylabel('clk_in')
+        ax0.set_ylim(ylim)
+        ax0.grid(True, alpha=0.3)
+
+        ax1.plot(t_ns, clk_out, linewidth=1.0, drawstyle='steps-post', color=color)
+        ax1.set_ylabel('clk_out')
+        ax1.set_ylim(ylim)
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlabel('Time (ns)')
+
+        fig.suptitle(
+            f'clk_div  ÷{ratio}  —  '
+            f'in {period_in_ns:.0f} ns / out {period_out_ns:.0f} ns  |  '
+            f'sim duration: {t_s:.2e} s',
+            fontsize=10,
+        )
+        fig.tight_layout()
+
+        out_path = out_dir / f'clk_div_div{ratio}.png'
+        fig.savefig(str(out_path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Plot saved: {out_path}")
+
+
+if __name__ == "__main__":
+    analyze()

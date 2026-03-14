@@ -1,0 +1,29 @@
+// cmp_delay: delay inversely proportional to |Vdiff| (metastability model)
+// Four 20ns phases with decreasing |diff|: 10mV, 2mV, 1mV, 0.5mV
+// VCM=0.45V (VDD/2=0.9V/2), all positive polarity (vinp > vinn)
+simulator lang=spectre
+global 0
+
+ahdl_include "cmp_delay.va"
+
+// Power supplies
+Vvdd (vdd 0) vsource dc=0.9 type=dc
+Vgnd (gnd 0) vsource dc=0.0 type=dc
+
+// Clock: 50MHz (20ns period), 10ns high
+Vclk (clk 0) vsource type=pulse val0=0 val1=0.9 period=20n delay=1n \
+        rise=100p fall=100p width=9n
+
+// Differential input: VCM=0.45V, 4 phases with decreasing |diff|
+// Phase 1 ( 0-20ns): diff=+10mV  (VINP=455mV, VINN=445mV)
+// Phase 2 (20-40ns): diff=+2mV   (VINP=451mV, VINN=449mV)
+// Phase 3 (40-60ns): diff=+1mV   (VINP=450.5mV, VINN=449.5mV)
+// Phase 4 (60-80ns): diff=+0.5mV (VINP=450.25mV, VINN=449.75mV)
+Vvinp (vinp 0) vsource type=pwl wave=[0 0.455 19.9e-9 0.455 20e-9 0.451 39.9e-9 0.451 40e-9 0.4505 59.9e-9 0.4505 60e-9 0.45025 80e-9 0.45025]
+Vvinn (vinn 0) vsource type=pwl wave=[0 0.445 19.9e-9 0.445 20e-9 0.449 39.9e-9 0.449 40e-9 0.4495 59.9e-9 0.4495 60e-9 0.44975 80e-9 0.44975]
+
+// DUT (port order: CLK VINN VINP DCMPN DCMPP LP LM VSS VDD)
+XDUT (clk vinn vinp out_n out_p lp_int lm_int gnd vdd) cmp_delay
+
+tran tran stop=80n maxstep=50p
+save clk:2e vinp:6f vinn:6f out_p:2e out_n:2e

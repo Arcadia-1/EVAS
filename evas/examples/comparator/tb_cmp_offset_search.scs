@@ -3,7 +3,7 @@ simulator lang=spectre
 global 0
 
 ahdl_include "cmp_offset_search.va"
-ahdl_include "../cmp_strongarm/cmp_strongarm.va"
+ahdl_include "cmp_strongarm.va"
 
 // Supply rails
 Vvdd (vdd 0) vsource type=dc dc=0.8
