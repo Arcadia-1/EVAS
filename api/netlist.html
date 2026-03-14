@@ -1,12 +1,12 @@
 <!doctype html>
-<html class="no-js" lang="zh-CN" data-content_root="../">
+<html class="no-js" lang="en" data-content_root="../">
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="索引" href="../genindex.html"><link rel="search" title="搜索" href="../search.html"><link rel="next" title="更新日志" href="../changelog.html"><link rel="prev" title="仿真引擎（simulator）" href="simulator.html">
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Changelog" href="../changelog.html"><link rel="prev" title="Simulator" href="simulator.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>网表解析（netlist） - EVAS 0.1.0 文档</title>
+        <title>Netlist - EVAS 0.1.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -154,7 +154,7 @@
 
 <div class="announcement">
   <aside class="announcement-content">
-     📖 This page is in Chinese. <a href='/en/'>Switch to English</a> 
+     📖 This page is in English. <a href='/zh/'>切换到中文版 / Switch to Chinese</a> 
   </aside>
 </div>
 
@@ -166,7 +166,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../index.html"><div class="brand">EVAS 0.1.0 文档</div></a>
+      <a href="../index.html"><div class="brand">EVAS 0.1.0 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -177,7 +177,7 @@
           <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
         </button>
       </div>
-      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
         <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
       </label>
     </div>
@@ -187,43 +187,37 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.1.0 文档</span>
+  <span class="sidebar-brand-text">EVAS 0.1.0 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
-  <input class="sidebar-search" placeholder="搜索" name="q" aria-label="搜索">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
   <input type="hidden" name="check_keywords" value="yes">
   <input type="hidden" name="area" value="default">
 </form>
 <div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
-  <p class="caption" role="heading"><span class="caption-text">快速上手</span></p>
+  <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../installation.html">安装</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">快速入门</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cli.html">CLI 参考</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cli.html">CLI Reference</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">示例</span></p>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../examples/index.html">示例目录</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/index.html">Examples Catalog</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">API 参考</span></p>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul class="current">
-<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">API 参考</a><input aria-label="Toggle navigation of API 参考" checked="" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
-<li class="toctree-l2 has-children"><a class="reference internal" href="compiler.html">编译器（compiler）</a><input aria-label="Toggle navigation of 编译器（compiler）" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="simple">
-</ul>
-</li>
-<li class="toctree-l2 has-children"><a class="reference internal" href="simulator.html">仿真引擎（simulator）</a><input aria-label="Toggle navigation of 仿真引擎（simulator）" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="simple">
-</ul>
-</li>
-<li class="toctree-l2 current has-children current-page"><a class="current reference internal" href="#">网表解析（netlist）</a><input aria-label="Toggle navigation of 网表解析（netlist）" checked="" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="simple">
+<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">API Reference</a><input aria-label="Toggle navigation of API Reference" checked="" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="compiler.html">Compiler</a></li>
+<li class="toctree-l2"><a class="reference internal" href="simulator.html">Simulator</a></li>
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Netlist</a></li>
 </ul>
 </li>
 </ul>
-</li>
-</ul>
-<p class="caption" role="heading"><span class="caption-text">项目</span></p>
+<p class="caption" role="heading"><span class="caption-text">Project</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../changelog.html">更新日志</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../changelog.html#changelog">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../changelog.html#id1">Changelog</a></li>
 </ul>
 
 </div>
@@ -244,12 +238,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/blob/main/docs/api/netlist.rst?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/blob/main/docs_en/api/netlist.rst?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/edit/main/docs/api/netlist.rst" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/edit/main/docs_en/api/netlist.rst" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -261,20 +255,15 @@
               <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
             </button>
           </div>
-          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
             <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
           </label>
         </div>
         <article role="main" id="furo-main-content">
           <section id="netlist">
-<h1>网表解析（netlist）<a class="headerlink" href="#netlist" title="链接到此标题。">¶</a></h1>
-<p>Spectre .scs 网表解析器与仿真编排器。</p>
-<section id="module-evas.netlist">
-<span id="id1"></span><h2>子模块<a class="headerlink" href="#module-evas.netlist" title="链接到此标题。">¶</a></h2>
-<div class="toctree-wrapper compound">
-</div>
-</section>
-</section>
+<h1>Netlist<a class="headerlink" href="#netlist" title="Link to this heading">¶</a></h1>
+<p>Spectre .scs netlist parser and simulation orchestrator.</p>
+<span class="target" id="module-evas.netlist"></span></section>
 
         </article>
       </div>
@@ -286,7 +275,7 @@
                 <div class="context">
                   <span>Next</span>
                 </div>
-                <div class="title">更新日志</div>
+                <div class="title">Changelog</div>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>
@@ -297,7 +286,7 @@
                   <span>Previous</span>
                 </div>
                 
-                <div class="title">仿真引擎（simulator）</div>
+                <div class="title">Simulator</div>
                 
               </div>
             </a>
@@ -322,35 +311,15 @@
         
       </footer>
     </div>
-    <aside class="toc-drawer">
+    <aside class="toc-drawer no-toc">
       
-      
-      <div class="toc-sticky toc-scroll">
-        <div class="toc-title-container">
-          <span class="toc-title">
-            On this page
-          </span>
-        </div>
-        <div class="toc-tree-container">
-          <div class="toc-tree">
-            <ul>
-<li><a class="reference internal" href="#">网表解析（netlist）</a><ul>
-<li><a class="reference internal" href="#module-evas.netlist">子模块</a></li>
-</ul>
-</li>
-</ul>
-
-          </div>
-        </div>
-      </div>
       
       
     </aside>
   </div>
-</div><script src="../_static/documentation_options.js?v=d786bb5c"></script>
+</div><script src="../_static/documentation_options.js?v=01f34227"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
-    <script src="../_static/translations.js?v=540d3cec"></script>
     </body>
 </html>

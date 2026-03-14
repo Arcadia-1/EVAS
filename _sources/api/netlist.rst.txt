@@ -1,14 +1,7 @@
-网表解析（netlist）
-===================
+Netlist
+=======
 
-Spectre .scs 网表解析器与仿真编排器。
+Spectre .scs netlist parser and simulation orchestrator.
 
 .. automodule:: evas.netlist
    :members:
-
-子模块
-------
-
-.. toctree::
-   :maxdepth: 1
-

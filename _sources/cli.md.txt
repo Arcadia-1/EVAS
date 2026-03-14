@@ -1,18 +1,18 @@
-# CLI 参考
+# CLI Reference
 
-EVAS 提供三个子命令：
+EVAS provides three subcommands:
 
 ## `evas list`
 
-列出所有内置示例名称。
+Print all bundled example names.
 
 ```bash
 evas list
 ```
 
-## `evas run <名称>`
+## `evas run <name>`
 
-将指定内置示例复制到当前目录并运行仿真。
+Copy a bundled example to the current directory and simulate it.
 
 ```bash
 evas run clk_div
@@ -20,28 +20,31 @@ evas run digital_basics
 evas run sar_adc_dac_weighted_8b
 ```
 
-对于包含多个测试台的示例（如 `adc_dac_ideal_4b`、`digital_basics`），
-默认运行 `tb_<名称>.scs`，可用 `--tb` 指定其他测试台：
+Multi-testbench examples (e.g. `adc_dac_ideal_4b`, `digital_basics`) use
+`tb_<name>.scs` by default. Use `--tb` to select a different testbench:
 
 ```bash
 evas run adc_dac_ideal_4b --tb tb_adc_dac_ideal_4b_sine.scs
 evas run digital_basics --tb tb_not_gate.scs
 ```
 
-输出保存至 `./output/<名称>/`。若目录内存在 `analyze_<名称>.py` 分析脚本，
-则在仿真完成后自动执行（通过 `EVAS_OUTPUT_DIR` 环境变量定位输出目录）。
+Output goes to `./output/<name>/`. Analysis plots (if an `analyze_<name>.py`
+script is present) are saved there as well.
+
+**Environment variable:** `EVAS_OUTPUT_DIR` is set automatically for the
+analysis script so it can locate simulation results.
 
 ## `evas simulate <file.scs>`
 
-直接仿真任意 Spectre 网表文件。
+Simulate an arbitrary Spectre netlist file directly.
 
 ```bash
 evas simulate path/to/tb_mydesign.scs -o output/mydesign -log sim.log
 ```
 
-| 选项 | 默认值 | 描述 |
-|------|--------|------|
-| `-o / --output` | `./output` | 输出目录 |
-| `-log` | *（无）* | 日志文件路径 |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o / --output` | `./output` | Output directory |
+| `-log` | *(none)* | Path for a log file |
 
-成功返回退出码 `0`，仿真出错返回 `1`。
+Exit code is `0` on success, `1` on simulation error.

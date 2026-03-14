@@ -1,17 +1,17 @@
-# 安装
+# Installation
 
-## 系统要求
+## Requirements
 
-- Python 3.9 及以上
-- NumPy、Matplotlib、Pandas（随 EVAS 自动安装）
+- Python 3.9 or later
+- NumPy, Matplotlib, Pandas (installed automatically)
 
-## 从 PyPI 安装
+## From PyPI
 
 ```bash
 pip install evas-sim
 ```
 
-## 从源码安装
+## From Source
 
 ```bash
 git clone https://github.com/Arcadia-1/EVAS.git
@@ -19,10 +19,10 @@ cd EVAS
 pip install -e ".[dev]"
 ```
 
-## 验证安装
+## Verify
 
 ```bash
 evas list
 ```
 
-若安装成功，将列出所有内置示例名称。
+You should see all 15 bundled example names printed.
