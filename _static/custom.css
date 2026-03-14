@@ -1,0 +1,12 @@
+/* Language switcher button */
+.lang-switch {
+    display: inline-block;
+    padding: 4px 12px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    font-size: 0.85em;
+    text-decoration: none;
+    margin: 0 4px;
+    opacity: 0.75;
+}
+.lang-switch:hover { opacity: 1; text-decoration: none; }
