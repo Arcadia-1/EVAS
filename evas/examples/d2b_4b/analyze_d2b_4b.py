@@ -6,8 +6,8 @@ import matplotlib
 import numpy as np
 
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 
 from evas.netlist.runner import evas_simulate
 
@@ -34,7 +34,6 @@ def _draw_bus(ax, bits_lsb, n_valid, label, color_hi, color_lo='#dde5f0',
     n_valid: number of meaningful bits (rest shown as inactive).
     Display order: MSB on left (column 0 = bit n_valid-1).
     """
-    CELL = 1.0
     # Reverse to MSB-first
     bits_msb = bits_lsb[:n_valid][::-1]
 
