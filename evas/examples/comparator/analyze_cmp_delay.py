@@ -14,10 +14,10 @@ HERE = Path(__file__).parent
 _DEFAULT_BASE = HERE.parent.parent.parent / 'output' / 'comparator'
 
 _PHASES = [
-    (0,  10,  10.0),
-    (10, 20,   1.0),
-    (20, 30,   0.1),
-    (30, 40,   0.01),
+    (0,   4,  10.0),
+    (4,   8,   1.0),
+    (8,  12,   0.1),
+    (12, 16,   0.01),
 ]
 _EXPECTED_DELAYS_PS = [40.0, 50.0, 60.0, 70.0]
 

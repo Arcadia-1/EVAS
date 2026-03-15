@@ -48,3 +48,4 @@ evas-run/
 
 # Test fixtures (local only)
 tests/tb/
+reference/
