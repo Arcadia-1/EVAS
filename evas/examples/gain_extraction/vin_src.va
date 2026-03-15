@@ -17,11 +17,12 @@ module vin_src(
     output electrical VOUT_N
 );
 
-parameter real vdd   = 0.9;
-parameter real vth   = 0.45;
-parameter real ampl  = 0.15;
-parameter real freq  = 300e3;
-parameter real sigma = 0.01;
+parameter real    vdd   = 0.9;
+parameter real    vth   = 0.45;
+parameter real    ampl  = 0.15;
+parameter real    freq  = 300e3;
+parameter real    sigma = 0.01;
+parameter integer SEED  = 0;
 
 real vp, vn;
 
@@ -36,7 +37,7 @@ analog begin
     @(cross(V(CLK) - vth, +1)) begin
         if (V(RST_N) > vth) begin
             vp = vdd/2.0 + ampl * sin(2.0 * `M_PI * freq * $abstime)
-                         + sigma * $rdist_normal(0, 0, 1);
+                         + sigma * $rdist_normal(SEED, 0, 1);
             vn = vdd / 2.0;
         end
     end
