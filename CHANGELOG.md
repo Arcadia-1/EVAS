@@ -2,7 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] — 2026-03-14
+## [0.1.2] — 2026-03-15
+
+### Fixed
+- `$strobe` / `$display` output now sorted strictly by simulation time across all module instances (previously grouped by instance instantiation order)
+
+### Changed
+- `comparator` example: delay panel now uses scatter plot (one point per CLK cycle) parsed from strobe log, replacing the misleading step-held waveform
+
+## [0.1.1] — 2026-03-14
+
+### Added
+- Sphinx documentation with Apple Developer Documentation aesthetic (SF Pro fonts, `#0071e3` blue)
+- Bilingual docs: English at root, Chinese at `/zh/`
+- busuanzi visitor counter
+- Streamlined project folder structure
 
 ### Added
 - Initial public release on PyPI

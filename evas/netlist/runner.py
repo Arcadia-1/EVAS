@@ -459,10 +459,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write(f"Writing CSV: {csv_path} "
               f"(signals: {', '.join(signal_names)})")
 
-    # 8. Collect $strobe / $display output
-    strobe_lines = []
+    # 8. Collect $strobe / $display output (sorted by simulation time)
+    strobe_entries = []
     for model in sim.models:
-        strobe_lines.extend(model._strobe_log)
+        strobe_entries.extend(model._strobe_log)
+    strobe_entries.sort(key=lambda x: x[0])
+    strobe_lines = [msg for _, msg in strobe_entries]
 
     if strobe_lines:
         s_path = Path(strobe_log_path) if strobe_log_path else out_dir / 'strobe.txt'

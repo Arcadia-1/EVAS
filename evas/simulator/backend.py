@@ -108,7 +108,7 @@ class CompiledModel:
             msg = (fmt % args) if args else fmt
         except Exception as e:
             msg = f"{fmt}  [format error: {e}]"
-        self._strobe_log.append(msg)
+        self._strobe_log.append((time, msg))
 
 
 def compile_module(module: Module, default_transition: float = None) -> type:

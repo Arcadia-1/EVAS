@@ -64,8 +64,22 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     axes[2].legend(loc='upper right')
     axes[2].grid(True, alpha=0.3)
 
-    axes[3].plot(t, data['delay_ps'], linewidth=1.2, color='tab:orange',
-                 drawstyle='steps-post', label='measured delay')
+    # Parse per-cycle delay from strobe log (one measurement per CLK cycle)
+    meas_t, meas_d = [], []
+    strobe_path = out_dir / 'strobe.txt'
+    if strobe_path.exists():
+        import re
+        pat = re.compile(r'\[edge_interval_timer\] t=([\d.]+) ns \| delay=([\d.]+) ps')
+        for line in strobe_path.read_text().splitlines():
+            m = pat.search(line)
+            if m:
+                meas_t.append(float(m.group(1)))
+                meas_d.append(float(m.group(2)))
+    meas_t = np.array(meas_t)
+    meas_d = np.array(meas_d)
+
+    axes[3].scatter(meas_t, meas_d, s=40, color='tab:orange', zorder=5,
+                    label='measured delay (per cycle)')
     axes[3].set_ylabel('Delay (ps)')
     axes[3].grid(True, alpha=0.3)
     ref_colors = ['tab:red', 'tab:green', 'tab:brown', 'tab:pink']
