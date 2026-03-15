@@ -1,0 +1,78 @@
+# EVAS Capability Manifest
+#
+# Source of truth for what the EVAS voltage-domain simulator supports.
+# External skills (e.g., veriloga-skills) fetch this file to determine
+# domain classification and simulation routing.
+#
+# EVAS is an event-driven voltage-domain simulator. It does NOT solve KCL
+# equations — current contributions and continuous-time analog operators
+# are permanent architectural exclusions.
+#
+# Format: one construct per line. Lines starting with # are comments.
+# Update [supported] when EVAS adds new constructs.
+# The [unsupported] list should not change.
+
+[supported]
+# --- Contributions ---
+V(node) <+
+V(node1, node2) <+
+# --- Events ---
+@(cross())
+@(above())
+@(initial_step)
+# combined: @(event1 or event2)
+# --- Operators ---
+transition()
+`default_transition
+# --- Variables & Parameters ---
+parameter (real, integer, string)
+real
+integer
+genvar
+arrays
+string .substr()
+# --- Control flow ---
+if/else
+for
+begin/end
+case/endcase
+# --- System functions ---
+$abstime
+$bound_step()
+$display
+$strobe
+$random
+$dist_uniform()
+$rdist_normal()
+# --- Math ---
+abs() sqrt() ln() log() exp() pow()
+sin() cos() floor() ceil() min() max()
+# --- Preprocessor ---
+`include
+`define
+# --- Other ---
+from [a:b] (parameter ranges)
+
+[unsupported]
+# These are PERMANENT architectural exclusions — EVAS is event-driven,
+# not a SPICE-class KCL solver. These will never be supported.
+I() <+
+ddt()
+idt()
+idtmod()
+laplace_nd()
+laplace_zp()
+flicker_noise()
+white_noise()
+$temperature
+$vt
+KCL-based solving
+@(timer())
+@(final_step)
+$fopen / $fclose / $fstrobe
+last_crossing()
+analysis()
+branch
+nature / discipline (custom)
+slew()
+limexp()
