@@ -66,8 +66,9 @@ Each run produces `tran.csv` (waveforms), one or more `.png` plots, and `strobe.
 | `dac_binary_clk_4b` | 4-bit binary DAC (clocked) |
 | `dac_therm_16b` | 16-bit thermometer DAC |
 | `adc_dac_ideal_4b` | 4-bit ideal ADC + DAC with sample-hold |
-| `comparator` | StrongARM comparator + offset search algorithm |
-| `dwa_ptr_gen` | DWA pointer generator |
+| `comparator` | StrongARM comparator + binary-search offset calibration |
+| `dwa_ptr_gen` | DWA pointer generator — overlap variant (100 MHz, v2b_4b input) |
+| `dwa_ptr_gen_no_overlap` | DWA pointer generator — no-overlap variant |
 | `sar_adc_dac_weighted_8b` | 8-bit weighted SAR ADC + DAC |
 | `digital_basics` | AND / OR / NOT gates, D flip-flop, inverter chain |
 
@@ -77,10 +78,16 @@ Each run produces `tran.csv` (waveforms), one or more `.png` plots, and `strobe.
 |---------|--------|
 | `V(node) <+`, `V(a,b)` differential | ✅ |
 | `@(cross(...))`, `@(above(...))`, `@(initial_step)` | ✅ |
+| `@(timer(period))`, `@(final_step)` | ✅ |
 | `transition()` with delay / rise / fall | ✅ |
-| `for`, `if/else`, `begin/end`, arrays, parameters | ✅ |
+| `for`, `if/else`, `case/endcase`, `begin/end` | ✅ |
+| arrays, parameters, string parameters | ✅ |
 | `` `include ``, `` `define ``, `` `default_transition `` | ✅ |
-| SI suffixes, math functions, string parameters | ✅ |
+| SI suffixes, math functions (`sin`, `cos`, `exp`, `ln`, …) | ✅ |
+| `$temperature`, `$vt`, `$abstime` | ✅ |
+| `$bound_step()` | ✅ |
+| `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
+| `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
 | `I() <+`, `ddt()`, `idt()`, `q() <+` | ❌ |
 | AC/DC analysis, subcircuit hierarchy, transistors | ❌ |
 
