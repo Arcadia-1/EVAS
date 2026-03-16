@@ -261,16 +261,16 @@
         <article role="main" id="furo-main-content">
           <section id="examples-catalog">
 <h1>Examples Catalog<a class="headerlink" href="#examples-catalog" title="Link to this heading">¶</a></h1>
-<p>EVAS ships with 15 example circuits covering basic digital logic through
-complex mixed-signal systems.</p>
+<p>EVAS ships with <strong>14 example groups</strong>, each containing one or more Verilog-A model files (<code class="docutils literal notranslate"><span class="pre">.va</span></code>),
+Spectre-format testbench netlists (<code class="docutils literal notranslate"><span class="pre">.scs</span></code>), and Python analysis / visualisation scripts.</p>
 <p>Use <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;name&gt;</span></code> to run any example.</p>
 <section id="available-examples">
 <h2>Available Examples<a class="headerlink" href="#available-examples" title="Link to this heading">¶</a></h2>
 <div class="table-wrapper colwidths-auto docutils container">
 <table class="docutils align-default">
 <thead>
-<tr class="row-odd"><th class="head"><p>Name</p></th>
-<th class="head"><p>Description</p></th>
+<tr class="row-odd"><th class="head"><p>Group</p></th>
+<th class="head"><p>Variants / sub-examples</p></th>
 </tr>
 </thead>
 <tbody>
@@ -281,13 +281,13 @@ complex mixed-signal systems.</p>
 <td><p>Clock burst generator</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">digital_basics</span></code></p></td>
-<td><p>Basic gates: AND, NOT, OR, DFF with reset, inverter chain</p></td>
+<td><p>AND, OR, NOT gates; D flip-flop with reset; inverter chain</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">lfsr</span></code></p></td>
 <td><p>Linear feedback shift register</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">noise_gen</span></code></p></td>
-<td><p>Noise signal generator</p></td>
+<td><p>Gaussian noise generator</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ramp_gen</span></code></p></td>
 <td><p>Ramp signal generator</p></td>
@@ -305,33 +305,37 @@ complex mixed-signal systems.</p>
 <td><p>16-bit thermometer DAC</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code></p></td>
-<td><p>4-bit ideal ADC + DAC with sample-hold (3 stimulus variants)</p></td>
+<td><p>4-bit ideal ADC + DAC with sample-hold: a) ramp  b) single-tone sine  c) 1000-point sine</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cmp_strongarm</span></code></p></td>
-<td><p>StrongARM comparator</p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">comparator</span></code></p></td>
+<td><p>a) Ideal comparator  b) StrongARM clocked comparator  c) Binary-search offset calibration  d) Propagation delay measurement</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cmp_offset_search</span></code></p></td>
-<td><p>Comparator offset search with binary search convergence</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
-<td><p>DWA pointer generator — overlap variant (100 MHz, <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> voltage input)</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_no_overlap</span></code></p></td>
-<td><p>DWA pointer generator — no-overlap variant</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
+<td><p>a) Overlap variant (code+1 cells/cycle)  b) No-overlap variant — both at 100 MHz via <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> voltage-to-binary ADC</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sar_adc_dac_weighted_8b</span></code></p></td>
-<td><p>8-bit weighted SAR ADC + DAC</p></td>
+<td><p>8-bit binary-weighted SAR ADC + DAC; ramp input; DNL/INL characterisation</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
-<section id="multi-testbench-examples">
-<h2>Multi-testbench Examples<a class="headerlink" href="#multi-testbench-examples" title="Link to this heading">¶</a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code> and <code class="docutils literal notranslate"><span class="pre">digital_basics</span></code> contain multiple testbench files.
-The default is <code class="docutils literal notranslate"><span class="pre">tb_&lt;name&gt;.scs</span></code>; use <code class="docutils literal notranslate"><span class="pre">--tb</span></code> to choose another:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_ramp.scs
+<section id="running-a-specific-sub-example">
+<h2>Running a specific sub-example<a class="headerlink" href="#running-a-specific-sub-example" title="Link to this heading">¶</a></h2>
+<p>Use <code class="docutils literal notranslate"><span class="pre">--tb</span></code> to select a testbench when an example has multiple:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># adc_dac_ideal_4b stimuli</span>
+evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_ramp.scs
+evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_sine.scs
+
+<span class="c1"># comparator sub-examples</span>
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_ideal.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_strongarm.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_offset_search.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_delay.scs
+
+<span class="c1"># digital_basics gates</span>
 evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_and_gate.scs
+evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_not_gate.scs
 </pre></div>
 </div>
 </section>
@@ -397,7 +401,7 @@ evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class
             <ul>
 <li><a class="reference internal" href="#">Examples Catalog</a><ul>
 <li><a class="reference internal" href="#available-examples">Available Examples</a></li>
-<li><a class="reference internal" href="#multi-testbench-examples">Multi-testbench Examples</a></li>
+<li><a class="reference internal" href="#running-a-specific-sub-example">Running a specific sub-example</a></li>
 </ul>
 </li>
 </ul>

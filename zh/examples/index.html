@@ -267,15 +267,16 @@
         <article role="main" id="furo-main-content">
           <section id="id1">
 <h1>示例目录<a class="headerlink" href="#id1" title="链接到此标题。">¶</a></h1>
-<p>EVAS 内置 16 个示例电路，涵盖从基础数字逻辑到复杂混合信号系统的各类场景。</p>
+<p>EVAS 内置 <strong>14 组示例</strong>，每组包含一个或多个 Verilog-A 模型文件（<code class="docutils literal notranslate"><span class="pre">.va</span></code>）、
+Spectre 格式的测试台 netlist（<code class="docutils literal notranslate"><span class="pre">.scs</span></code>），以及 Python 数据处理与可视化脚本。</p>
 <p>使用 <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;名称&gt;</span></code> 运行任意示例。</p>
 <section id="id2">
 <h2>示例一览<a class="headerlink" href="#id2" title="链接到此标题。">¶</a></h2>
 <div class="table-wrapper colwidths-auto docutils container">
 <table class="docutils align-default">
 <thead>
-<tr class="row-odd"><th class="head"><p>名称</p></th>
-<th class="head"><p>描述</p></th>
+<tr class="row-odd"><th class="head"><p>组名</p></th>
+<th class="head"><p>子示例 / 变体</p></th>
 </tr>
 </thead>
 <tbody>
@@ -286,13 +287,13 @@
 <td><p>时钟突发信号发生器</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">digital_basics</span></code></p></td>
-<td><p>基础数字门（与、非、或、DFF、反相器链）</p></td>
+<td><p>与门、或门、非门；带复位 D 触发器；反相器链</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">lfsr</span></code></p></td>
-<td><p>线性反馈移位寄存器（LFSR）</p></td>
+<td><p>线性反馈移位寄存器</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">noise_gen</span></code></p></td>
-<td><p>噪声信号发生器</p></td>
+<td><p>高斯噪声发生器</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ramp_gen</span></code></p></td>
 <td><p>斜坡信号发生器</p></td>
@@ -310,42 +311,37 @@
 <td><p>16 位温度码 DAC</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code></p></td>
-<td><p>4 位理想 ADC + DAC（含采样保持，3 种激励）</p></td>
+<td><p>4 位理想 ADC + DAC（含采样保持）：a) 斜坡  b) 单音正弦  c) 1000 点正弦</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cmp_strongarm</span></code></p></td>
-<td><p>StrongARM 比较器</p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">comparator</span></code></p></td>
+<td><p>a) 理想比较器  b) StrongARM 时钟比较器  c) 二分失调校准  d) 传播延迟测量</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cmp_offset_search</span></code></p></td>
-<td><p>比较器失调二分搜索（已验证收敛至目标偏置）</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
-<td><p>DWA 指针生成器 — 重叠版（100 MHz，<code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> 电压输入）</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_no_overlap</span></code></p></td>
-<td><p>DWA 指针生成器 — 无重叠版</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
+<td><p>a) 重叠版（每周期 code+1 个单元）  b) 无重叠版 — 均以 <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> 电压转数字 ADC 驱动，100 MHz 时钟</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sar_adc_dac_weighted_8b</span></code></p></td>
-<td><p>8 位加权 SAR ADC + DAC</p></td>
+<td><p>8 位二进制权重 SAR ADC + DAC；斜坡输入；DNL/INL 测试</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </section>
 <section id="id3">
-<h2>运行多测试台示例<a class="headerlink" href="#id3" title="链接到此标题。">¶</a></h2>
-<p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code> 和 <code class="docutils literal notranslate"><span class="pre">digital_basics</span></code> 包含多个测试台文件，
-默认运行 <code class="docutils literal notranslate"><span class="pre">tb_&lt;名称&gt;.scs</span></code>，可用 <code class="docutils literal notranslate"><span class="pre">--tb</span></code> 指定其他测试台：</p>
+<h2>运行特定子示例<a class="headerlink" href="#id3" title="链接到此标题。">¶</a></h2>
+<p>当一个组包含多个测试台时，用 <code class="docutils literal notranslate"><span class="pre">--tb</span></code> 选择：</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># adc_dac_ideal_4b 的三种激励</span>
 evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_ramp.scs
 evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_sine.scs
-evas<span class="w"> </span>run<span class="w"> </span>adc_dac_ideal_4b<span class="w"> </span>--tb<span class="w"> </span>tb_adc_dac_ideal_4b_sine1000.scs
 
-<span class="c1"># digital_basics 的各个门</span>
+<span class="c1"># comparator 各子示例</span>
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_ideal.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_strongarm.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_offset_search.scs
+evas<span class="w"> </span>run<span class="w"> </span>comparator<span class="w"> </span>--tb<span class="w"> </span>tb_cmp_delay.scs
+
+<span class="c1"># digital_basics 各门</span>
 evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_and_gate.scs
 evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_not_gate.scs
-evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_or_gate.scs
-evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_dff_rst.scs
-evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class="w"> </span>--tb<span class="w"> </span>tb_inverter_chain.scs
 </pre></div>
 </div>
 </section>
@@ -411,7 +407,7 @@ evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class
             <ul>
 <li><a class="reference internal" href="#">示例目录</a><ul>
 <li><a class="reference internal" href="#id2">示例一览</a></li>
-<li><a class="reference internal" href="#id3">运行多测试台示例</a></li>
+<li><a class="reference internal" href="#id3">运行特定子示例</a></li>
 </ul>
 </li>
 </ul>
