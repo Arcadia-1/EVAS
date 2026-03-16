@@ -54,25 +54,25 @@ Each run produces `tran.csv` (waveforms), one or more `.png` plots, and `strobe.
 
 ## Bundled Examples
 
-14 example groups, each providing one or more Verilog-A model files (`.va`),
-Spectre-format testbench netlists (`.scs`), and Python analysis/visualization scripts.
+14 example groups, 27 Verilog-A modules in total. Each group provides `.va` model files,
+Spectre-format testbench netlists (`.scs`), and Python analysis / visualisation scripts.
 
-| Group | Variants / sub-examples |
-|-------|------------------------|
-| `clk_div` | Clock divider |
-| `clk_burst_gen` | Clock burst generator |
-| `digital_basics` | AND, OR, NOT gates; D flip-flop; inverter chain |
-| `lfsr` | Linear feedback shift register |
-| `noise_gen` | Gaussian noise generator |
-| `ramp_gen` | Ramp signal generator |
-| `edge_interval_timer` | Edge-interval timer |
-| `d2b_4b` | 4-bit thermometer-to-binary decoder |
-| `dac_binary_clk_4b` | 4-bit binary DAC (clocked) |
-| `dac_therm_16b` | 16-bit thermometer DAC |
-| `adc_dac_ideal_4b` | 4-bit ideal ADC + DAC: ramp / sine / 1000-pt sine stimuli |
-| `comparator` | a) Ideal comparator  b) StrongARM clocked comparator  c) Offset search (binary search convergence)  d) Propagation delay measurement |
-| `dwa_ptr_gen` | a) Overlap variant (code+1 cells/cycle, 100 MHz)  b) No-overlap variant — both driven by `v2b_4b` ideal voltage-to-binary ADC |
-| `sar_adc_dac_weighted_8b` | 8-bit binary-weighted SAR ADC + DAC; DNL/INL characterisation |
+| Group | Verilog-A modules | Notes |
+|-------|------------------|-------|
+| `clk_div` | `clk_div` | |
+| `clk_burst_gen` | `clk_burst_gen` | |
+| `digital_basics` | `and_gate`, `or_gate`, `not_gate`, `dff_rst`, `inverter` | |
+| `lfsr` | `lfsr` | |
+| `noise_gen` | `noise_gen` | |
+| `ramp_gen` | `ramp_gen` | |
+| `edge_interval_timer` | `edge_interval_timer` | also used inside `comparator` |
+| `d2b_4b` | `d2b_4b` | thermometer-to-binary decoder |
+| `dac_binary_clk_4b` | `dac_binary_clk_4b` | |
+| `dac_therm_16b` | `dac_therm_16b` | |
+| `adc_dac_ideal_4b` | `adc_ideal_4b`, `dac_ideal_4b`, `sh_ideal` | 3 stimuli: ramp / sine / 1000-pt sine |
+| `comparator` | `cmp_ideal`, `cmp_strongarm`, `cmp_offset_search`, `cmp_delay` | 4 sub-examples |
+| `dwa_ptr_gen` | `dwa_ptr_gen`, `dwa_ptr_gen_no_overlap`, `v2b_4b` | 100 MHz; `v2b_4b` = ideal voltage→4-bit ADC |
+| `sar_adc_dac_weighted_8b` | `sar_adc_weighted_8b`, `dac_weighted_8b`, `sh_ideal` | 8-bit SAR; DNL/INL characterisation |
 
 ## Supported Verilog-A
 
