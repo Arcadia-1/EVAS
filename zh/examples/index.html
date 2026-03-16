@@ -267,7 +267,7 @@
         <article role="main" id="furo-main-content">
           <section id="id1">
 <h1>示例目录<a class="headerlink" href="#id1" title="链接到此标题。">¶</a></h1>
-<p>EVAS 内置 15 个示例电路，涵盖从基础数字逻辑到复杂混合信号系统的各类场景。</p>
+<p>EVAS 内置 16 个示例电路，涵盖从基础数字逻辑到复杂混合信号系统的各类场景。</p>
 <p>使用 <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;名称&gt;</span></code> 运行任意示例。</p>
 <section id="id2">
 <h2>示例一览<a class="headerlink" href="#id2" title="链接到此标题。">¶</a></h2>
@@ -316,12 +316,15 @@
 <td><p>StrongARM 比较器</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cmp_offset_search</span></code></p></td>
-<td><p>比较器失调搜索算法</p></td>
+<td><p>比较器失调二分搜索（已验证收敛至目标偏置）</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
-<td><p>DWA 指针生成器（数据加权平均）</p></td>
+<td><p>DWA 指针生成器 — 重叠版（100 MHz，<code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> 电压输入）</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">sar_adc_dac_weighted_8b</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_no_overlap</span></code></p></td>
+<td><p>DWA 指针生成器 — 无重叠版</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sar_adc_dac_weighted_8b</span></code></p></td>
 <td><p>8 位加权 SAR ADC + DAC</p></td>
 </tr>
 </tbody>

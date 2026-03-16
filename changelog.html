@@ -263,9 +263,58 @@
 <h1>Changelog<a class="headerlink" href="#changelog" title="Link to this heading">¶</a></h1>
 <p>All notable changes to this project will be documented in this file.</p>
 <section id="id1">
-<h2>[0.1.2] — 2026-03-15<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<h2>[0.3.0] — 2026-03-16<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<section id="added-language-features">
+<h3>Added — Language Features<a class="headerlink" href="#added-language-features" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">case/endcase</span></code> statement: lexer keywords, AST node <code class="docutils literal notranslate"><span class="pre">CaseStatement</span></code>, parser, backend codegen (compiles to chained <code class="docutils literal notranslate"><span class="pre">if/elif/else</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;(timer(period))</span></code> event: periodic firing every <code class="docutils literal notranslate"><span class="pre">period</span></code> seconds; engine breakpoints track next fire time</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;(final_step)</span></code> event: fires after the main simulation loop ends, before result arrays are built</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">$temperature</span></code> expression: returns ambient temperature in Kelvin (default 27 °C → 300.15 K)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">$vt</span></code> expression: thermal voltage kT/q (≈25.85 mV at 300.15 K)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">$bound_step(dt)</span></code> system task: sets a per-model maximum timestep; engine respects it each iteration</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">$fopen(filename,</span> <span class="pre">mode)</span></code> / <code class="docutils literal notranslate"><span class="pre">$fclose(fd)</span></code> / <code class="docutils literal notranslate"><span class="pre">$fstrobe(fd,</span> <span class="pre">...)</span></code> / <code class="docutils literal notranslate"><span class="pre">$fwrite(fd,</span> <span class="pre">...)</span></code> / <code class="docutils literal notranslate"><span class="pre">$fdisplay(fd,</span> <span class="pre">...)</span></code>: file I/O via Python <code class="docutils literal notranslate"><span class="pre">open()</span></code> with auto-close at simulation end</p></li>
+</ul>
+</section>
 <section id="fixed">
 <h3>Fixed<a class="headerlink" href="#fixed" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><strong>Cross detector double-trigger bug</strong>: the <code class="docutils literal notranslate"><span class="pre">_tol</span> <span class="pre">=</span> <span class="pre">1e-12</span></code> tolerance in <code class="docutils literal notranslate"><span class="pre">CrossDetector.check()</span></code> could leave <code class="docutils literal notranslate"><span class="pre">prev_val</span></code> slightly positive after a crossing, causing the detector to re-fire on the very next evaluation. Fixed by clamping <code class="docutils literal notranslate"><span class="pre">prev_val</span></code> to the post-crossing side. Same fix applied to <code class="docutils literal notranslate"><span class="pre">AboveDetector</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">test_cmp_offset_search</span></code> now passes without <code class="docutils literal notranslate"><span class="pre">xfail</span></code> — binary search converges to ≈10 mV (was stuck at 100 mV due to double-trigger)</p></li>
+</ul>
+</section>
+<section id="changed-examples">
+<h3>Changed — Examples<a class="headerlink" href="#changed-examples" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_msb</span></code> renamed to <code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_no_overlap</span></code> across all files (<code class="docutils literal notranslate"><span class="pre">.va</span></code>, <code class="docutils literal notranslate"><span class="pre">.scs</span></code>, <code class="docutils literal notranslate"><span class="pre">analyze_*.py</span></code>, <code class="docutils literal notranslate"><span class="pre">validate_*.py</span></code>, tests)</p></li>
+<li><p>Both DWA testbenches migrated from 4-bit PWL buses to a single analog voltage source + new <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> ideal ADC block</p></li>
+<li><p>DWA clock: 10 MHz → <strong>100 MHz</strong> (T = 10 ns); stop time 1700 ns → 175 ns</p></li>
+<li><p>Input code sequence: 6 cycling values → 16 distinct values <code class="docutils literal notranslate"><span class="pre">[3,7,2,5,1,8,4,6,3,5,2,7,1,4,8,2]</span></code> with correct step-function PWL (hold points included)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">analyze_cmp_strongarm</span></code>: input panel Y-axis now auto-scales to data range ± 20 % margin</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">analyze_cmp_offset_search</span></code>: VINP/VINN panel Y-axis now data-driven (was hardcoded 350–450 mV)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">analyze_dwa_ptr_gen*</span></code>: plots saved directly to <code class="docutils literal notranslate"><span class="pre">output/dwa_ptr_gen/</span></code> (not subdirectories); no-overlap variant shows ptr diamond at last selected cell (shifted −1)</p></li>
+</ul>
+</section>
+<section id="added-new-module">
+<h3>Added — New Module<a class="headerlink" href="#added-new-module" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">v2b_4b.va</span></code>: ideal 4-bit voltage-to-binary converter — samples <code class="docutils literal notranslate"><span class="pre">V(vin)</span></code> on CLK rising edge, maps 0–15 V to digital code <code class="docutils literal notranslate"><span class="pre">[0..15]</span></code>, drives four output bits via <code class="docutils literal notranslate"><span class="pre">transition()</span></code></p></li>
+</ul>
+</section>
+</section>
+<section id="id2">
+<h2>[0.2.0] — 2026-03-16<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
+<section id="added">
+<h3>Added<a class="headerlink" href="#added" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;(timer(period))</span></code>, <code class="docutils literal notranslate"><span class="pre">&#64;(final_step)</span></code>, <code class="docutils literal notranslate"><span class="pre">$temperature</span></code>, <code class="docutils literal notranslate"><span class="pre">$vt</span></code> — initial implementation (superseded by 0.3.0 with bug fixes)</p></li>
+</ul>
+</section>
+</section>
+<section id="id3">
+<h2>[0.1.2] — 2026-03-15<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h2>
+<section id="id4">
+<h3>Fixed<a class="headerlink" href="#id4" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">$strobe</span></code> / <code class="docutils literal notranslate"><span class="pre">$display</span></code> output now sorted strictly by simulation time across all module instances (previously grouped by instance instantiation order)</p></li>
 </ul>
@@ -277,10 +326,10 @@
 </ul>
 </section>
 </section>
-<section id="id2">
-<h2>[0.1.1] — 2026-03-14<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
-<section id="added">
-<h3>Added<a class="headerlink" href="#added" title="Link to this heading">¶</a></h3>
+<section id="id5">
+<h2>[0.1.1] — 2026-03-14<a class="headerlink" href="#id5" title="Link to this heading">¶</a></h2>
+<section id="id6">
+<h3>Added<a class="headerlink" href="#id6" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p>Sphinx documentation with Apple Developer Documentation aesthetic (SF Pro fonts, <code class="docutils literal notranslate"><span class="pre">#0071e3</span></code> blue)</p></li>
 <li><p>Bilingual docs: English at root, Chinese at <code class="docutils literal notranslate"><span class="pre">/zh/</span></code></p></li>
@@ -288,8 +337,45 @@
 <li><p>Streamlined project folder structure</p></li>
 </ul>
 </section>
-<section id="id3">
-<h3>Added<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h3>
+<section id="id7">
+<h3>Added<a class="headerlink" href="#id7" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Initial public release on PyPI</p></li>
+<li><p>Event-driven Verilog-A simulator engine</p></li>
+<li><p>Spectre netlist parser</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span></code> CLI command</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;name&gt;</span></code> to run any of 17 bundled examples</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">list</span></code> to enumerate available examples</p></li>
+<li><p>17 example circuits: clk_div, lfsr, cmp_strongarm, SAR ADC, and more</p></li>
+<li><p>Pure-Python implementation — no C compiler, no ngspice required</p></li>
+</ul>
+</section>
+<section id="id8">
+<h3>Fixed<a class="headerlink" href="#id8" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">$strobe</span></code> / <code class="docutils literal notranslate"><span class="pre">$display</span></code> output now sorted strictly by simulation time across all module instances (previously grouped by instance instantiation order)</p></li>
+</ul>
+</section>
+<section id="id9">
+<h3>Changed<a class="headerlink" href="#id9" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">comparator</span></code> example: delay panel now uses scatter plot (one point per CLK cycle) parsed from strobe log, replacing the misleading step-held waveform</p></li>
+</ul>
+</section>
+</section>
+<section id="id10">
+<h2>[0.1.1] — 2026-03-14<a class="headerlink" href="#id10" title="Link to this heading">¶</a></h2>
+<section id="id11">
+<h3>Added<a class="headerlink" href="#id11" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Sphinx documentation with Apple Developer Documentation aesthetic (SF Pro fonts, <code class="docutils literal notranslate"><span class="pre">#0071e3</span></code> blue)</p></li>
+<li><p>Bilingual docs: English at root, Chinese at <code class="docutils literal notranslate"><span class="pre">/zh/</span></code></p></li>
+<li><p>busuanzi visitor counter</p></li>
+<li><p>Streamlined project folder structure</p></li>
+</ul>
+</section>
+<section id="id12">
+<h3>Added<a class="headerlink" href="#id12" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p>Initial public release on PyPI</p></li>
 <li><p>Event-driven Verilog-A simulator engine</p></li>
@@ -355,14 +441,32 @@
           <div class="toc-tree">
             <ul>
 <li><a class="reference internal" href="#">Changelog</a><ul>
-<li><a class="reference internal" href="#id1">[0.1.2] — 2026-03-15</a><ul>
+<li><a class="reference internal" href="#id1">[0.3.0] — 2026-03-16</a><ul>
+<li><a class="reference internal" href="#added-language-features">Added — Language Features</a></li>
 <li><a class="reference internal" href="#fixed">Fixed</a></li>
+<li><a class="reference internal" href="#changed-examples">Changed — Examples</a></li>
+<li><a class="reference internal" href="#added-new-module">Added — New Module</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id2">[0.2.0] — 2026-03-16</a><ul>
+<li><a class="reference internal" href="#added">Added</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id3">[0.1.2] — 2026-03-15</a><ul>
+<li><a class="reference internal" href="#id4">Fixed</a></li>
 <li><a class="reference internal" href="#changed">Changed</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id2">[0.1.1] — 2026-03-14</a><ul>
-<li><a class="reference internal" href="#added">Added</a></li>
-<li><a class="reference internal" href="#id3">Added</a></li>
+<li><a class="reference internal" href="#id5">[0.1.1] — 2026-03-14</a><ul>
+<li><a class="reference internal" href="#id6">Added</a></li>
+<li><a class="reference internal" href="#id7">Added</a></li>
+<li><a class="reference internal" href="#id8">Fixed</a></li>
+<li><a class="reference internal" href="#id9">Changed</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id10">[0.1.1] — 2026-03-14</a><ul>
+<li><a class="reference internal" href="#id11">Added</a></li>
+<li><a class="reference internal" href="#id12">Added</a></li>
 </ul>
 </li>
 </ul>

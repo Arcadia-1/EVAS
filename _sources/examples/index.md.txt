@@ -21,8 +21,9 @@ Use `evas run <name>` to run any example.
 | `dac_therm_16b` | 16-bit thermometer DAC |
 | `adc_dac_ideal_4b` | 4-bit ideal ADC + DAC with sample-hold (3 stimulus variants) |
 | `cmp_strongarm` | StrongARM comparator |
-| `cmp_offset_search` | Comparator offset search algorithm |
-| `dwa_ptr_gen` | DWA pointer generator (data-weighted averaging) |
+| `cmp_offset_search` | Comparator offset search with binary search convergence |
+| `dwa_ptr_gen` | DWA pointer generator — overlap variant (100 MHz, `v2b_4b` voltage input) |
+| `dwa_ptr_gen_no_overlap` | DWA pointer generator — no-overlap variant |
 | `sar_adc_dac_weighted_8b` | 8-bit weighted SAR ADC + DAC |
 
 ## Multi-testbench Examples
