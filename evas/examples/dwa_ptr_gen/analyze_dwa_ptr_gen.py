@@ -31,8 +31,8 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     vth  = 0.45
 
     # ── Clock period from netlist (100 ns → 10 MHz) ─────────────────────
-    CLK_PERIOD_NS = 100.0
-    CLK_MHZ       = 1e3 / CLK_PERIOD_NS   # 10 MHz
+    CLK_PERIOD_NS = 10.0
+    CLK_MHZ       = 1e3 / CLK_PERIOD_NS   # 100 MHz
 
     # ── Find clock rising edges ──────────────────────────────────────────
     clk    = data['clk_i']

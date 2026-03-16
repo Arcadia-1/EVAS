@@ -30,7 +30,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     cols = set(data.dtype.names)
     vth  = 0.45
 
-    CLK_PERIOD_NS = 100.0
+    CLK_PERIOD_NS = 10.0
     CLK_MHZ       = 1e3 / CLK_PERIOD_NS
 
     clk    = data['clk_i']
