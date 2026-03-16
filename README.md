@@ -107,7 +107,9 @@ save vin:10e vout:6e clk:2e dout_code:d
 | `:Nf` | fixed-point, N decimal places |
 | `:d` | integer |
 
-## Development
+## Contributing
+
+To develop or contribute to EVAS locally:
 
 ```bash
 git clone https://github.com/Arcadia-1/EVAS.git
