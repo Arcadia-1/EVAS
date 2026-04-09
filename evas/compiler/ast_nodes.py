@@ -165,6 +165,11 @@ class ForStatement:
     body: 'Statement'
 
 @dataclass
+class WhileStatement:
+    cond: Expr
+    body: 'Statement'
+
+@dataclass
 class CaseItem:
     """One branch: value_expr [, value_expr]: statement"""
     values: List[Expr]          # empty list means 'default'
@@ -182,7 +187,7 @@ class SystemTask:
     args: List[Expr]
 
 Statement = Union[Assignment, Contribution, EventStatement, Block,
-                  IfStatement, ForStatement, CaseStatement, SystemTask]
+                  IfStatement, ForStatement, WhileStatement, CaseStatement, SystemTask]
 
 
 # --- Declaration nodes ---
@@ -220,6 +225,19 @@ class AnalogBlock:
     body: Block
 
 @dataclass
+class InstanceConnection:
+    """Module instance port connection."""
+    port_name: Optional[str]          # None for positional connection
+    expr: Expr                        # usually Identifier/ArrayAccess
+
+@dataclass
+class ModuleInstance:
+    """Hierarchical module instance (inside another module)."""
+    module_name: str
+    instance_name: str
+    connections: List[InstanceConnection] = field(default_factory=list)
+
+@dataclass
 class Module:
     name: str
     ports: List[str]
@@ -227,6 +245,7 @@ class Module:
     parameters: List[ParameterDecl] = field(default_factory=list)
     variables: List[VariableDecl] = field(default_factory=list)
     analog_block: Optional[AnalogBlock] = None
+    instances: List[ModuleInstance] = field(default_factory=list)
     default_transition: Optional[float] = None
     defines: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)

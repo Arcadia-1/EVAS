@@ -22,6 +22,12 @@ class Parser:
     def peek(self) -> Token:
         return self.tokens[self.pos]
 
+    def peek_n(self, n: int) -> Token:
+        i = self.pos + n
+        if i >= len(self.tokens):
+            return self.tokens[-1]
+        return self.tokens[i]
+
     def advance(self) -> Token:
         t = self.tokens[self.pos]
         self.pos += 1
@@ -251,8 +257,48 @@ class Parser:
                 module.analog_block = AnalogBlock(body=Block(statements=[block]))
             return
 
+        # Hierarchical module instance:
+        #   child_mod u1 (...);
+        # Only parse common forms (positional and named .port(expr)).
+        if (tok.type == TokenType.IDENT and
+                self.peek_n(1).type == TokenType.IDENT and
+                self.peek_n(2).type == TokenType.LPAREN):
+            inst = self._parse_module_instance()
+            if inst is not None:
+                module.instances.append(inst)
+                return
+
         # Skip unknown tokens
         self.advance()
+
+    def _parse_module_instance(self) -> Optional[ModuleInstance]:
+        module_name = self.expect(TokenType.IDENT).value
+        instance_name = self.expect(TokenType.IDENT).value
+        self.expect(TokenType.LPAREN)
+
+        conns: List[InstanceConnection] = []
+        if not self.at(TokenType.RPAREN):
+            while True:
+                if self.match(TokenType.DOT):
+                    # Named connection: .PORT(expr)
+                    port_name = self.expect(TokenType.IDENT).value
+                    self.expect(TokenType.LPAREN)
+                    expr = self._parse_expression()
+                    self.expect(TokenType.RPAREN)
+                    conns.append(InstanceConnection(port_name=port_name, expr=expr))
+                else:
+                    # Positional connection
+                    expr = self._parse_expression()
+                    conns.append(InstanceConnection(port_name=None, expr=expr))
+                if not self.match(TokenType.COMMA):
+                    break
+        self.expect(TokenType.RPAREN)
+        self.match(TokenType.SEMI)
+        return ModuleInstance(
+            module_name=module_name,
+            instance_name=instance_name,
+            connections=conns,
+        )
 
     def _parse_port_direction_decl(self, module: Module):
         """Parse: input/output/inout [discipline] [range] name [, name] ;"""
@@ -464,6 +510,10 @@ class Parser:
         if tok.type == TokenType.FOR:
             return self._parse_for_statement()
 
+        # While loop
+        if tok.type == TokenType.WHILE:
+            return self._parse_while_statement()
+
         # Case statement
         if tok.type == TokenType.CASE:
             return self._parse_case_statement()
@@ -497,7 +547,7 @@ class Parser:
         return EventStatement(event=event, body=body)
 
     def _parse_single_event(self) -> EventExpr:
-        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | final_step"""
+        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | timer(start, period) | final_step"""
         tok = self.peek()
 
         if tok.type == TokenType.IDENT:
@@ -532,9 +582,13 @@ class Parser:
             elif tok.value == 'timer':
                 self.advance()
                 self.expect(TokenType.LPAREN)
-                period_expr = self._parse_expression()
+                first_expr = self._parse_expression()
+                if self.match(TokenType.COMMA):
+                    period_expr = self._parse_expression()
+                    self.expect(TokenType.RPAREN)
+                    return EventExpr(EventType.TIMER, [first_expr, period_expr])
                 self.expect(TokenType.RPAREN)
-                return EventExpr(EventType.TIMER, [period_expr])
+                return EventExpr(EventType.TIMER, [first_expr])
 
             elif tok.value == 'final_step':
                 self.advance()
@@ -564,6 +618,14 @@ class Parser:
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
         return ForStatement(init=init, cond=cond, update=update, body=body)
+
+    def _parse_while_statement(self) -> WhileStatement:
+        self.expect(TokenType.WHILE)
+        self.expect(TokenType.LPAREN)
+        cond = self._parse_expression()
+        self.expect(TokenType.RPAREN)
+        body = self._parse_block_or_statement()
+        return WhileStatement(cond=cond, body=body)
 
     def _parse_case_statement(self) -> CaseStatement:
         """Parse: case (expr) value: stmt ... default: stmt endcase"""

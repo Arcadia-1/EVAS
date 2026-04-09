@@ -24,6 +24,7 @@ from evas.simulator.engine import (
     sine,
 )
 from evas.simulator.backend import CompiledModel
+from evas.simulator.backend import CompilationError
 
 
 # ===========================================================================
@@ -526,10 +527,40 @@ class TestCompiledModelHelpers:
         assert not self.model._check_timer("t2", 15e-9, 10e-9)  # before 20ns
         assert self.model._check_timer("t2", 20e-9, 10e-9)  # fires at 20ns
 
+    def test_check_timer_at_fires_once_per_target(self):
+        assert not self.model._check_timer_at("ta", 5e-9, 10e-9)
+        assert self.model._check_timer_at("ta", 10e-9, 10e-9)
+        assert not self.model._check_timer_at("ta", 11e-9, 10e-9)
+        assert not self.model._check_timer_at("ta", 11e-9, 20e-9)
+        assert self.model._check_timer_at("ta", 20e-9, 20e-9)
+
     def test_next_breakpoint_includes_timer(self):
         self.model.timer_states["t0"] = 10e-9
         bp = self.model.next_breakpoint(0.0)
         assert bp == pytest.approx(10e-9)
+
+    def test_next_breakpoint_ignores_consumed_absolute_timer(self):
+        self.model.timer_states["ta"] = 10e-9
+        self.model.timer_last_fired["ta"] = 10e-9
+        assert self.model.next_breakpoint(10e-9) is None
+
+    def test_idtmod_trapezoid_and_wrap(self):
+        y0 = self.model._idtmod("i0", time=0.0, x=2.0, ic=0.0, mod=1.0)
+        assert y0 == pytest.approx(0.0)
+
+        # +2 * 0.1 = 0.2
+        y1 = self.model._idtmod("i0", time=0.1, x=2.0, ic=0.0, mod=1.0)
+        assert y1 == pytest.approx(0.2)
+
+        # +2 * 0.5 = +1.0, wrapped by mod=1.0 -> back to 0.2
+        y2 = self.model._idtmod("i0", time=0.6, x=2.0, ic=0.0, mod=1.0)
+        assert y2 == pytest.approx(0.2)
+
+    def test_idtmod_same_time_no_double_integrate(self):
+        self.model._idtmod("i1", time=0.0, x=1.0, ic=0.0, mod=1.0)
+        y1 = self.model._idtmod("i1", time=1e-9, x=1.0, ic=0.0, mod=1.0)
+        y2 = self.model._idtmod("i1", time=1e-9, x=1.0, ic=0.0, mod=1.0)
+        assert y2 == pytest.approx(y1)
 
     def test_temperature_default(self):
         assert self.model._temperature == pytest.approx(27.0)
@@ -544,7 +575,7 @@ class TestCompiledModelHelpers:
 # ===========================================================================
 
 class TestTimerEvent:
-    """Test @(timer(period)) via a compiled VA module."""
+    """Test timer event compilation/runtime for periodic and absolute-time forms."""
 
     VA_SRC = """\
 `include "disciplines.vams"
@@ -555,7 +586,7 @@ module timer_test(out);
         @(initial_step) begin
             count = 0;
         end
-        @(timer(10e-9)) begin
+        @(timer(0.0, 10e-9)) begin
             count = count + 1;
         end
         V(out) <+ count;
@@ -577,6 +608,148 @@ endmodule
         # At 50ns, timer should have fired at 10, 20, 30, 40, 50 → count=5
         final_val = result.signals["out"][-1]
         assert final_val == pytest.approx(5.0, abs=1.0)
+
+    VA_SRC_ABSOLUTE = """\
+`include "disciplines.vams"
+module timer_abs_test(out);
+    output voltage out;
+    real next_t;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            count = 0;
+            next_t = 10e-9;
+        end
+        @(timer(next_t)) begin
+            count = count + 1;
+            next_t = next_t + 10e-9;
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+
+    def test_timer_absolute_time_rearms_from_state(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC_ABSOLUTE)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=50e-9, tstep=1e-9)
+        final_val = result.signals["out"][-1]
+        assert final_val == pytest.approx(5.0, abs=1.0)
+
+    VA_SRC_TIMER_TO_TRANSITION_CROSS = """\
+`include "disciplines.vams"
+module timer_cross_probe(out, seen);
+    output voltage out;
+    output voltage seen;
+    integer state;
+    real next_t;
+    real seen_t;
+    analog begin
+        @(initial_step) begin
+            state = 0;
+            next_t = 10e-9;
+            seen_t = -1.0;
+        end
+        @(timer(next_t)) begin
+            state = 1 - state;
+            next_t = next_t + 10e-9;
+        end
+        @(cross(V(out) - 0.5, +1)) begin
+            seen_t = $abstime;
+        end
+        V(out) <+ transition(state ? 1.0 : 0.0, 0.0, 2e-9, 2e-9);
+        V(seen) <+ seen_t;
+    end
+endmodule
+"""
+
+    def test_timer_driven_transition_cross_hits_edge_midpoint(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC_TIMER_TO_TRANSITION_CROSS)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("seen")
+        result = sim.run(tstop=15e-9, tstep=1e-9)
+
+        seen = result.signals["seen"][-1]
+        assert seen == pytest.approx(11e-9, abs=1e-12)
+
+
+class TestWhileStatement:
+    VA_SRC = """\
+`include "disciplines.vams"
+module while_wrap_test(out);
+    output voltage out;
+    real x;
+    analog begin
+        @(initial_step) begin
+            x = 12.0;
+            while (x > 5.0) x = x - 10.0;
+        end
+        V(out) <+ x;
+    end
+endmodule
+"""
+
+    def test_while_in_event_body_executes_until_condition_clears(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-10)
+
+        assert result.signals["out"][-1] == pytest.approx(2.0, abs=1e-12)
+
+
+class TestIdtmodEvent:
+    """Smoke test for idtmod() compilation and runtime behavior."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module idtmod_test(out);
+    output voltage out;
+    real f;
+    real ph;
+    analog begin
+        f = 1.0e9;
+        ph = idtmod(f, 0.0, 1.0);
+        V(out) <+ ph;
+    end
+endmodule
+"""
+
+    def test_idtmod_compiles_and_changes_over_time(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=0.5e-9)
+
+        out = result.signals["out"]
+        assert out.max() > out.min()
+        assert out.min() >= -1e-12
+        assert out.max() <= 1.0 + 1e-12
 
 
 class TestFinalStep:
@@ -931,3 +1104,149 @@ endmodule
         assert model.state.get("v00") == pytest.approx(0.0)
         # v01 check: dbus[1][1] = 1*2+1 = 3.0
         assert model.output_nodes.get("dbus[1][1]") == pytest.approx(3.0)
+
+
+class TestHierarchicalInstantiation:
+    VA_CHILD = """\
+`include "disciplines.vams"
+module child_inv(out, inp, vdd, vss);
+output out;
+electrical out;
+input inp;
+electrical inp;
+inout vdd, vss;
+electrical vdd, vss;
+analog begin
+    V(out, vss) <+ (V(inp, vss) > 0.5*V(vdd, vss) ? 0.0 : V(vdd, vss));
+end
+endmodule
+"""
+
+    VA_TOP = """\
+`include "disciplines.vams"
+module top_wrap(out, inp, vdd, vss);
+output out;
+electrical out;
+input inp;
+electrical inp;
+inout vdd, vss;
+electrical vdd, vss;
+child_inv u0 (
+    .out(out),
+    .inp(inp),
+    .vdd(vdd),
+    .vss(vss)
+);
+endmodule
+"""
+
+    def test_named_port_instance_parses(self):
+        from evas.compiler.parser import parse
+        mod = parse(self.VA_TOP)
+        assert len(mod.instances) == 1
+        inst = mod.instances[0]
+        assert inst.module_name == "child_inv"
+        assert inst.instance_name == "u0"
+        assert len(inst.connections) == 4
+        assert inst.connections[0].port_name == "out"
+
+    def test_parent_calls_child_evaluate(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        child_mod = parse(self.VA_CHILD)
+        top_mod = parse(self.VA_TOP)
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_inv": (ChildCls, child_mod),
+            "top_wrap": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        top = TopCls()
+        top.node_map = {"out": "OUT", "inp": "INP", "vdd": "VDD", "vss": "VSS"}
+        nv = {"INP": 0.0, "VDD": 1.0, "VSS": 0.0}
+        top.initial_step(nv, 0.0)
+        top.evaluate(nv, 0.0)
+        assert nv["OUT"] == pytest.approx(1.0)
+        nv["INP"] = 1.0
+        top.evaluate(nv, 1e-9)
+        assert nv["OUT"] == pytest.approx(0.0)
+
+
+class TestSpectreRestrictedOperators:
+    def test_conditional_idtmod_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_idt(out, rst, vss);
+output out;
+electrical out;
+input rst;
+electrical rst;
+inout vss;
+electrical vss;
+real x;
+analog begin
+    if (V(rst, vss) > 0.5)
+        x = idtmod(1.0, 0.0, 1.0);
+    else
+        x = 0.0;
+    V(out, vss) <+ x;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="idtmod"):
+            compile_module(mod)
+
+    def test_conditional_transition_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_trans(out, sel, vss);
+output out;
+electrical out;
+input sel;
+electrical sel;
+inout vss;
+electrical vss;
+analog begin
+    if (V(sel, vss) > 0.5)
+        V(out, vss) <+ transition(1.0, 0.0, 1p, 1p);
+    else
+        V(out, vss) <+ 0.0;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="transition"):
+            compile_module(mod)
+
+    def test_transition_of_continuous_signal_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_transition_continuous(out, vdd, vss);
+output out;
+electrical out;
+inout vdd, vss;
+electrical vdd, vss;
+real vh;
+analog begin
+    vh = V(vdd, vss);
+    V(out, vss) <+ transition(vh, 0.0, 1p, 1p);
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="piecewise constant"):
+            compile_module(mod)

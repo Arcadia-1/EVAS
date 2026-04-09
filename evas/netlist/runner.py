@@ -290,7 +290,7 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
         writer = csv.writer(f)
         writer.writerow(['time'] + valid_signals)
         for i in range(len(result.time)):
-            row = [f"{result.time[i]:.6e}"]
+            row = [f"{result.time[i]:.12e}"]
             for sig in valid_signals:
                 v = result.signals[sig][i]
                 if sig.endswith('_code'):
@@ -408,6 +408,11 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log.write(f"WARNING ({module.name}): {w}")
             warnings += 1
 
+    # Provide compiled-module registry for hierarchical Verilog-A instances.
+    # Each class can instantiate child modules from this table at runtime.
+    for _mname, (_cls, _module) in models_by_name.items():
+        _cls._module_registry = models_by_name
+
     if errors > 0:
         log.write(f"\nevas completes with {errors} errors, {warnings} warnings.")
         if log_file:
@@ -478,6 +483,26 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
     tstop = netlist.tran.stop
     tstep = netlist.tran.step
+    simopt = netlist.simulator_options or {}
+    reltol = float(simopt.get('reltol', 1e-3))
+    vabstol = float(simopt.get('vabstol', 1e-6))
+    iabstol = float(simopt.get('iabstol', 1e-12))
+    maxstep_opt = simopt.get('maxstep', None)
+    if maxstep_opt is not None:
+        try:
+            tstep = min(float(tstep), float(maxstep_opt))
+        except Exception:
+            pass
+
+    refine_factor = netlist.tran.refine_factor
+    refine_steps = netlist.tran.refine_steps
+    errpreset = str(netlist.tran.__dict__.get('errpreset', simopt.get('errpreset', ''))).lower()
+    if errpreset == 'conservative':
+        refine_factor = max(refine_factor, 32)
+        refine_steps = max(refine_steps, 16)
+    elif errpreset == 'liberal':
+        refine_factor = min(refine_factor, 8)
+        refine_steps = min(refine_steps, 4)
 
     log.write("")
     log.write("*****************************************************")
@@ -488,12 +513,19 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write("    start = 0 s")
     log.write(f"    stop  = {_eng_format(tstop, 's')}")
     log.write(f"    step  = {_eng_format(tstep, 's')}")
+    log.write(f"    reltol = {reltol:g}")
+    log.write(f"    vabstol = {vabstol:g}")
+    log.write(f"    iabstol = {iabstol:g}")
+    log.write(f"    refine_factor = {refine_factor}")
+    log.write(f"    refine_steps  = {refine_steps}")
     log.write("")
 
     t_sim_start = time.time()
     result = sim.run(tstop, tstep=tstep,
-                     refine_factor=netlist.tran.refine_factor,
-                     refine_steps=netlist.tran.refine_steps)
+                     refine_factor=refine_factor,
+                     refine_steps=refine_steps,
+                     reltol=reltol,
+                     vabstol=vabstol)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
@@ -502,6 +534,23 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     sim_elapsed_ms = (time.time() - t_sim_start) * 1000
     n_steps = len(result.time) - 1
     log.write(f"Number of accepted tran steps = {n_steps}")
+    if getattr(sim, "_perf_stats", None):
+        log.write("Performance counters:")
+        for key, value in sorted(sim._perf_stats.items()):
+            log.write(f"    {key} = {value}")
+    model_perf_lines = []
+    for idx, model in enumerate(sim.models):
+        perf = getattr(model, "_perf_stats", None)
+        if not perf:
+            continue
+        model_name = getattr(model, "__class__", type(model)).__name__
+        model_perf_lines.append(f"    model[{idx}] {model_name}:")
+        for key, value in sorted(perf.items()):
+            model_perf_lines.append(f"        {key} = {value}")
+    if model_perf_lines:
+        log.write("Model event counters:")
+        for line in model_perf_lines:
+            log.write(line)
 
     # Signal range summary
     log.write("")
