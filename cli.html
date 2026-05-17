@@ -270,7 +270,7 @@
 <p>Copy a bundled example to the current directory and simulate it.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>run<span class="w"> </span>clk_div
 evas<span class="w"> </span>run<span class="w"> </span>digital_basics
-evas<span class="w"> </span>run<span class="w"> </span>sar_adc_dac_weighted_8b
+evas<span class="w"> </span>run<span class="w"> </span>noise_gen
 </pre></div>
 </div>
 <p>Multi-testbench examples (e.g. <code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code>, <code class="docutils literal notranslate"><span class="pre">digital_basics</span></code>) use
@@ -281,8 +281,7 @@ evas<span class="w"> </span>run<span class="w"> </span>digital_basics<span class
 </div>
 <p>Output goes to <code class="docutils literal notranslate"><span class="pre">./output/&lt;name&gt;/</span></code>. Analysis plots (if an <code class="docutils literal notranslate"><span class="pre">analyze_&lt;name&gt;.py</span></code>
 script is present) are saved there as well.</p>
-<p><strong>Environment variable:</strong> <code class="docutils literal notranslate"><span class="pre">EVAS_OUTPUT_DIR</span></code> is set automatically for the
-analysis script so it can locate simulation results.</p>
+<p>Analysis scripts receive the output directory directly from <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span></code>.</p>
 </section>
 <section id="evas-simulate-file-scs">
 <h2><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span> <span class="pre">&lt;file.scs&gt;</span></code><a class="headerlink" href="#evas-simulate-file-scs" title="Link to this heading">¶</a></h2>

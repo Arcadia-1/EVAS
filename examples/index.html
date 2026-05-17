@@ -257,9 +257,11 @@
         <article role="main" id="furo-main-content">
           <section id="examples-catalog">
 <h1>Examples Catalog<a class="headerlink" href="#examples-catalog" title="Link to this heading">¶</a></h1>
-<p>EVAS ships with <strong>14 example groups</strong>, each containing one or more Verilog-A model files (<code class="docutils literal notranslate"><span class="pre">.va</span></code>),
+<p>EVAS ships with <strong>5 compact example groups</strong>, each containing one or more Verilog-A model files (<code class="docutils literal notranslate"><span class="pre">.va</span></code>),
 Spectre-format testbench netlists (<code class="docutils literal notranslate"><span class="pre">.scs</span></code>), and Python analysis / visualisation scripts.</p>
-<p>Use <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;name&gt;</span></code> to run any example.</p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;name&gt;</span></code> to run any bundled example. The larger workflow-oriented
+example library is maintained outside the simulator package in
+<code class="docutils literal notranslate"><span class="pre">veriloga-skills/evas-sim</span></code>.</p>
 <section id="available-examples">
 <h2>Available Examples<a class="headerlink" href="#available-examples" title="Link to this heading">¶</a></h2>
 <div class="table-wrapper colwidths-auto docutils container">
@@ -273,44 +275,17 @@ Spectre-format testbench netlists (<code class="docutils literal notranslate"><s
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">clk_div</span></code></p></td>
 <td><p>Clock divider (ratio = 4)</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">clk_burst_gen</span></code></p></td>
-<td><p>Clock burst generator</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">digital_basics</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">digital_basics</span></code></p></td>
 <td><p>AND, OR, NOT gates; D flip-flop with reset; inverter chain</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">lfsr</span></code></p></td>
-<td><p>Linear feedback shift register</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">noise_gen</span></code></p></td>
 <td><p>Gaussian noise generator</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ramp_gen</span></code></p></td>
-<td><p>Ramp signal generator</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">edge_interval_timer</span></code></p></td>
-<td><p>Edge-interval timer</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">d2b_4b</span></code></p></td>
-<td><p>4-bit thermometer-to-binary decoder</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dac_binary_clk_4b</span></code></p></td>
-<td><p>4-bit binary DAC (clocked)</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">dac_therm_16b</span></code></p></td>
-<td><p>16-bit thermometer DAC</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">adc_dac_ideal_4b</span></code></p></td>
 <td><p>4-bit ideal ADC + DAC with sample-hold: a) ramp  b) single-tone sine  c) 1000-point sine</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">comparator</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">comparator</span></code></p></td>
 <td><p>a) Ideal comparator  b) StrongARM clocked comparator  c) Binary-search offset calibration  d) Propagation delay measurement</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen</span></code></p></td>
-<td><p>a) Overlap variant (code+1 cells/cycle)  b) No-overlap variant — both at 100 MHz via <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> voltage-to-binary ADC</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sar_adc_dac_weighted_8b</span></code></p></td>
-<td><p>8-bit binary-weighted SAR ADC + DAC; ramp input; DNL/INL characterisation</p></td>
 </tr>
 </tbody>
 </table>
