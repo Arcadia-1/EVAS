@@ -214,3 +214,23 @@ tr:hover td { background: var(--color-background-secondary); }
     opacity: 0.75;
 }
 .lang-switch:hover { opacity: 1; text-decoration: none; }
+
+/* ---------- Traffic stats ---------- */
+.traffic-stats {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.45rem 1rem;
+    padding: 0.75rem 1rem 1.1rem;
+    color: var(--color-foreground-secondary);
+    font-size: 0.78rem;
+}
+.traffic-stats span {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+}
+.traffic-stats strong {
+    color: var(--color-foreground-primary);
+    font-weight: 600;
+}

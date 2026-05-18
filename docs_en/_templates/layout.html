@@ -7,8 +7,18 @@
 
 {%- block footer %}
 {{ super() }}
-<div style="text-align:center; padding: 0.8rem 0; font-size:0.8rem; color: var(--color-foreground-secondary);">
-  Visitors: <span id="busuanzi_value_site_uv"></span> &nbsp;|&nbsp;
-  Page views: <span id="busuanzi_value_site_pv"></span>
+<div class="traffic-stats" aria-label="Traffic statistics">
+  <span>
+    Visitors
+    <strong id="busuanzi_value_site_uv">--</strong>
+  </span>
+  <span>
+    Site views
+    <strong id="busuanzi_value_site_pv">--</strong>
+  </span>
+  <span>
+    Page views
+    <strong id="busuanzi_value_page_pv">--</strong>
+  </span>
 </div>
 {%- endblock %}
