@@ -445,6 +445,26 @@ def _parse_named_params(tokens: List[str], start: int,
     return params
 
 
+def _is_inline_wave_arithmetic(tok: str) -> bool:
+    """Return True for PWL wave tokens Spectre rejects as inline arithmetic.
+
+    Spectre accepts engineering-suffix literals such as ``10n`` and exponent
+    signs such as ``1e-9``, but it does not accept unparenthesized arithmetic
+    tokens like ``30n+10p`` or ``21.5n-100p`` inside ``wave=[...]`` arrays.
+    Those expressions must be precomputed by the testbench author.
+    """
+    text = tok.strip()
+    for i, ch in enumerate(text):
+        if ch not in "+-":
+            continue
+        if i == 0:
+            continue
+        if text[i - 1] in "eE":
+            continue
+        return True
+    return False
+
+
 def _build_source(name: str, node_pos: str, node_neg: str,
                   params: Dict[str, Any]) -> SpectreSource:
     """Build a SpectreSource from parsed named parameters."""
@@ -732,6 +752,12 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
             tok = tok.strip()
             if not tok:
                 continue
+            if _is_inline_wave_arithmetic(tok):
+                raise ValueError(
+                    f"Spectre-incompatible PWL wave token {tok!r} in source {name}: "
+                    "inline arithmetic inside wave=[...] is rejected; precompute "
+                    "the time/value literal"
+                )
             val = _parse_suffix_number(tok)
             if val is None:
                 try:

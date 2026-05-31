@@ -606,16 +606,33 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0,
     When ``width`` is provided, use Spectre vsource pulse semantics: ``width``
     is the high plateau after the rise ramp, so the falling edge starts at
     ``delay + rise + width``.  The older ``duty`` path is kept for direct helper
-    callers that model the falling edge as ``delay + period * duty``.
+    callers that model the falling edge as ``delay + period * duty``.  When
+    ``period`` is non-positive, match Spectre's useful one-shot behavior: the
+    pulse occurs once, and if no width is provided it stays at ``v_hi`` after
+    the rise.
     """
-    fall_start = rise + float(width) if width is not None else period * duty
+    period = float(period)
+    rise = float(rise)
+    fall = float(fall)
+    delay = float(delay)
+    one_shot = period <= 0.0
+    if width is not None:
+        fall_start = rise + float(width)
+    elif one_shot:
+        fall_start = float("inf")
+    else:
+        fall_start = period * duty
     fall_end = fall_start + fall
     # Include edge interior breakpoints so source-driven @cross events are
     # scheduled in chronological order when multiple sources switch together.
-    knees = {0.0, rise, fall_start, fall_end}
+    knees = {0.0, rise}
+    if np.isfinite(fall_start):
+        knees.add(fall_start)
+    if np.isfinite(fall_end):
+        knees.add(fall_end)
     if rise > 0:
         knees.add(0.5 * rise)
-    if fall > 0:
+    if fall > 0 and np.isfinite(fall_start):
         knees.add(fall_start + 0.5 * fall)
     knees = sorted(knees)
 
@@ -623,7 +640,7 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0,
         t_eff = t - delay
         if t_eff < 0:
             return v_lo
-        t_mod = t_eff % period
+        t_mod = t_eff if one_shot else t_eff % period
         if t_mod < rise:
             frac = t_mod / rise if rise > 0 else 1.0
             return v_lo + frac * (v_hi - v_lo)
@@ -636,10 +653,14 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0,
             return v_lo
 
     def _bpfn(t):
-        if period <= 0:
-            return None
         if t < delay:
             return delay
+        if one_shot:
+            for k in knees:
+                candidate = delay + k
+                if candidate > t + 1e-18:
+                    return candidate
+            return None
         t_eff = t - delay
         n = int(t_eff / period)
         for _ in range(2):

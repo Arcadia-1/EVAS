@@ -337,8 +337,8 @@ class TestAddSpectreSourceDegenerateCases:
     def _sim(self):
         return Simulator()
 
-    def test_pulse_no_period_warns_and_becomes_dc(self):
-        """val0=0, val1=0, period not set → DC 0V + warning."""
+    def test_constant_pulse_warns_and_becomes_dc(self):
+        """val0=0, val1=0 -> DC 0V + warning."""
         src = _make_pulse("V2", val0=0.0, val1=0.0, period=0.0)
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
@@ -356,12 +356,33 @@ class TestAddSpectreSourceDegenerateCases:
         assert "val0 == val1" in warns[0]
 
     def test_pulse_missing_period_but_different_vals_warns(self):
-        """val0≠val1 but period=0 → DC at val1 + warning."""
-        src = _make_pulse("Vclk", val0=0.0, val1=1.8, period=0.0)
+        """val0!=val1 but period=0 -> Spectre-style one-shot + warning."""
+        src = _make_pulse("Vclk", val0=0.0, val1=1.8, period=0.0,
+                          delay=2e-9, rise=50e-12)
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert len(warns) == 1
         assert "period not set" in warns[0]
+        waveform = sim.sources[-1].waveform
+        assert waveform(1.9e-9) == pytest.approx(0.0)
+        assert waveform(2.025e-9) == pytest.approx(0.9)
+        assert waveform(2.05e-9) == pytest.approx(1.8)
+        assert waveform(20e-9) == pytest.approx(1.8)
+
+    def test_nonperiodic_pulse_width_falls_once(self):
+        """A no-period pulse with width falls once and remains at val0."""
+        src = _make_pulse("Vrst", val0=0.0, val1=0.9, period=0.0,
+                          delay=1e-9, rise=50e-12, fall=50e-12,
+                          width=2e-9)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert len(warns) == 1
+        waveform = sim.sources[-1].waveform
+        assert waveform(0.5e-9) == pytest.approx(0.0)
+        assert waveform(1.05e-9) == pytest.approx(0.9)
+        assert waveform(3.05e-9) == pytest.approx(0.9)
+        assert waveform(3.1e-9) == pytest.approx(0.0)
+        assert waveform(10e-9) == pytest.approx(0.0)
 
     def test_pulse_valid_no_warnings(self):
         """Well-formed pulse → no warnings."""
@@ -564,6 +585,15 @@ class TestNetlistRegressions:
 
         assert source.source_type == "pwl"
         assert source.params["wave"] == pytest.approx([0.0, 0.0, 10e-9, 1.0, 20e-9, 0.0])
+
+    def test_inline_arithmetic_in_pwl_wave_is_rejected_like_spectre(self, tmp_path):
+        scs = tmp_path / "tb_expr_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[0n 0.0 10n+100p 1.0]
+        """))
+
+        with pytest.raises(ValueError, match="inline arithmetic inside wave"):
+            parse_spectre(str(scs))
 
     def test_invalid_two_name_instance_syntax_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_bad_instance.scs"
@@ -869,3 +899,101 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         log_text = log_path.read_text()
         assert "drives supply port" in log_text
+
+    def test_parameter_port_name_collision_fails(self, tmp_path):
+        va_file = tmp_path / "param_port_collision.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module param_port_collision(vdd, out);
+                input vdd;
+                output out;
+                electrical vdd, out;
+                parameter real vdd = 0.9;
+                analog begin
+                    V(out) <+ V(vdd);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_param_port_collision.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            VDD (vdd 0) vsource dc=0.9 type=dc
+            I1 (vdd out) param_port_collision
+            tran tran stop=1n
+            ahdl_include "param_port_collision.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        log_text = log_path.read_text()
+        assert "parameter name" in log_text
+        assert "collides with module port" in log_text
+
+    def test_case_distinct_parameter_and_port_names_are_allowed(self, tmp_path):
+        va_file = tmp_path / "case_distinct_supply.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module case_distinct_supply(VDD, out);
+                input VDD;
+                output out;
+                electrical VDD, out;
+                parameter real vdd = 0.9;
+                analog begin
+                    V(out) <+ V(VDD) + 0.0 * vdd;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_case_distinct_supply.scs"
+        scs.write_text(textwrap.dedent("""\
+            VDD (vdd 0) vsource dc=0.9 type=dc
+            I1 (vdd out) case_distinct_supply
+            tran tran stop=1n
+            ahdl_include "case_distinct_supply.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(str(scs), output_dir=str(tmp_path / "out"))
+        assert ok
+
+    def test_instance_terminal_count_mismatch_fails(self, tmp_path):
+        va_file = tmp_path / "two_port.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module two_port(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    V(out) <+ V(inp);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_short_instance.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=0.5 type=dc
+            I1 (inp) two_port
+            tran tran stop=1n
+            ahdl_include "two_port.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        log_text = log_path.read_text()
+        assert "terminal count mismatch" in log_text

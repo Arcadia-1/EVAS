@@ -295,6 +295,13 @@ def _contributed_voltage_ports(module) -> set:
 
 def _validate_va_spectre_compat(module) -> None:
     """Run small Spectre-compatibility checks that EVAS can validate locally."""
+    ports = set(module.ports)
+    for param in module.parameters:
+        if param.name in ports:
+            raise ValueError(
+                "Spectre-incompatible Verilog-A: parameter name "
+                f"{param.name!r} collides with module port in {module.name!r}"
+            )
     if module.analog_block is not None:
         genvar_names = {v.name for v in module.variables if getattr(v, "is_genvar", False)}
         _validate_transition_statement(module.analog_block.body, genvar_names=genvar_names)
@@ -326,6 +333,31 @@ def _validate_supply_drive_conflicts(instance, module, node_map: Dict[str, str],
                 f"instance {instance.name} of {module.name} drives supply port "
                 f"{port!r} mapped to externally sourced node {ext_node!r}"
             )
+
+
+def _expanded_port_count(module) -> int:
+    """Count positional instance terminals after expanding vector ports."""
+    decl_by_name = {pd.name: pd for pd in module.port_decls}
+    count = 0
+    for port_name in module.ports:
+        pd = decl_by_name.get(port_name)
+        if pd and pd.is_array:
+            hi = pd.array_hi if pd.array_hi is not None else 0
+            lo = pd.array_lo if pd.array_lo is not None else 0
+            count += abs(hi - lo) + 1
+        else:
+            count += 1
+    return count
+
+
+def _validate_instance_arity(instance, module) -> None:
+    expected = _expanded_port_count(module)
+    actual = len(instance.nodes)
+    if actual != expected:
+        raise ValueError(
+            f"terminal count mismatch for instance {instance.name} of {module.name}: "
+            f"{actual} provided, {expected} expected"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -393,16 +425,13 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
             sim.add_source(node, dc(v0))
             return warn
 
-        if period <= 0:
-            warn.append(f"{src.name}: pulse period not set "
-                        f"— treated as DC {v1} V")
-            sim.add_source(node, dc(v1))
-            return warn
-
         delay = float(params.get('delay', 0.0))
         rise = float(params.get('rise', 1e-12))
         fall = float(params.get('fall', 1e-12))
         width = params.get('width', None)
+        if period <= 0:
+            warn.append(f"{src.name}: pulse period not set "
+                        "- treated as nonperiodic one-shot pulse")
         duty = float(width) / period if width is not None and period > 0 else 0.5
 
         sim.add_source(node, pulse(
@@ -760,8 +789,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
         cls, module = models_by_name[inst.model_name]
         model = cls()
-        node_map = _build_node_map(inst, module)
         try:
+            _validate_instance_arity(inst, module)
+            node_map = _build_node_map(inst, module)
             _validate_supply_drive_conflicts(inst, module, node_map, source_nodes)
         except ValueError as e:
             log.write(f"ERROR: Spectre-incompatible instance {inst.name}: {e}")
