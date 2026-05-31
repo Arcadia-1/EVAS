@@ -517,6 +517,22 @@ class TestParserAssignments:
         assert isinstance(stmt.target, ArrayAccess)
         assert stmt.target.name == "arr"
 
+    def test_expression_assignment_lhs_is_rejected(self):
+        src = """
+        module m();
+        real state, integ;
+        analog begin
+            if (state + integ > 0.9) state + integ = 0.9;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="assignment target"):
+            _parse(src)
+
+    def test_standalone_expression_statement_is_rejected(self):
+        with pytest.raises(ParseError, match="expression statement"):
+            _stmts("foo;")
+
 
 class TestParserIfStatement:
 
@@ -620,6 +636,67 @@ class TestParserEventStatements:
         stmt = stmts[0]
         assert isinstance(stmt.event, EventExpr)
         assert stmt.event.event_type == EventType.INITIAL_STEP
+
+    def test_bare_initial_step_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        analog begin
+            initial_step begin
+                x = 0;
+            end
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="bare 'initial_step begin"):
+            _parse(src)
+
+    def test_module_scope_bare_initial_step_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        initial_step begin
+            x = 0;
+        end
+        analog begin
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="bare 'initial_step begin"):
+            _parse(src)
+
+    def test_digital_initial_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        initial begin
+            x = 0;
+        end
+        analog begin
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="digital Verilog 'initial' block"):
+            _parse(src)
+
+    def test_initial_step_parameter_name_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        parameter real initial_step = 0.45;
+        analog begin
+            V(out) <+ initial_step;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="event keyword"):
+            _parse(src)
 
     def test_combined_event_cross_or_initial_step(self):
         stmts = _stmts("@(cross(V(a) - 0.45) or initial_step) x = 1;")

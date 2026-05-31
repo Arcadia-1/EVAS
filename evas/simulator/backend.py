@@ -2135,7 +2135,10 @@ class _ModuleCompiler:
                 val = f"self._to_integer({val})"
             return [f"{prefix}self._array_set({name!r}, int({idx}), {val})"]
 
-        return [f"{prefix}pass  # unknown assignment target"]
+        raise CompilationError(
+            f"Module {self.module.name} has invalid assignment target "
+            f"{type(stmt.target).__name__}; Spectre requires a variable or array element"
+        )
 
     def _is_integer_variable(self, name: str) -> bool:
         for variable in self.module.variables:
