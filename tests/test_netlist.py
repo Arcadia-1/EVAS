@@ -26,6 +26,7 @@ from evas.netlist.runner import (
     _add_spectre_source,
     _apply_evas_profile,
     _write_csv,
+    evas_simulate,
     SpectreSource,
 )
 from evas.simulator.engine import SimResult, Simulator
@@ -608,6 +609,9 @@ class TestCsvWriter:
 
         assert fast_path.read_text(encoding="utf-8") == fallback_path.read_text(encoding="utf-8")
 
+
+class TestPwlParserRegressions:
+
     def test_backslash_continued_pwl_wave_is_parsed(self, tmp_path):
         scs = tmp_path / "tb_continued_pwl.scs"
         scs.write_text(textwrap.dedent("""\
@@ -675,6 +679,45 @@ class TestCsvWriter:
 
         with pytest.raises(ValueError):
             parse_spectre(str(scs))
+
+
+class TestIndexedParityHarness:
+
+    def test_evas_simulate_runs_indexed_parity_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_PARITY", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_parity = true" in log
+        assert "Indexed parity check:" in log
+        assert "passed: checked_signals=2" in log
+        assert (out_dir / "tran.csv").exists()
 
 
 class TestEvasProfileMapping:

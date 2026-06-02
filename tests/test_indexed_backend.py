@@ -1,14 +1,19 @@
 """Tests for indexed simulator migration helpers."""
 
+import numpy as np
 import pytest
 
 from evas.simulator.indexed import (
     IndexedVoltages,
     NodeIndex,
     StateIndex,
+    build_indexed_run_plan,
     build_node_index,
+    check_indexed_trace_round_trip,
     copy_values_into,
 )
+from evas.simulator.backend import CompiledModel
+from evas.simulator.engine import SimResult, Simulator, dc
 
 
 def test_node_index_assigns_stable_ids_and_names():
@@ -81,3 +86,68 @@ def test_copy_values_into_validates_lengths_and_copies_float_values():
     assert target == pytest.approx([1.0, 2.5])
     with pytest.raises(ValueError, match="target length"):
         copy_values_into(target, [1.0])
+
+
+def test_indexed_run_plan_collects_sources_records_and_model_nodes():
+    class MirrorModel(CompiledModel):
+        def __init__(self):
+            super().__init__()
+            self.node_map = {"in": "vin", "out": "vout"}
+            self.output_nodes = {"vout": 0.0}
+
+    sim = Simulator()
+    sim.add_source("vin", dc(0.25))
+    sim.add_model(MirrorModel())
+    sim.record("vout")
+
+    plan = build_indexed_run_plan(sim, extra_nodes=["monitor"])
+
+    assert plan.node_index.names == ("monitor", "vin", "vout")
+    assert plan.source_node_ids == (plan.node_index.id_of("vin"),)
+    assert plan.recorded_node_ids == (plan.node_index.id_of("vout"),)
+    assert plan.model_node_ids == (
+        plan.node_index.id_of("vin"),
+        plan.node_index.id_of("vout"),
+        plan.node_index.id_of("vout"),
+    )
+
+
+def test_indexed_trace_round_trip_is_lossless_for_simresult():
+    result = SimResult(
+        time=np.array([0.0, 1e-9]),
+        signals={
+            "vin": np.array([0.125, 0.25]),
+            "vout": np.array([0.0, 0.9]),
+        },
+        step_sizes=np.array([0.0, 1e-9]),
+    )
+    index = build_node_index(["vin", "vout"])
+
+    report = check_indexed_trace_round_trip(
+        result,
+        node_index=index,
+        signal_names=["vin", "vout"],
+    )
+
+    assert report.passed
+    assert report.checked_signals == 2
+    assert report.checked_samples == 4
+    assert report.max_abs_diff == 0.0
+    assert report.summary().startswith("passed:")
+
+
+def test_indexed_trace_reports_requested_signals_missing_from_result():
+    result = SimResult(
+        time=np.array([0.0]),
+        signals={"vin": np.array([0.5])},
+        step_sizes=np.array([0.0]),
+    )
+
+    report = check_indexed_trace_round_trip(
+        result,
+        signal_names=["vin", "missing"],
+    )
+
+    assert report.passed
+    assert report.checked_signals == 1
+    assert report.missing_signals == ("missing",)

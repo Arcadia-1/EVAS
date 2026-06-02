@@ -8,7 +8,7 @@ and state numbering utilities that can be tested independently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, MutableSequence, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, MutableSequence, Optional, Sequence, Tuple
 
 
 @dataclass
@@ -137,3 +137,184 @@ def copy_values_into(target: MutableSequence[float], source: Sequence[float]) ->
         raise ValueError(f"target length {len(target)} does not match source length {len(source)}")
     for idx, value in enumerate(source):
         target[idx] = float(value)
+
+
+@dataclass
+class IndexedRunPlan:
+    """Opt-in lowering plan for a dict-backed Simulator instance.
+
+    The plan is intentionally sidecar-only: it records the node ids that a
+    future indexed/Rust backend would consume, but it does not mutate the
+    current Simulator.
+    """
+
+    node_index: NodeIndex
+    source_node_ids: Tuple[int, ...]
+    recorded_node_ids: Tuple[int, ...]
+    model_node_ids: Tuple[int, ...]
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_index)
+
+
+@dataclass
+class IndexedTrace:
+    """Array-style waveform trace used by the indexed parity harness."""
+
+    node_index: NodeIndex
+    time: List[float]
+    signal_node_ids: List[int]
+    values: List[List[float]]
+
+    @classmethod
+    def from_result(
+        cls,
+        result: Any,
+        node_index: Optional[NodeIndex] = None,
+        signal_names: Optional[Iterable[str]] = None,
+        extra_nodes: Iterable[str] = (),
+    ) -> "IndexedTrace":
+        signals = getattr(result, "signals", {})
+        if node_index is None:
+            node_index = build_node_index(extra_nodes, signals.keys())
+        else:
+            node_index.intern_many(extra_nodes)
+            node_index.intern_many(signals.keys())
+
+        requested = list(signal_names) if signal_names is not None else list(signals.keys())
+        valid_signals = [name for name in requested if name in signals]
+        return cls(
+            node_index=node_index,
+            time=[float(value) for value in getattr(result, "time", [])],
+            signal_node_ids=[node_index.id_of(name) for name in valid_signals],
+            values=[
+                [float(value) for value in signals[name]]
+                for name in valid_signals
+            ],
+        )
+
+    @property
+    def signal_names(self) -> Tuple[str, ...]:
+        return tuple(self.node_index.name_of(node_id) for node_id in self.signal_node_ids)
+
+    def to_signal_mapping(self) -> Dict[str, List[float]]:
+        return {
+            self.node_index.name_of(node_id): list(values)
+            for node_id, values in zip(self.signal_node_ids, self.values)
+        }
+
+
+@dataclass(frozen=True)
+class IndexedParityReport:
+    """Result of dict waveform → indexed trace → dict waveform comparison."""
+
+    checked_signals: int
+    checked_samples: int
+    missing_signals: Tuple[str, ...]
+    max_abs_diff: float
+    max_abs_diff_signal: str
+    length_mismatches: Tuple[str, ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        return not self.length_mismatches and self.max_abs_diff == 0.0
+
+    def summary(self) -> str:
+        status = "passed" if self.passed else "failed"
+        missing = len(self.missing_signals)
+        return (
+            f"{status}: checked_signals={self.checked_signals}, "
+            f"checked_samples={self.checked_samples}, "
+            f"max_abs_diff={self.max_abs_diff:g}, "
+            f"max_abs_diff_signal={self.max_abs_diff_signal or 'n/a'}, "
+            f"missing_requested_signals={missing}"
+        )
+
+
+def _iter_model_tree(model: Any):
+    yield model
+    for child in getattr(model, "_child_models", []) or []:
+        yield from _iter_model_tree(child)
+
+
+def _id_tuple(index: NodeIndex, names: Iterable[str]) -> Tuple[int, ...]:
+    return tuple(index.id_of(name) for name in names)
+
+
+def build_indexed_run_plan(simulator: Any, extra_nodes: Iterable[str] = ()) -> IndexedRunPlan:
+    """Build a sidecar node-id plan for the current dict-backed simulator.
+
+    This is the first migration checkpoint before a native backend: every
+    source, recorded node, model port mapping, and caller-supplied netlist node
+    gets a stable integer id.  The function only reads simulator state.
+    """
+
+    source_names: List[str] = []
+    for src in getattr(simulator, "sources", []) or []:
+        node = getattr(src, "node", None)
+        if node:
+            source_names.append(node)
+
+    recorded_names = list(getattr(simulator, "recorded_signals", {}).keys())
+    voltage_names = list(getattr(simulator, "node_voltages", {}).keys())
+    model_names: List[str] = []
+    for model in getattr(simulator, "models", []) or []:
+        for tree_model in _iter_model_tree(model):
+            model_names.extend(getattr(tree_model, "node_map", {}).values())
+            model_names.extend(getattr(tree_model, "output_nodes", {}).keys())
+
+    index = build_node_index(extra_nodes, source_names, recorded_names, voltage_names, model_names)
+    return IndexedRunPlan(
+        node_index=index,
+        source_node_ids=_id_tuple(index, source_names),
+        recorded_node_ids=_id_tuple(index, recorded_names),
+        model_node_ids=_id_tuple(index, model_names),
+    )
+
+
+def check_indexed_trace_round_trip(
+    result: Any,
+    node_index: Optional[NodeIndex] = None,
+    signal_names: Optional[Iterable[str]] = None,
+    extra_nodes: Iterable[str] = (),
+) -> IndexedParityReport:
+    """Check that result waveform lowering to indexed trace is lossless."""
+
+    signals = getattr(result, "signals", {})
+    requested = list(signal_names) if signal_names is not None else list(signals.keys())
+    missing = tuple(name for name in requested if name not in signals)
+    valid_signals = [name for name in requested if name in signals]
+    trace = IndexedTrace.from_result(
+        result,
+        node_index=node_index,
+        signal_names=valid_signals,
+        extra_nodes=extra_nodes,
+    )
+    round_trip = trace.to_signal_mapping()
+
+    max_abs_diff = 0.0
+    max_abs_diff_signal = ""
+    checked_samples = 0
+    length_mismatches: List[str] = []
+    for name in valid_signals:
+        original = [float(value) for value in signals[name]]
+        lowered = round_trip[name]
+        if len(original) != len(lowered):
+            length_mismatches.append(name)
+            continue
+        checked_samples += len(original)
+        for before, after in zip(original, lowered):
+            diff = abs(before - after)
+            if diff > max_abs_diff:
+                max_abs_diff = diff
+                max_abs_diff_signal = name
+
+    return IndexedParityReport(
+        checked_signals=len(valid_signals),
+        checked_samples=checked_samples,
+        missing_signals=missing,
+        max_abs_diff=max_abs_diff,
+        max_abs_diff_signal=max_abs_diff_signal,
+        length_mismatches=tuple(length_mismatches),
+    )

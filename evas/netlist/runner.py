@@ -18,6 +18,7 @@ from evas.compiler.parser import parse as parse_va
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
+from evas.simulator.indexed import build_indexed_run_plan, check_indexed_trace_round_trip
 
 from .spectre_parser import (
     SpectreNetlist,
@@ -925,6 +926,19 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_PROFILE_SECTIONS", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    indexed_parity = _simopt_bool(
+        simopt,
+        'evas_indexed_parity',
+        False,
+    ) or os.environ.get("EVAS_INDEXED_PARITY", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    indexed_plan = None
+    if indexed_parity:
+        indexed_plan = build_indexed_run_plan(
+            sim,
+            extra_nodes=sorted(all_nodes | record_nodes),
+        )
 
     log.write("")
     log.write("*****************************************************")
@@ -946,6 +960,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_skip_source_error_control = true")
     if profile_sections:
         log.write("    evas_profile_sections = true")
+    if indexed_parity:
+        log.write("    evas_indexed_parity = true")
+        log.write(f"    indexed_node_count = {indexed_plan.node_count}")
     log.write("")
 
     t_sim_start = time.time()
@@ -1009,10 +1026,32 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     derived = _derive_bus_signals(result)
     derive_elapsed = time.time() - t_derive_start
     result.signals.update(derived)
+    save_with_derived = list(netlist.save_signals) + list(derived.keys())
+
+    if indexed_parity:
+        report = check_indexed_trace_round_trip(
+            result,
+            node_index=indexed_plan.node_index if indexed_plan else None,
+            signal_names=save_with_derived if save_with_derived else sorted(result.signals.keys()),
+        )
+        log.write("Indexed parity check:")
+        log.write(f"    {report.summary()}")
+        if report.length_mismatches:
+            log.write(
+                "    length_mismatches = "
+                f"{', '.join(report.length_mismatches)}"
+            )
+        if report.missing_signals:
+            log.write(
+                "    missing_requested_signals = "
+                f"{', '.join(report.missing_signals)}"
+            )
+        if not report.passed:
+            log.write("ERROR: Indexed parity check failed")
+            errors += 1
 
     # 7. Write CSV
     csv_path = out_dir / 'tran.csv'
-    save_with_derived = list(netlist.save_signals) + list(derived.keys())
     t_csv_start = time.time()
     _write_csv(csv_path, result, save_with_derived, netlist.save_formats)
     csv_elapsed = time.time() - t_csv_start
