@@ -894,9 +894,19 @@ endmodule
         assert rust._perf_stats["rust_static_eval_segments"] == 1
         assert rust._perf_stats["rust_static_eval_max_segment_models"] == 1
         assert rust._perf_stats["rust_static_eval_calls"] == rust._perf_stats["steps_total"]
+        assert rust._perf_stats["rust_static_eval_node_voltage_syncs"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["rust_static_eval_deferred_output_syncs"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["rust_static_eval_output_syncs"] == 1
         assert rust._perf_stats["rust_static_eval_errors"] == 0
         assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
         assert rust._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
+        assert rust_model.output_nodes["vout"] == pytest.approx(
+            rust_result.signals["VOUT"][-1]
+        )
 
     def test_rust_static_eval_batches_consecutive_affine_models_in_order(self):
         _build_rust_core_or_skip()
@@ -940,11 +950,60 @@ endmodule
         assert rust._perf_stats["rust_static_eval_segments"] == 1
         assert rust._perf_stats["rust_static_eval_max_segment_models"] == 3
         assert rust._perf_stats["rust_static_eval_calls"] == rust._perf_stats["steps_total"]
-        assert rust._perf_stats["rust_static_eval_output_syncs"] == (
+        assert rust._perf_stats["rust_static_eval_node_voltage_syncs"] == (
             rust._perf_stats["steps_total"] * 3
         )
+        assert rust._perf_stats["rust_static_eval_deferred_output_syncs"] == (
+            rust._perf_stats["steps_total"] * 3
+        )
+        assert rust._perf_stats["rust_static_eval_output_syncs"] == 3
         assert rust._perf_stats["rust_static_eval_errors"] == 0
         assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
+        assert rust.models[-1].output_nodes["vout"] == pytest.approx(
+            rust_result.signals["VOUT"][-1]
+        )
+
+    def test_rust_static_eval_deferred_output_sync_preserves_unmapped_model(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ 0.5 * V(vin) + 0.25;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            sim = Simulator()
+            sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+            sim.add_model(ModelCls())
+            sim.record("vout")
+            return sim
+
+        default = build_sim()
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        rust = build_sim()
+        rust_result = rust.run(tstop=2e-9, tstep=1e-9, rust_static_eval=True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.step_sizes.tolist() == pytest.approx(
+            default_result.step_sizes.tolist()
+        )
+        assert rust_result.signals["vout"].tolist() == pytest.approx(
+            default_result.signals["vout"].tolist()
+        )
+        assert rust._perf_stats["rust_static_eval_output_syncs"] == 1
+        assert rust._perf_stats["rust_static_eval_node_voltage_syncs"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust.models[0].output_nodes["vout"] == pytest.approx(
+            rust_result.signals["vout"][-1]
+        )
 
 
 # ===========================================================================

@@ -493,6 +493,8 @@ class Simulator:
             "rust_static_eval_max_segment_models": 0,
             "rust_static_eval_calls": 0,
             "rust_static_eval_output_syncs": 0,
+            "rust_static_eval_node_voltage_syncs": 0,
+            "rust_static_eval_deferred_output_syncs": 0,
             "rust_static_eval_fallback_models": 0,
             "rust_static_eval_errors": 0,
             "model_post_update_calls": 0,
@@ -1020,16 +1022,26 @@ class Simulator:
                 default=0,
             )
 
-        def _sync_rust_static_outputs(sync_entries: Tuple[tuple, ...]) -> None:
+        def _sync_rust_static_outputs(
+            sync_entries: Tuple[tuple, ...],
+            *,
+            sync_node_voltages: bool,
+            sync_output_nodes: bool,
+        ) -> None:
             if indexed_array is None:
                 return
             for model, local_node, external_node, write_node_id in sync_entries:
                 value = float(indexed_array.values[write_node_id])
-                if local_node not in model.output_nodes:
-                    model._output_nodes_version += 1
-                model.output_nodes[local_node] = value
-                self.node_voltages[external_node] = value
-                self._perf_stats["rust_static_eval_output_syncs"] += 1
+                if sync_output_nodes:
+                    if local_node not in model.output_nodes:
+                        model._output_nodes_version += 1
+                    model.output_nodes[local_node] = value
+                    self._perf_stats["rust_static_eval_output_syncs"] += 1
+                else:
+                    self._perf_stats["rust_static_eval_deferred_output_syncs"] += 1
+                if sync_node_voltages:
+                    self.node_voltages[external_node] = value
+                    self._perf_stats["rust_static_eval_node_voltage_syncs"] += 1
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
             if indexed_array is None:
@@ -1282,7 +1294,11 @@ class Simulator:
                     rust_segment_succeeded = False
                     try:
                         rust_backend.evaluate_static_affine(batch, indexed_array.values)
-                        _sync_rust_static_outputs(sync_entries)
+                        _sync_rust_static_outputs(
+                            sync_entries,
+                            sync_node_voltages=True,
+                            sync_output_nodes=False,
+                        )
                         self._perf_stats["rust_static_eval_calls"] += 1
                         rust_segment_succeeded = True
                     except RustBackendError:
@@ -1504,6 +1520,14 @@ class Simulator:
                 if profile_clock is not None:
                     _add_profile_time("record_point_s", _section_start)
             self._perf_stats["steps_total"] += 1
+
+        if rust_static_eval_segments_by_start and indexed_array is not None:
+            for _, _, sync_entries in rust_static_eval_segments_by_start.values():
+                _sync_rust_static_outputs(
+                    sync_entries,
+                    sync_node_voltages=False,
+                    sync_output_nodes=True,
+                )
 
         # Fire final_step events
         _section_start = profile_clock() if profile_clock is not None else 0.0
