@@ -189,7 +189,9 @@ endmodule
     ModelCls = compile_module(parse(src))
 
     assert ModelCls._static_voltage_read_nodes == ("clk",)
+    assert ModelCls._event_trigger_voltage_read_nodes == ("clk",)
     assert ModelCls._event_voltage_read_nodes == ("inp",)
+    assert ModelCls._event_body_voltage_read_nodes == ("inp",)
     assert ModelCls._static_output_write_nodes == ("out",)
     assert ModelCls._dynamic_voltage_read_count == 0
     assert ModelCls._dynamic_output_write_count == 0
@@ -246,12 +248,16 @@ endmodule
 
     assert model_io.output_node_ids == ()
     assert model_io.static_voltage_read_node_ids == (plan.node_index.id_of("CLK"),)
+    assert model_io.event_trigger_voltage_node_ids == (plan.node_index.id_of("CLK"),)
     assert model_io.event_voltage_read_node_ids == (plan.node_index.id_of("INP"),)
+    assert model_io.event_body_voltage_read_node_ids == (plan.node_index.id_of("INP"),)
     assert model_io.static_output_write_node_ids == (plan.node_index.id_of("OUT"),)
     assert model_io.dynamic_voltage_read_count == 0
     assert model_io.dynamic_output_write_count == 0
     assert plan.static_voltage_read_count == 1
+    assert plan.event_trigger_voltage_count == 1
     assert plan.event_voltage_read_count == 1
+    assert plan.event_body_voltage_read_count == 1
     assert plan.static_output_write_count == 1
 
 

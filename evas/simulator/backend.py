@@ -27,7 +27,9 @@ class CompiledModel:
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
     _static_voltage_read_nodes = ()
+    _event_trigger_voltage_read_nodes = ()
     _event_voltage_read_nodes = ()
+    _event_body_voltage_read_nodes = ()
     _static_output_write_nodes = ()
     _dynamic_voltage_read_count = 0
     _dynamic_output_write_count = 0
@@ -1246,9 +1248,13 @@ class _ModuleCompiler:
         cls._static_voltage_read_nodes = tuple(
             sorted(branch_io["static_voltage_read_nodes"])
         )
+        cls._event_trigger_voltage_read_nodes = tuple(
+            sorted(branch_io["event_trigger_voltage_read_nodes"])
+        )
         cls._event_voltage_read_nodes = tuple(
             sorted(branch_io["event_voltage_read_nodes"])
         )
+        cls._event_body_voltage_read_nodes = cls._event_voltage_read_nodes
         cls._static_output_write_nodes = tuple(
             sorted(branch_io["static_output_write_nodes"])
         )
@@ -1715,6 +1721,7 @@ class _ModuleCompiler:
     def _empty_static_branch_io(self) -> Dict[str, Any]:
         return {
             "static_voltage_read_nodes": set(),
+            "event_trigger_voltage_read_nodes": set(),
             "event_voltage_read_nodes": set(),
             "static_output_write_nodes": set(),
             "dynamic_voltage_read_count": 0,
@@ -1845,6 +1852,66 @@ class _ModuleCompiler:
             for arg in expr.args:
                 self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
 
+    def _collect_event_trigger_voltage_nodes_from_expr(
+        self,
+        expr: Expr,
+        acc: Dict[str, Any],
+    ) -> None:
+        """Record static branch reads used by cross/above trigger expressions.
+
+        These nodes still participate in ordinary evaluate-time expression
+        reads, so they remain in ``static_voltage_read_nodes`` as well.  This
+        extra set is an IR boundary for future event interpolation/native
+        lowering work.
+        """
+        if isinstance(expr, (NumberLiteral, StringLiteral, Identifier)):
+            return
+
+        if isinstance(expr, ArrayAccess):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.index, acc)
+            return
+
+        if isinstance(expr, BranchAccess):
+            if expr.access_type == "V":
+                if expr.node1_index is None:
+                    acc["event_trigger_voltage_read_nodes"].add(expr.node1)
+                else:
+                    self._collect_event_trigger_voltage_nodes_from_expr(expr.node1_index, acc)
+                    if expr.node1_index2 is not None:
+                        self._collect_event_trigger_voltage_nodes_from_expr(expr.node1_index2, acc)
+                if expr.node2 is not None:
+                    if expr.node2_index is None:
+                        acc["event_trigger_voltage_read_nodes"].add(expr.node2)
+                    else:
+                        self._collect_event_trigger_voltage_nodes_from_expr(expr.node2_index, acc)
+                        if expr.node2_index2 is not None:
+                            self._collect_event_trigger_voltage_nodes_from_expr(expr.node2_index2, acc)
+            return
+
+        if isinstance(expr, BinaryExpr):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.left, acc)
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.right, acc)
+            return
+
+        if isinstance(expr, UnaryExpr):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.operand, acc)
+            return
+
+        if isinstance(expr, TernaryExpr):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.cond, acc)
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.true_expr, acc)
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.false_expr, acc)
+            return
+
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                self._collect_event_trigger_voltage_nodes_from_expr(arg, acc)
+            return
+
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                self._collect_event_trigger_voltage_nodes_from_expr(arg, acc)
+
     def _collect_static_branch_io_from_event(
         self,
         event,
@@ -1852,6 +1919,11 @@ class _ModuleCompiler:
         in_event_body: bool,
     ) -> None:
         if isinstance(event, EventExpr):
+            if (
+                event.event_type in (EventType.CROSS, EventType.ABOVE)
+                and event.args
+            ):
+                self._collect_event_trigger_voltage_nodes_from_expr(event.args[0], acc)
             for arg in event.args:
                 self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
             if event.time_tol_expr is not None:

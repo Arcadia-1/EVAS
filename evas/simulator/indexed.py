@@ -329,7 +329,9 @@ class IndexedModelIO:
     mapped_port_node_ids: Tuple[int, ...]
     output_node_ids: Tuple[int, ...]
     static_voltage_read_node_ids: Tuple[int, ...] = ()
+    event_trigger_voltage_node_ids: Tuple[int, ...] = ()
     event_voltage_read_node_ids: Tuple[int, ...] = ()
+    event_body_voltage_read_node_ids: Tuple[int, ...] = ()
     static_output_write_node_ids: Tuple[int, ...] = ()
     dynamic_voltage_read_count: int = 0
     dynamic_output_write_count: int = 0
@@ -369,6 +371,20 @@ class IndexedModelIOPlan:
     def event_voltage_read_count(self) -> int:
         return sum(
             len(model_io.event_voltage_read_node_ids)
+            for model_io in self.model_ios
+        )
+
+    @property
+    def event_trigger_voltage_count(self) -> int:
+        return sum(
+            len(model_io.event_trigger_voltage_node_ids)
+            for model_io in self.model_ios
+        )
+
+    @property
+    def event_body_voltage_read_count(self) -> int:
+        return sum(
+            len(model_io.event_body_voltage_read_node_ids)
             for model_io in self.model_ios
         )
 
@@ -522,9 +538,21 @@ def build_indexed_model_io_plan(
                 _resolve_model_node(tree_model, local_name)
                 for local_name in getattr(model_cls, "_static_voltage_read_nodes", ()) or ()
             ]
+            event_trigger_reads = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(model_cls, "_event_trigger_voltage_read_nodes", ()) or ()
+            ]
             event_reads = [
                 _resolve_model_node(tree_model, local_name)
                 for local_name in getattr(model_cls, "_event_voltage_read_nodes", ()) or ()
+            ]
+            event_body_reads = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in (
+                    getattr(model_cls, "_event_body_voltage_read_nodes", None)
+                    or getattr(model_cls, "_event_voltage_read_nodes", ())
+                    or ()
+                )
             ]
             static_writes = [
                 _resolve_model_node(tree_model, local_name)
@@ -543,7 +571,9 @@ def build_indexed_model_io_plan(
                     mapped_ports,
                     output_nodes,
                     static_reads,
+                    event_trigger_reads,
                     event_reads,
+                    event_body_reads,
                     static_writes,
                     dynamic_read_count,
                     dynamic_write_count,
@@ -552,7 +582,9 @@ def build_indexed_model_io_plan(
             io_names.extend(mapped_ports)
             io_names.extend(output_nodes)
             io_names.extend(static_reads)
+            io_names.extend(event_trigger_reads)
             io_names.extend(event_reads)
+            io_names.extend(event_body_reads)
             io_names.extend(static_writes)
 
     index = build_node_index(extra_nodes, io_names)
@@ -563,7 +595,9 @@ def build_indexed_model_io_plan(
             mapped_port_node_ids=_id_tuple(index, mapped_ports),
             output_node_ids=_id_tuple(index, output_nodes),
             static_voltage_read_node_ids=_id_tuple(index, static_reads),
+            event_trigger_voltage_node_ids=_id_tuple(index, event_trigger_reads),
             event_voltage_read_node_ids=_id_tuple(index, event_reads),
+            event_body_voltage_read_node_ids=_id_tuple(index, event_body_reads),
             static_output_write_node_ids=_id_tuple(index, static_writes),
             dynamic_voltage_read_count=dynamic_read_count,
             dynamic_output_write_count=dynamic_write_count,
@@ -574,7 +608,9 @@ def build_indexed_model_io_plan(
             mapped_ports,
             output_nodes,
             static_reads,
+            event_trigger_reads,
             event_reads,
+            event_body_reads,
             static_writes,
             dynamic_read_count,
             dynamic_write_count,

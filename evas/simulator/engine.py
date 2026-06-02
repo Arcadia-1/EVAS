@@ -845,6 +845,8 @@ class Simulator:
             self._indexed_model_io_stats = {
                 "dynamic_output_write_count": indexed_model_io_plan.dynamic_output_write_count,
                 "dynamic_voltage_read_count": indexed_model_io_plan.dynamic_voltage_read_count,
+                "event_body_voltage_read_count": indexed_model_io_plan.event_body_voltage_read_count,
+                "event_trigger_voltage_count": indexed_model_io_plan.event_trigger_voltage_count,
                 "event_voltage_read_count": indexed_model_io_plan.event_voltage_read_count,
                 "node_count": indexed_model_io_plan.node_count,
                 "model_count": indexed_model_io_plan.model_count,
