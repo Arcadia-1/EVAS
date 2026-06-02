@@ -926,6 +926,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_PROFILE_SECTIONS", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    profile_model_eval = _simopt_bool(
+        simopt,
+        'evas_profile_model_eval',
+        False,
+    ) or os.environ.get("EVAS_PROFILE_MODEL_EVAL", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
     indexed_parity = _simopt_bool(
         simopt,
         'evas_indexed_parity',
@@ -974,6 +981,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_skip_source_error_control = true")
     if profile_sections:
         log.write("    evas_profile_sections = true")
+    if profile_model_eval:
+        log.write("    evas_profile_model_eval = true")
     if indexed_parity:
         log.write("    evas_indexed_parity = true")
         log.write(f"    indexed_node_count = {indexed_plan.node_count}")
@@ -992,6 +1001,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      record_step=tstep,
                      skip_source_error_control=skip_source_error_control,
                      profile_sections=profile_sections,
+                     profile_model_eval=profile_model_eval,
                      indexed_snapshot_profile=indexed_snapshot_profile,
                      indexed_arrays=indexed_arrays)
 
@@ -1023,6 +1033,15 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("Section timing counters:")
         for key, value in sorted(sim._profile_times.items()):
             log.write(f"    {key} = {value:.6f} s")
+    if getattr(sim, "_model_profile_stats", None):
+        log.write("Model timing counters:")
+        for model_key, stats in sorted(sim._model_profile_stats.items()):
+            log.write(f"    {model_key}:")
+            for key, value in sorted(stats.items()):
+                if key.endswith("_s"):
+                    log.write(f"        {key} = {value:.6f} s")
+                else:
+                    log.write(f"        {key} = {int(value)}")
     if getattr(sim, "_indexed_snapshot_stats", None):
         log.write("Indexed snapshot profile:")
         for key, value in sorted(sim._indexed_snapshot_stats.items()):

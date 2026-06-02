@@ -407,6 +407,7 @@ class Simulator:
             record_step: float = None,
             skip_source_error_control: bool = False,
             profile_sections: bool = False,
+            profile_model_eval: bool = False,
             indexed_snapshot_profile: bool = False,
             indexed_arrays: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
@@ -473,16 +474,41 @@ class Simulator:
         self._indexed_model_io_stats: Dict[str, object] = {}
         self._indexed_voltage_probe_stats: Dict[str, object] = {}
         self._indexed_voltage_read_stats: Dict[str, object] = {}
+        self._model_profile_stats: Dict[str, Dict[str, float]] = {}
         profile_clock = (
             _wall_time.perf_counter
-            if (profile_sections or indexed_snapshot_profile or indexed_arrays)
+            if (
+                profile_sections
+                or profile_model_eval
+                or indexed_snapshot_profile
+                or indexed_arrays
+            )
             else None
         )
+        model_profile_enabled = bool(profile_model_eval and profile_clock is not None)
 
-        def _add_profile_time(name: str, start: float):
+        def _add_profile_time(name: str, start: float) -> float:
             if profile_clock is not None:
                 elapsed = profile_clock() - start
                 self._profile_times[name] = self._profile_times.get(name, 0.0) + elapsed
+                return elapsed
+            return 0.0
+
+        def _add_model_profile_time(index: int, model, name: str, elapsed: float):
+            if not model_profile_enabled:
+                return
+            model_name = getattr(getattr(model, "__class__", type(model)), "__name__", "model")
+            key = f"model[{index}] {model_name}"
+            stats = self._model_profile_stats.setdefault(
+                key,
+                {
+                    "evaluate_calls": 0.0,
+                    "evaluate_s": 0.0,
+                    "post_update_s": 0.0,
+                    "prepare_step_s": 0.0,
+                },
+            )
+            stats[name] = stats.get(name, 0.0) + elapsed
 
         def _set_model_indexed_output_writer(writer):
             for model in self.models:
@@ -902,7 +928,9 @@ class Simulator:
 
             # Evaluate all models
             cross_fired = False
-            for model, model_needs_future in zip(self.models, model_needs_future_node_voltages):
+            for model_index, (model, model_needs_future) in enumerate(
+                zip(self.models, model_needs_future_node_voltages)
+            ):
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model_future_nv = (
                     future_nv
@@ -912,17 +940,21 @@ class Simulator:
                 )
                 model._prepare_step(prev_nv, self.node_voltages, prev_time, time, model_future_nv)
                 if profile_clock is not None:
-                    _add_profile_time("model_prepare_step_s", _section_start)
+                    elapsed = _add_profile_time("model_prepare_step_s", _section_start)
+                    _add_model_profile_time(model_index, model, "prepare_step_s", elapsed)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model.evaluate(self.node_voltages, time)
                 if profile_clock is not None:
-                    _add_profile_time("model_evaluate_s", _section_start)
+                    elapsed = _add_profile_time("model_evaluate_s", _section_start)
+                    _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
+                    _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model._expire_absolute_timers(time)
                 if model.post_update_events(self.node_voltages, time):
                     model.refresh_outputs(self.node_voltages, time)
                 if profile_clock is not None:
-                    _add_profile_time("model_post_update_s", _section_start)
+                    elapsed = _add_profile_time("model_post_update_s", _section_start)
+                    _add_model_profile_time(model_index, model, "post_update_s", elapsed)
                 if getattr(model, "_step_event_fired", False):
                     cross_fired = True
 

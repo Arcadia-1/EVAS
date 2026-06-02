@@ -599,6 +599,38 @@ class TestSimulator:
         assert "dict_prev_snapshot_s" in sim._profile_times
         assert "indexed_prev_snapshot_s" in sim._profile_times
 
+    def test_model_eval_profile_is_explicitly_opted_in(self):
+        class MirrorModel(CompiledModel):
+            def __init__(self):
+                super().__init__()
+                self.node_map = {"inp": "vin", "out": "vout"}
+
+            def evaluate(self, node_voltages, time):
+                self._set_output("out", self._get_voltage("inp", node_voltages), node_voltages)
+
+        default = Simulator()
+        default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.add_model(MirrorModel())
+        default.record("vout")
+        default_result = default.run(tstop=2e-9, tstep=1e-9, profile_sections=True)
+
+        profiled = Simulator()
+        profiled.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        profiled.add_model(MirrorModel())
+        profiled.record("vout")
+        profiled_result = profiled.run(tstop=2e-9, tstep=1e-9, profile_model_eval=True)
+
+        assert default_result.signals["vout"].tolist() == pytest.approx(
+            profiled_result.signals["vout"].tolist()
+        )
+        assert default._model_profile_stats == {}
+        assert "model[0] MirrorModel" in profiled._model_profile_stats
+        stats = profiled._model_profile_stats["model[0] MirrorModel"]
+        assert stats["evaluate_calls"] == profiled._perf_stats["steps_total"]
+        assert stats["prepare_step_s"] >= 0.0
+        assert stats["evaluate_s"] >= 0.0
+        assert stats["post_update_s"] >= 0.0
+
     def test_indexed_arrays_preserve_source_record_and_error_scan_results(self):
         default = Simulator()
         default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
