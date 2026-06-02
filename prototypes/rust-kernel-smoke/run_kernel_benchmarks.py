@@ -122,6 +122,20 @@ def main() -> None:
             ],
         ),
         (
+            "rust_model_abi",
+            [
+                str(RUST_BIN),
+                "--kernel",
+                "model-abi",
+                "--steps",
+                str(args.steps),
+                "--models",
+                str(args.models),
+                "--record-stride",
+                str(args.record_stride),
+            ],
+        ),
+        (
             "python_pfd_fixed_step",
             [
                 "python3",
@@ -198,6 +212,14 @@ def main() -> None:
         "rust_indexed_over_python_indexed": (
             results["python_measurement_indexed"]["median_s"]
             / results["rust_measurement_indexed"]["median_s"]
+        ),
+        "rust_model_abi_over_python_dict": (
+            results["python_measurement_dict"]["median_s"]
+            / results["rust_model_abi"]["median_s"]
+        ),
+        "rust_model_abi_over_python_indexed": (
+            results["python_measurement_indexed"]["median_s"]
+            / results["rust_model_abi"]["median_s"]
         ),
         "python_pfd_event_over_fixed": (
             results["python_pfd_fixed_step"]["median_s"]

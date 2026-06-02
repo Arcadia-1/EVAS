@@ -14,6 +14,7 @@ struct Config {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kernel {
     MeasurementIndexed,
+    ModelAbi,
     PfdFixedStep,
     PfdEventQueue,
 }
@@ -22,10 +23,11 @@ impl Kernel {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "measurement-indexed" => Ok(Self::MeasurementIndexed),
+            "model-abi" => Ok(Self::ModelAbi),
             "pfd-fixed-step" => Ok(Self::PfdFixedStep),
             "pfd-event-queue" => Ok(Self::PfdEventQueue),
             _ => Err(format!(
-                "unknown kernel: {value}; expected measurement-indexed, pfd-fixed-step, or pfd-event-queue"
+                "unknown kernel: {value}; expected measurement-indexed, model-abi, pfd-fixed-step, or pfd-event-queue"
             )),
         }
     }
@@ -33,6 +35,7 @@ impl Kernel {
     fn as_str(self) -> &'static str {
         match self {
             Self::MeasurementIndexed => "measurement-indexed",
+            Self::ModelAbi => "model-abi",
             Self::PfdFixedStep => "pfd-fixed-step",
             Self::PfdEventQueue => "pfd-event-queue",
         }
@@ -131,6 +134,96 @@ fn run_measurement_indexed(cfg: &Config) -> (usize, u64, f64, f64) {
     }
 
     (cfg.steps, events, checksum, err_acc)
+}
+
+#[derive(Clone, Debug)]
+struct ModelEvalAbi {
+    read_node_ids: Vec<usize>,
+    write_node_ids: Vec<usize>,
+    scalar_state_ids: Vec<usize>,
+    alpha: f64,
+    gain: f64,
+    bias: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbiError {
+    MissingReadNode,
+    MissingWriteNode,
+    MissingStateSlot,
+    NodeOutOfBounds,
+    StateOutOfBounds,
+}
+
+fn evaluate_model_abi(
+    abi: &ModelEvalAbi,
+    values: &mut [f64],
+    scalar_state: &mut [f64],
+) -> Result<(), AbiError> {
+    let read_id = *abi.read_node_ids.first().ok_or(AbiError::MissingReadNode)?;
+    let write_id = *abi.write_node_ids.first().ok_or(AbiError::MissingWriteNode)?;
+    let state_id = *abi
+        .scalar_state_ids
+        .first()
+        .ok_or(AbiError::MissingStateSlot)?;
+    if read_id >= values.len() || write_id >= values.len() {
+        return Err(AbiError::NodeOutOfBounds);
+    }
+    if state_id >= scalar_state.len() {
+        return Err(AbiError::StateOutOfBounds);
+    }
+
+    let input = values[read_id];
+    let old_state = scalar_state[state_id];
+    let next_state = old_state + abi.alpha * (input - old_state);
+    scalar_state[state_id] = next_state;
+    values[write_id] = abi.bias + abi.gain * next_state;
+    Ok(())
+}
+
+fn run_model_abi(cfg: &Config) -> (usize, u64, f64, f64) {
+    let model_count = cfg.models.max(1);
+    let node_count = model_count + 1;
+    let mut values = vec![0.0_f64; node_count];
+    let mut prev_values = vec![0.0_f64; node_count];
+    let mut scalar_state = vec![0.0_f64; model_count];
+    let abis: Vec<ModelEvalAbi> = (0..model_count)
+        .map(|model| ModelEvalAbi {
+            read_node_ids: vec![model],
+            write_node_ids: vec![model + 1],
+            scalar_state_ids: vec![model],
+            alpha: 0.02 + 0.001 * ((model % 11) as f64),
+            gain: 0.85 + 0.01 * ((model % 5) as f64),
+            bias: 0.05,
+        })
+        .collect();
+
+    let mut checksum = 0.0_f64;
+    let mut err_acc = 0.0_f64;
+    let mut phase = 0.0_f64;
+
+    for step in 0..cfg.steps {
+        prev_values.copy_from_slice(&values);
+        phase += 0.000_017;
+        if phase >= 1.0 {
+            phase -= 1.0;
+        }
+        values[0] = 0.5 + 0.45 * (phase * std::f64::consts::TAU).sin();
+
+        for abi in &abis {
+            evaluate_model_abi(abi, &mut values, &mut scalar_state)
+                .expect("static ABI layout is valid");
+        }
+
+        for idx in 0..node_count {
+            err_acc += (values[idx] - prev_values[idx]).abs();
+        }
+        if step % cfg.record_stride == 0 {
+            checksum += values[node_count - 1] + scalar_state[model_count - 1] * 0.125;
+        }
+    }
+
+    (cfg.steps, 0, checksum, err_acc)
 }
 
 fn run_pfd_fixed_step(cfg: &Config) -> (usize, u64, f64, f64) {
@@ -271,6 +364,7 @@ fn main() {
     let started = Instant::now();
     let (processed_steps, events, checksum, err_acc) = match cfg.kernel {
         Kernel::MeasurementIndexed => run_measurement_indexed(&cfg),
+        Kernel::ModelAbi => run_model_abi(&cfg),
         Kernel::PfdFixedStep => run_pfd_fixed_step(&cfg),
         Kernel::PfdEventQueue => run_pfd_event_queue(&cfg),
     };
@@ -313,5 +407,59 @@ mod tests {
         let queued = run_pfd_event_queue(&cfg);
         assert!(queued.0 < fixed.0 / 10);
         assert_eq!(fixed.1, queued.1);
+    }
+
+    #[test]
+    fn model_abi_updates_state_and_output() {
+        let abi = ModelEvalAbi {
+            read_node_ids: vec![0],
+            write_node_ids: vec![1],
+            scalar_state_ids: vec![0],
+            alpha: 0.25,
+            gain: 2.0,
+            bias: 0.1,
+        };
+        let mut values = vec![0.8, 0.0];
+        let mut state = vec![0.2];
+
+        evaluate_model_abi(&abi, &mut values, &mut state).unwrap();
+
+        assert!((state[0] - 0.35).abs() < 1e-15);
+        assert!((values[1] - 0.8).abs() < 1e-15);
+    }
+
+    #[test]
+    fn model_abi_rejects_out_of_bounds_layout() {
+        let abi = ModelEvalAbi {
+            read_node_ids: vec![0],
+            write_node_ids: vec![5],
+            scalar_state_ids: vec![0],
+            alpha: 0.25,
+            gain: 1.0,
+            bias: 0.0,
+        };
+        let mut values = vec![0.8, 0.0];
+        let mut state = vec![0.2];
+
+        assert_eq!(
+            evaluate_model_abi(&abi, &mut values, &mut state),
+            Err(AbiError::NodeOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn model_abi_kernel_is_deterministic() {
+        let cfg = Config {
+            kernel: Kernel::ModelAbi,
+            steps: 1_000,
+            models: 8,
+            record_stride: 4,
+        };
+        let first = run_model_abi(&cfg);
+        let second = run_model_abi(&cfg);
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, second.1);
+        assert!((first.2 - second.2).abs() < 1e-15);
+        assert!((first.3 - second.3).abs() < 1e-15);
     }
 }

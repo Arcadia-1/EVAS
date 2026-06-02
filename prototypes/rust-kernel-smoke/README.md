@@ -18,11 +18,34 @@ Run:
 ```bash
 cargo test --release
 cargo run --release -- --kernel measurement-indexed --steps 200000 --models 64 --record-stride 16
+cargo run --release -- --kernel model-abi --steps 200000 --models 64 --record-stride 16
 cargo run --release -- --kernel pfd-fixed-step --steps 60062 --models 64 --record-stride 16
 cargo run --release -- --kernel pfd-event-queue --steps 60062 --models 64 --record-stride 16
 python3 python_dict_baseline.py --steps 200000 --models 64 --record-stride 16
 python3 project_rust_backend.py
 ```
+
+## Model Evaluate ABI Prototype
+
+The `model-abi` kernel is a minimal Rust-side ABI sketch for 017-020:
+
+- node reads/writes are integer ids into one `Vec<f64>`;
+- scalar state uses model-local state slots;
+- model parameters live in a compact ABI struct;
+- invalid node/state ids return explicit ABI errors in tests.
+
+It does not call EVAS Python code and does not replace the simulator runtime.
+It only checks that the metadata shape built by the Python side can drive a
+native evaluate loop without string node names or Python dict state.
+
+Smoke run on 2026-06-03:
+
+```text
+cargo run --release -- --kernel model-abi --steps 200000 --models 64 --record-stride 16
+engine=rust_indexed kernel=model-abi requested_steps=200000 processed_steps=200000 models=64 record_stride=16 elapsed_s=0.078045 events=0 checksum=5398.789823966 err_acc=71.115918716
+```
+
+This is local prototype evidence, not a release-wide EVAS/AX speed claim.
 
 ## Initial Result
 
