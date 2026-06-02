@@ -949,6 +949,8 @@ class TestIndexedMigrationHarness:
         assert "rust_static_eval_candidate_models = 1" in log
         assert "rust_static_eval_models = 1" in log
         assert "rust_static_eval_ops = 1" in log
+        assert "rust_static_eval_segments = 1" in log
+        assert "rust_static_eval_max_segment_models = 1" in log
         assert "rust_static_eval_errors = 0" in log
         assert (out_dir / "tran.csv").exists()
 

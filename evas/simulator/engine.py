@@ -489,6 +489,8 @@ class Simulator:
             "rust_static_eval_candidate_models": 0,
             "rust_static_eval_models": 0,
             "rust_static_eval_ops": 0,
+            "rust_static_eval_segments": 0,
+            "rust_static_eval_max_segment_models": 0,
             "rust_static_eval_calls": 0,
             "rust_static_eval_output_syncs": 0,
             "rust_static_eval_fallback_models": 0,
@@ -761,7 +763,8 @@ class Simulator:
         indexed_voltage_probe_max_node = ""
         indexed_voltage_read_nodes_seen: set[str] = set()
         rust_backend = load_optional_rust_backend() if rust_static_eval else None
-        rust_static_eval_plans: Dict[int, Tuple[object, Tuple[tuple, ...]]] = {}
+        rust_static_eval_segments_by_start: Dict[int, Tuple[Tuple[int, ...], object, Tuple[tuple, ...]]] = {}
+        rust_static_eval_segment_members: set[int] = set()
         if rust_backend is not None:
             self._perf_stats["rust_static_eval_available"] = 1
         if indexed_arrays:
@@ -928,8 +931,9 @@ class Simulator:
             }
 
         def _build_rust_static_eval_plans():
-            nonlocal rust_static_eval_plans
-            rust_static_eval_plans = {}
+            nonlocal rust_static_eval_segments_by_start, rust_static_eval_segment_members
+            rust_static_eval_segments_by_start = {}
+            rust_static_eval_segment_members = set()
             if not rust_static_eval or indexed_array is None:
                 return
 
@@ -937,6 +941,7 @@ class Simulator:
             planned_models = 0
             planned_ops = 0
             fallback_models = 0
+            per_model_ops: Dict[int, Tuple[List[StaticAffineOp], Tuple[tuple, ...]]] = {}
 
             for model_index, model in enumerate(self.models):
                 metadata = tuple(
@@ -975,17 +980,45 @@ class Simulator:
                 if not ops:
                     fallback_models += 1
                     continue
-                rust_static_eval_plans[model_index] = (
-                    rust_backend.make_static_affine_batch(ops),
-                    tuple(sync_entries),
-                )
+                per_model_ops[model_index] = (ops, tuple(sync_entries))
                 planned_models += 1
                 planned_ops += len(ops)
+
+            def _flush_segment(model_indices: List[int]) -> None:
+                if not model_indices or rust_backend is None:
+                    return
+                combined_ops: List[StaticAffineOp] = []
+                combined_sync_entries = []
+                for idx in model_indices:
+                    ops, sync_entries = per_model_ops[idx]
+                    combined_ops.extend(ops)
+                    combined_sync_entries.extend(sync_entries)
+                rust_static_eval_segments_by_start[model_indices[0]] = (
+                    tuple(model_indices),
+                    rust_backend.make_static_affine_batch(combined_ops),
+                    tuple(combined_sync_entries),
+                )
+                rust_static_eval_segment_members.update(model_indices)
+
+            current_segment: List[int] = []
+            for idx in sorted(per_model_ops):
+                if current_segment and idx != current_segment[-1] + 1:
+                    _flush_segment(current_segment)
+                    current_segment = []
+                current_segment.append(idx)
+            _flush_segment(current_segment)
 
             self._perf_stats["rust_static_eval_candidate_models"] = candidates
             self._perf_stats["rust_static_eval_models"] = planned_models
             self._perf_stats["rust_static_eval_ops"] = planned_ops
             self._perf_stats["rust_static_eval_fallback_models"] = fallback_models
+            self._perf_stats["rust_static_eval_segments"] = len(
+                rust_static_eval_segments_by_start
+            )
+            self._perf_stats["rust_static_eval_max_segment_models"] = max(
+                (len(segment[0]) for segment in rust_static_eval_segments_by_start.values()),
+                default=0,
+            )
 
         def _sync_rust_static_outputs(sync_entries: Tuple[tuple, ...]) -> None:
             if indexed_array is None:
@@ -1204,6 +1237,138 @@ class Simulator:
             for model_index, (model, model_needs_future, has_post_update_events) in enumerate(
                 zip(self.models, model_needs_future_node_voltages, model_has_post_update_events)
             ):
+                if (
+                    model_index in rust_static_eval_segment_members
+                    and model_index not in rust_static_eval_segments_by_start
+                ):
+                    continue
+                rust_segment = rust_static_eval_segments_by_start.get(model_index)
+                if rust_segment is not None and indexed_array is not None and rust_backend is not None:
+                    segment_model_indices, batch, sync_entries = rust_segment
+                    segment_models = [self.models[idx] for idx in segment_model_indices]
+                    for segment_model_index, segment_model in zip(segment_model_indices, segment_models):
+                        _section_start = profile_clock() if profile_clock is not None else 0.0
+                        segment_model_needs_future = model_needs_future_node_voltages[
+                            segment_model_index
+                        ]
+                        segment_model_future_nv = (
+                            future_nv
+                            if future_nv is not None
+                            and segment_model_needs_future
+                            else None
+                        )
+                        segment_model._prepare_step(
+                            prev_nv,
+                            self.node_voltages,
+                            prev_time,
+                            time,
+                            segment_model_future_nv,
+                        )
+                        if profile_clock is not None:
+                            elapsed = _add_profile_time(
+                                "model_prepare_step_s",
+                                _section_start,
+                            )
+                            _add_model_profile_time(
+                                segment_model_index,
+                                segment_model,
+                                "prepare_step_s",
+                                elapsed,
+                            )
+                        segment_model._event_time = time
+                        segment_model._bound_step = 0.0
+
+                    _section_start = profile_clock() if profile_clock is not None else 0.0
+                    rust_segment_succeeded = False
+                    try:
+                        rust_backend.evaluate_static_affine(batch, indexed_array.values)
+                        _sync_rust_static_outputs(sync_entries)
+                        self._perf_stats["rust_static_eval_calls"] += 1
+                        rust_segment_succeeded = True
+                    except RustBackendError:
+                        self._perf_stats["rust_static_eval_errors"] += 1
+
+                    if rust_segment_succeeded:
+                        if profile_clock is not None:
+                            elapsed = _add_profile_time(
+                                "rust_static_eval_s",
+                                _section_start,
+                            )
+                            per_model_elapsed = elapsed / max(1, len(segment_models))
+                            for segment_model_index, segment_model in zip(
+                                segment_model_indices,
+                                segment_models,
+                            ):
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "evaluate_s",
+                                    per_model_elapsed,
+                                )
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "evaluate_calls",
+                                    1.0,
+                                )
+                    else:
+                        for segment_model_index, segment_model in zip(
+                            segment_model_indices,
+                            segment_models,
+                        ):
+                            _section_start = profile_clock() if profile_clock is not None else 0.0
+                            segment_model.evaluate(self.node_voltages, time)
+                            if profile_clock is not None:
+                                elapsed = _add_profile_time(
+                                    "model_evaluate_s",
+                                    _section_start,
+                                )
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "evaluate_s",
+                                    elapsed,
+                                )
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "evaluate_calls",
+                                    1.0,
+                                )
+                        indexed_array.update_from_mapping(self.node_voltages)
+                        self._perf_stats["indexed_post_model_sync_repairs"] += 1
+                        _refresh_indexed_array_stats()
+
+                    for segment_model_index, segment_model in zip(
+                        segment_model_indices,
+                        segment_models,
+                    ):
+                        _section_start = profile_clock() if profile_clock is not None else 0.0
+                        segment_has_post_update_events = model_has_post_update_events[
+                            segment_model_index
+                        ]
+                        segment_model._expire_absolute_timers(time)
+                        if segment_has_post_update_events:
+                            self._perf_stats["model_post_update_calls"] += 1
+                            if segment_model.post_update_events(self.node_voltages, time):
+                                segment_model.refresh_outputs(self.node_voltages, time)
+                        else:
+                            self._perf_stats["model_post_update_skips"] += 1
+                        if profile_clock is not None:
+                            elapsed = _add_profile_time(
+                                "model_post_update_s",
+                                _section_start,
+                            )
+                            _add_model_profile_time(
+                                segment_model_index,
+                                segment_model,
+                                "post_update_s",
+                                elapsed,
+                            )
+                        if getattr(segment_model, "_step_event_fired", False):
+                            cross_fired = True
+                    continue
+
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model_future_nv = (
                     future_nv
@@ -1216,24 +1381,9 @@ class Simulator:
                     elapsed = _add_profile_time("model_prepare_step_s", _section_start)
                     _add_model_profile_time(model_index, model, "prepare_step_s", elapsed)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                rust_plan = rust_static_eval_plans.get(model_index)
-                profile_eval_key = "model_evaluate_s"
-                if rust_plan is not None and indexed_array is not None and rust_backend is not None:
-                    batch, sync_entries = rust_plan
-                    model._event_time = time
-                    model._bound_step = 0.0
-                    try:
-                        rust_backend.evaluate_static_affine(batch, indexed_array.values)
-                        _sync_rust_static_outputs(sync_entries)
-                        self._perf_stats["rust_static_eval_calls"] += 1
-                        profile_eval_key = "rust_static_eval_s"
-                    except RustBackendError:
-                        self._perf_stats["rust_static_eval_errors"] += 1
-                        model.evaluate(self.node_voltages, time)
-                else:
-                    model.evaluate(self.node_voltages, time)
+                model.evaluate(self.node_voltages, time)
                 if profile_clock is not None:
-                    elapsed = _add_profile_time(profile_eval_key, _section_start)
+                    elapsed = _add_profile_time("model_evaluate_s", _section_start)
                     _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
                     _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
