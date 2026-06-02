@@ -466,6 +466,8 @@ class Simulator:
             "indexed_voltage_read_fallbacks": 0,
             "indexed_voltage_read_nodes": 0,
             "indexed_voltage_reads": 0,
+            "model_post_update_calls": 0,
+            "model_post_update_skips": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -557,6 +559,10 @@ class Simulator:
             model for model in self.models
             if bool(getattr(model, "_uses_bound_step_tree", lambda: True)())
         ]
+        model_has_post_update_events = tuple(
+            bool(getattr(model, "_has_post_update_events", True))
+            for model in self.models
+        )
         model_needs_future_node_voltages = tuple(
             bool(getattr(model, "_needs_future_node_voltages_tree", lambda: False)())
             for model in self.models
@@ -587,10 +593,10 @@ class Simulator:
         # Evaluate models at t=0 so output nodes are assigned before recording.
         # Without this, output nodes default to 0, producing spurious values in
         # post-processing (e.g. noise = vout_o - vin_i = 0 - 1 = -1 V).
-        for model in self.models:
+        for model, has_post_update_events in zip(self.models, model_has_post_update_events):
             model.evaluate(self.node_voltages, 0.0)
             model._expire_absolute_timers(0.0)
-            if model.post_update_events(self.node_voltages, 0.0):
+            if has_post_update_events and model.post_update_events(self.node_voltages, 0.0):
                 model.refresh_outputs(self.node_voltages, 0.0)
 
         for model in self.models:
@@ -928,8 +934,8 @@ class Simulator:
 
             # Evaluate all models
             cross_fired = False
-            for model_index, (model, model_needs_future) in enumerate(
-                zip(self.models, model_needs_future_node_voltages)
+            for model_index, (model, model_needs_future, has_post_update_events) in enumerate(
+                zip(self.models, model_needs_future_node_voltages, model_has_post_update_events)
             ):
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model_future_nv = (
@@ -950,8 +956,12 @@ class Simulator:
                     _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model._expire_absolute_timers(time)
-                if model.post_update_events(self.node_voltages, time):
-                    model.refresh_outputs(self.node_voltages, time)
+                if has_post_update_events:
+                    self._perf_stats["model_post_update_calls"] += 1
+                    if model.post_update_events(self.node_voltages, time):
+                        model.refresh_outputs(self.node_voltages, time)
+                else:
+                    self._perf_stats["model_post_update_skips"] += 1
                 if profile_clock is not None:
                     elapsed = _add_profile_time("model_post_update_s", _section_start)
                     _add_model_profile_time(model_index, model, "post_update_s", elapsed)

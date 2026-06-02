@@ -2156,8 +2156,18 @@ endmodule
 
         assert ModelCls._has_dynamic_breakpoints is False
         assert model._has_dynamic_breakpoints_tree() is False
+        assert ModelCls._has_post_update_events is False
         assert ModelCls._uses_bound_step is False
         assert model._uses_bound_step_tree() is False
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(1.0)
+        assert sim._perf_stats["model_post_update_calls"] == 0
+        assert sim._perf_stats["model_post_update_skips"] == sim._perf_stats["steps_total"]
 
     def test_cross_event_model_keeps_dynamic_breakpoint_scan(self):
         from evas.compiler.parser import parse
@@ -2180,6 +2190,26 @@ endmodule
 
         assert ModelCls._has_dynamic_breakpoints is True
         assert model._has_dynamic_breakpoints_tree() is True
+
+    def test_output_dependent_cross_keeps_post_update_path(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        mod = parse("""\
+`include "disciplines.vams"
+module output_cross(out);
+    output voltage out;
+    integer seen;
+    analog begin
+        V(out) <+ seen;
+        @(cross(V(out) - 0.5, +1)) seen = 1;
+    end
+endmodule
+""")
+        ModelCls = compile_module(mod)
+
+        assert ModelCls._has_dynamic_breakpoints is True
+        assert ModelCls._has_post_update_events is True
 
 
 class TestDifferentialContribution:

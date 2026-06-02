@@ -29,6 +29,7 @@ class CompiledModel:
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
     _has_dynamic_breakpoints: bool = True
+    _has_post_update_events: bool = True
     _uses_bound_step: bool = True
 
     def __init__(self):
@@ -1077,9 +1078,11 @@ class _ModuleCompiler:
         cls._needs_future_node_voltages = self._needs_future_node_voltages
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
+            cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)
             cls._uses_bound_step = self._statement_uses_bound_step(mod.analog_block.body)
         else:
             cls._has_dynamic_breakpoints = False
+            cls._has_post_update_events = False
             cls._uses_bound_step = False
         cls._generated_code = code  # Store for debugging
         return cls
