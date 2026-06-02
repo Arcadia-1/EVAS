@@ -798,6 +798,7 @@ class TestIndexedMigrationHarness:
         assert "event_body_voltage_read_count = 0" in log
         assert "event_trigger_voltage_count = 0" in log
         assert "event_voltage_read_count = 0" in log
+        assert "dynamic_branch_access_count = 0" in log
         assert "dynamic_voltage_read_count = 0" in log
         assert "dynamic_output_write_count = 0" in log
         assert "output_write_throughs =" in log

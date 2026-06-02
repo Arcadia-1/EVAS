@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from evas.simulator.indexed import (
+    DynamicBranchAccessIO,
     IndexedVoltages,
     IndexedVoltageArray,
     IndexedVoltageSnapshotter,
@@ -218,9 +219,33 @@ endmodule
     assert ModelCls._static_output_write_nodes == ()
     assert ModelCls._dynamic_voltage_read_count == 0
     assert ModelCls._dynamic_output_write_count == 1
+    assert ModelCls._dynamic_branch_accesses == (
+        ("output_write", "dout", 1, "ordinary"),
+    )
     assert "_set_output(f'dout[" in FastModelCls._generated_code
     assert "_set_static_branch_output('dout'" not in FastModelCls._generated_code
     assert "_set_static_branch_output_by_slot" not in FastModelCls._generated_code
+
+
+def test_compiled_model_records_dynamic_branch_access_ir_for_2d_reads():
+    src = """\
+`include "disciplines.vams"
+module bus_read(VSS);
+    inout electrical VSS;
+    electrical [1:0] dbus [0:3];
+    real sample;
+    analog begin
+        sample = V(dbus[1][0], VSS);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._dynamic_voltage_read_count == 1
+    assert ModelCls._dynamic_output_write_count == 0
+    assert ModelCls._dynamic_branch_accesses == (
+        ("voltage_read", "dbus", 2, "ordinary"),
+    )
 
 
 def test_indexed_model_io_plan_includes_static_branch_io_nodes():
@@ -254,11 +279,46 @@ endmodule
     assert model_io.static_output_write_node_ids == (plan.node_index.id_of("OUT"),)
     assert model_io.dynamic_voltage_read_count == 0
     assert model_io.dynamic_output_write_count == 0
+    assert model_io.dynamic_branch_accesses == ()
     assert plan.static_voltage_read_count == 1
     assert plan.event_trigger_voltage_count == 1
     assert plan.event_voltage_read_count == 1
     assert plan.event_body_voltage_read_count == 1
     assert plan.static_output_write_count == 1
+
+
+def test_indexed_model_io_plan_exposes_dynamic_branch_accesses():
+    src = """\
+`include "disciplines.vams"
+module bus_drive(VSS);
+    inout electrical VSS;
+    electrical [0:3] dout;
+    genvar i;
+    analog begin
+        for (i = 0; i <= 3; i = i + 1)
+            V(dout[i], VSS) <+ i;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    sim = Simulator()
+    sim.add_model(model)
+
+    plan = build_indexed_model_io_plan(sim)
+    (model_io,) = plan.model_ios
+
+    assert model_io.dynamic_branch_accesses == (
+        DynamicBranchAccessIO(
+            role="output_write",
+            base_node="dout",
+            dimensions=1,
+            context="ordinary",
+        ),
+    )
+    assert plan.dynamic_branch_access_count == 1
+    assert plan.dynamic_output_write_count == 1
+    assert plan.dynamic_voltage_read_count == 0
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():

@@ -321,6 +321,16 @@ class IndexedRunPlan:
 
 
 @dataclass(frozen=True)
+class DynamicBranchAccessIO:
+    """Dynamic node-array access boundary for future bus lowering."""
+
+    role: str
+    base_node: str
+    dimensions: int
+    context: str
+
+
+@dataclass(frozen=True)
 class IndexedModelIO:
     """Node-id boundary for one compiled model instance."""
 
@@ -333,6 +343,7 @@ class IndexedModelIO:
     event_voltage_read_node_ids: Tuple[int, ...] = ()
     event_body_voltage_read_node_ids: Tuple[int, ...] = ()
     static_output_write_node_ids: Tuple[int, ...] = ()
+    dynamic_branch_accesses: Tuple[DynamicBranchAccessIO, ...] = ()
     dynamic_voltage_read_count: int = 0
     dynamic_output_write_count: int = 0
 
@@ -402,6 +413,10 @@ class IndexedModelIOPlan:
     @property
     def dynamic_output_write_count(self) -> int:
         return sum(model_io.dynamic_output_write_count for model_io in self.model_ios)
+
+    @property
+    def dynamic_branch_access_count(self) -> int:
+        return sum(len(model_io.dynamic_branch_accesses) for model_io in self.model_ios)
 
 
 @dataclass
@@ -564,6 +579,17 @@ def build_indexed_model_io_plan(
             dynamic_write_count = int(
                 getattr(model_cls, "_dynamic_output_write_count", 0) or 0
             )
+            dynamic_branch_accesses = tuple(
+                DynamicBranchAccessIO(
+                    role=str(role),
+                    base_node=str(base_node),
+                    dimensions=int(dimensions),
+                    context=str(context),
+                )
+                for role, base_node, dimensions, context in (
+                    getattr(model_cls, "_dynamic_branch_accesses", ()) or ()
+                )
+            )
             model_entries.append(
                 (
                     path,
@@ -575,6 +601,7 @@ def build_indexed_model_io_plan(
                     event_reads,
                     event_body_reads,
                     static_writes,
+                    dynamic_branch_accesses,
                     dynamic_read_count,
                     dynamic_write_count,
                 )
@@ -599,6 +626,7 @@ def build_indexed_model_io_plan(
             event_voltage_read_node_ids=_id_tuple(index, event_reads),
             event_body_voltage_read_node_ids=_id_tuple(index, event_body_reads),
             static_output_write_node_ids=_id_tuple(index, static_writes),
+            dynamic_branch_accesses=dynamic_branch_accesses,
             dynamic_voltage_read_count=dynamic_read_count,
             dynamic_output_write_count=dynamic_write_count,
         )
@@ -612,6 +640,7 @@ def build_indexed_model_io_plan(
             event_reads,
             event_body_reads,
             static_writes,
+            dynamic_branch_accesses,
             dynamic_read_count,
             dynamic_write_count,
         ) in model_entries

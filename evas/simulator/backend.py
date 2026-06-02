@@ -31,6 +31,7 @@ class CompiledModel:
     _event_voltage_read_nodes = ()
     _event_body_voltage_read_nodes = ()
     _static_output_write_nodes = ()
+    _dynamic_branch_accesses = ()
     _dynamic_voltage_read_count = 0
     _dynamic_output_write_count = 0
     _static_branch_fastpath_codegen = False
@@ -1258,6 +1259,9 @@ class _ModuleCompiler:
         cls._static_output_write_nodes = tuple(
             sorted(branch_io["static_output_write_nodes"])
         )
+        cls._dynamic_branch_accesses = tuple(
+            sorted(branch_io["dynamic_branch_accesses"])
+        )
         cls._dynamic_voltage_read_count = int(branch_io["dynamic_voltage_read_count"])
         cls._dynamic_output_write_count = int(branch_io["dynamic_output_write_count"])
         if mod.analog_block:
@@ -1724,6 +1728,7 @@ class _ModuleCompiler:
             "event_trigger_voltage_read_nodes": set(),
             "event_voltage_read_nodes": set(),
             "static_output_write_nodes": set(),
+            "dynamic_branch_accesses": set(),
             "dynamic_voltage_read_count": 0,
             "dynamic_output_write_count": 0,
         }
@@ -1732,6 +1737,32 @@ class _ModuleCompiler:
         acc = self._empty_static_branch_io()
         self._collect_static_branch_io_from_stmt(stmt, acc, in_event_body=False)
         return acc
+
+    def _dynamic_branch_context(self, in_event_body: bool) -> str:
+        return "event_body" if in_event_body else "ordinary"
+
+    def _record_dynamic_branch_access(
+        self,
+        acc: Dict[str, Any],
+        role: str,
+        node: str,
+        index_expr,
+        index_expr2,
+        context: str,
+    ) -> None:
+        dimensions = 2 if index_expr2 is not None else 1
+        acc["dynamic_branch_accesses"].add((role, node, dimensions, context))
+        self._collect_static_branch_io_from_expr(
+            index_expr,
+            acc,
+            context == "event_body",
+        )
+        if index_expr2 is not None:
+            self._collect_static_branch_io_from_expr(
+                index_expr2,
+                acc,
+                context == "event_body",
+            )
 
     def _record_static_branch_read(
         self,
@@ -1743,9 +1774,14 @@ class _ModuleCompiler:
     ) -> None:
         if index_expr is not None:
             acc["dynamic_voltage_read_count"] += 1
-            self._collect_static_branch_io_from_expr(index_expr, acc, in_event_body)
-            if index_expr2 is not None:
-                self._collect_static_branch_io_from_expr(index_expr2, acc, in_event_body)
+            self._record_dynamic_branch_access(
+                acc,
+                "voltage_read",
+                node,
+                index_expr,
+                index_expr2,
+                self._dynamic_branch_context(in_event_body),
+            )
             return
         target = (
             acc["event_voltage_read_nodes"]
@@ -1788,17 +1824,14 @@ class _ModuleCompiler:
         if branch.access_type == "V":
             if branch.node1_index is not None:
                 acc["dynamic_output_write_count"] += 1
-                self._collect_static_branch_io_from_expr(
-                    branch.node1_index,
+                self._record_dynamic_branch_access(
                     acc,
-                    in_event_body,
+                    "output_write",
+                    branch.node1,
+                    branch.node1_index,
+                    branch.node1_index2,
+                    self._dynamic_branch_context(in_event_body),
                 )
-                if branch.node1_index2 is not None:
-                    self._collect_static_branch_io_from_expr(
-                        branch.node1_index2,
-                        acc,
-                        in_event_body,
-                    )
             else:
                 acc["static_output_write_nodes"].add(branch.node1)
             if branch.node2 is not None:
@@ -1876,16 +1909,26 @@ class _ModuleCompiler:
                 if expr.node1_index is None:
                     acc["event_trigger_voltage_read_nodes"].add(expr.node1)
                 else:
-                    self._collect_event_trigger_voltage_nodes_from_expr(expr.node1_index, acc)
-                    if expr.node1_index2 is not None:
-                        self._collect_event_trigger_voltage_nodes_from_expr(expr.node1_index2, acc)
+                    self._record_dynamic_branch_access(
+                        acc,
+                        "voltage_read",
+                        expr.node1,
+                        expr.node1_index,
+                        expr.node1_index2,
+                        "event_trigger",
+                    )
                 if expr.node2 is not None:
                     if expr.node2_index is None:
                         acc["event_trigger_voltage_read_nodes"].add(expr.node2)
                     else:
-                        self._collect_event_trigger_voltage_nodes_from_expr(expr.node2_index, acc)
-                        if expr.node2_index2 is not None:
-                            self._collect_event_trigger_voltage_nodes_from_expr(expr.node2_index2, acc)
+                        self._record_dynamic_branch_access(
+                            acc,
+                            "voltage_read",
+                            expr.node2,
+                            expr.node2_index,
+                            expr.node2_index2,
+                            "event_trigger",
+                        )
             return
 
         if isinstance(expr, BinaryExpr):

@@ -844,6 +844,7 @@ class Simulator:
             self._perf_stats["indexed_model_io_outputs"] = indexed_model_io_plan.output_count
             self._indexed_model_io_stats = {
                 "dynamic_output_write_count": indexed_model_io_plan.dynamic_output_write_count,
+                "dynamic_branch_access_count": indexed_model_io_plan.dynamic_branch_access_count,
                 "dynamic_voltage_read_count": indexed_model_io_plan.dynamic_voltage_read_count,
                 "event_body_voltage_read_count": indexed_model_io_plan.event_body_voltage_read_count,
                 "event_trigger_voltage_count": indexed_model_io_plan.event_trigger_voltage_count,
