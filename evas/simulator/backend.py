@@ -107,6 +107,9 @@ class CompiledModel:
             "dynamic_node_cache_hits": 0,
             "dynamic_node_cache_misses": 0,
             "dynamic_node_cache_bypasses": 0,
+            "indexed_state_scalar_writes": 0,
+            "indexed_state_array_writes": 0,
+            "indexed_state_array_oob_writes": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
@@ -125,6 +128,11 @@ class CompiledModel:
         self._node_resolution_cache_enabled: bool = False
         self._node_resolution_cache: Dict[str, str] = {}
         self._dynamic_node_cache: Dict[Tuple[str, int, Optional[int]], str] = {}
+        self._indexed_state_ids: Dict[str, int] = {}
+        self._indexed_integer_state_names: set[str] = set()
+        self._indexed_state_values: Optional[List[float]] = None
+        self._indexed_state_array_layouts: Dict[str, Tuple[int, int, bool]] = {}
+        self._indexed_state_array_values: Dict[str, List[float]] = {}
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -217,6 +225,63 @@ class CompiledModel:
         if self._event_context_active or self._indexed_voltage_reader is None:
             return None
         return self._indexed_voltage_reader(local_node, external_node)
+
+    def _set_indexed_state_storage(
+        self,
+        scalar_ids: Optional[Dict[str, int]] = None,
+        integer_state_names: Tuple[str, ...] = (),
+        array_layouts: Tuple[Tuple[str, int, int, bool], ...] = (),
+    ):
+        """Install an opt-in indexed mirror for model-local state."""
+        if scalar_ids is None:
+            self._indexed_state_ids = {}
+            self._indexed_integer_state_names = set()
+            self._indexed_state_values = None
+            self._indexed_state_array_layouts = {}
+            self._indexed_state_array_values = {}
+            return
+
+        self._indexed_state_ids = dict(scalar_ids)
+        self._indexed_integer_state_names = set(integer_state_names)
+        slot_count = max(self._indexed_state_ids.values(), default=-1) + 1
+        values = [0.0] * slot_count
+        for name, slot in self._indexed_state_ids.items():
+            raw_value = self.state.get(name, 0)
+            if name in self._indexed_integer_state_names:
+                raw_value = self._to_integer(raw_value)
+            values[slot] = float(raw_value)
+        self._indexed_state_values = values
+
+        layouts: Dict[str, Tuple[int, int, bool]] = {}
+        array_values: Dict[str, List[float]] = {}
+        for name, lo, hi, integer in array_layouts:
+            lo_i = int(lo)
+            hi_i = int(hi)
+            length = max(0, hi_i - lo_i + 1)
+            layouts[name] = (lo_i, hi_i, bool(integer))
+            slots = [0.0] * length
+            for idx, raw_value in (self.arrays.get(name, {}) or {}).items():
+                idx_i = int(idx)
+                if lo_i <= idx_i <= hi_i:
+                    if integer:
+                        raw_value = self._to_integer(raw_value)
+                    slots[idx_i - lo_i] = float(raw_value)
+            array_values[name] = slots
+        self._indexed_state_array_layouts = layouts
+        self._indexed_state_array_values = array_values
+
+    def _state_set(self, name: str, val: Any):
+        """Set scalar state and mirror it to indexed storage when installed."""
+        self.state[name] = val
+        values = self._indexed_state_values
+        if values is None:
+            return
+        slot = self._indexed_state_ids.get(name)
+        if slot is None or slot >= len(values):
+            return
+        stored = self._to_integer(val) if name in self._indexed_integer_state_names else val
+        values[slot] = float(stored)
+        self._perf_stats["indexed_state_scalar_writes"] += 1
 
     def _set_static_branch_fastpath_enabled(self, enabled: bool):
         """Enable opt-in helpers for static, non-dynamic branch read/write code."""
@@ -978,6 +1043,17 @@ class CompiledModel:
         if name not in self.arrays:
             self.arrays[name] = {}
         self.arrays[name][idx] = val
+        layout = self._indexed_state_array_layouts.get(name)
+        if layout is None:
+            return
+        lo, hi, integer = layout
+        idx_i = int(idx)
+        if not (lo <= idx_i <= hi):
+            self._perf_stats["indexed_state_array_oob_writes"] += 1
+            return
+        stored = self._to_integer(val) if integer else val
+        self._indexed_state_array_values[name][idx_i - lo] = float(stored)
+        self._perf_stats["indexed_state_array_writes"] += 1
 
     def _strobe(self, time: float, fmt: str, *args):
         try:
@@ -2734,16 +2810,16 @@ class _ModuleCompiler:
             prev_loop_var = self._in_loop_var
             self._in_loop_var = loop_var
 
-            lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+            lines.append(f"{prefix}self._state_set({loop_var!r}, {init_val})")
             lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
             cond_code = self._compile_expr_with_loop_var(stmt.cond, loop_var)
             lines.append(f"{prefix}while {cond_code}:")
-            lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+            lines.append(f"{prefix}    self._state_set({loop_var!r}, _loop_{loop_var})")
             body_lines = self._compile_initial_step_statement_with_loop_var(stmt.body, indent + 1, loop_var)
             lines.extend(body_lines)
             update_code = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
             lines.append(f"{prefix}    _loop_{loop_var} = {update_code}")
-            lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+            lines.append(f"{prefix}self._state_set({loop_var!r}, _loop_{loop_var})")
 
             self._in_loop_var = prev_loop_var
 
@@ -3308,16 +3384,16 @@ class _ModuleCompiler:
         prev_loop_var = self._in_loop_var
         self._in_loop_var = loop_var
 
-        lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, {init_val})")
         lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
         cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
         lines.append(f"{prefix}while {cond_code2}:")
-        lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}    self._state_set({loop_var!r}, _loop_{loop_var})")
         body_lines = self._compile_post_update_statement_with_loop_var(stmt.body, indent + 1, loop_var)
         lines.extend(body_lines)
         update_code2 = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
         lines.append(f"{prefix}    _loop_{loop_var} = {update_code2}")
-        lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, _loop_{loop_var})")
 
         self._in_loop_var = prev_loop_var
         return lines
@@ -3340,16 +3416,16 @@ class _ModuleCompiler:
         prev_loop_var = self._in_loop_var
         self._in_loop_var = loop_var
 
-        lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, {init_val})")
         lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
         cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
         lines.append(f"{prefix}while {cond_code2}:")
-        lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}    self._state_set({loop_var!r}, _loop_{loop_var})")
         body_lines = self._compile_refresh_statement_with_loop_var(stmt.body, indent + 1, loop_var)
         lines.extend(body_lines)
         update_code2 = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
         lines.append(f"{prefix}    _loop_{loop_var} = {update_code2}")
-        lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, _loop_{loop_var})")
 
         self._in_loop_var = prev_loop_var
         return lines
@@ -3388,7 +3464,10 @@ class _ModuleCompiler:
             name = stmt.target.name
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
-            line = f"self.state[{name!r}] = {val}"
+            if name == self._in_loop_var:
+                line = f"self.state[{name!r}] = {val}"
+            else:
+                line = f"self._state_set({name!r}, {val})"
             if self._should_gate_self_referential_assignment(stmt, name):
                 key = self._discrete_assignment_key(stmt)
                 return [
@@ -3491,17 +3570,17 @@ class _ModuleCompiler:
         self._in_loop_var = loop_var
 
         # Use a while loop in Python
-        lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, {init_val})")
         # Replace loop var references in condition
         lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
         cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
         lines.append(f"{prefix}while {cond_code2}:")
-        lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}    self._state_set({loop_var!r}, _loop_{loop_var})")
         body_lines = self._compile_statement_with_loop_var(stmt.body, indent + 1, loop_var)
         lines.extend(body_lines)
         update_code2 = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
         lines.append(f"{prefix}    _loop_{loop_var} = {update_code2}")
-        lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+        lines.append(f"{prefix}self._state_set({loop_var!r}, _loop_{loop_var})")
 
         self._in_loop_var = prev_loop_var
         return lines

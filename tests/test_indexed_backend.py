@@ -434,6 +434,54 @@ endmodule
     )
 
 
+def test_indexed_state_storage_mirrors_scalar_and_array_writes():
+    src = """\
+`include "disciplines.vams"
+module state_probe(out);
+    output electrical out;
+    real x = 1.25;
+    integer code = 2;
+    genvar i;
+    real accum[0:3];
+    integer bins[0:2];
+    analog begin
+        x = 2.5;
+        code = 3.6;
+        accum[1] = x + 0.25;
+        bins[2] = code + 0.6;
+        V(out) <+ x + code + accum[1] + bins[2];
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    model._set_indexed_state_storage(
+        {"x": 0, "code": 1, "i": 2},
+        ("code", "i"),
+        (
+            ("accum", 0, 3, False),
+            ("bins", 0, 2, True),
+        ),
+    )
+
+    model.evaluate({}, 0.0)
+
+    assert model.state["x"] == pytest.approx(2.5)
+    assert model.state["code"] == 4
+    assert model.arrays["accum"][1] == pytest.approx(2.75)
+    assert model.arrays["bins"][2] == 5
+    assert model._indexed_state_values == pytest.approx([2.5, 4.0, 0.0])
+    assert model._indexed_state_array_values["accum"] == pytest.approx(
+        [0.0, 2.75, 0.0, 0.0]
+    )
+    assert model._indexed_state_array_values["bins"] == pytest.approx(
+        [0.0, 0.0, 5.0]
+    )
+    assert model._perf_stats["indexed_state_scalar_writes"] == 2
+    assert model._perf_stats["indexed_state_array_writes"] == 2
+    assert model._perf_stats["indexed_state_array_oob_writes"] == 0
+
+
 def test_indexed_model_io_plan_includes_static_branch_io_nodes():
     src = """\
 `include "disciplines.vams"

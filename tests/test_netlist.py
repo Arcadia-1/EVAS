@@ -826,6 +826,55 @@ class TestIndexedMigrationHarness:
         assert "missing_nodes = 0" in log
         assert "max_abs_diff = 0.0" in log
 
+    def test_evas_simulate_logs_indexed_state_storage_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        va = tmp_path / "stateful.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module stateful(vout);
+                output vout;
+                electrical vout;
+                real x = 0.0;
+                integer code = 0;
+                real accum[0:1];
+
+                analog begin
+                    x = x + 0.25;
+                    code = code + 1;
+                    accum[1] = x + code;
+                    V(vout) <+ accum[1];
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_stateful.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            I0 (vout) stateful
+            tran tran stop=2n step=1n
+            save vout:3f
+            ahdl_include "stateful.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_STATE_STORAGE", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_state_storage = true" in log
+        assert "indexed_state_storage_enabled = 1" in log
+        assert "indexed_state_storage_models = 1" in log
+        assert "indexed_state_storage_scalar_slots = 2" in log
+        assert "indexed_state_storage_integer_slots = 1" in log
+        assert "indexed_state_storage_array_slots = 2" in log
+        assert "indexed_state_scalar_writes_total =" in log
+        assert "indexed_state_array_writes_total =" in log
+        assert "indexed_state_array_oob_writes_total = 0" in log
+
     def test_evas_simulate_logs_static_branch_fastpath_when_opted_in(self, tmp_path, monkeypatch):
         va = tmp_path / "pass_through.va"
         va.write_text(textwrap.dedent("""\

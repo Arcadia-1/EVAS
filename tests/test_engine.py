@@ -755,6 +755,53 @@ class TestSimulator:
         assert indexed._indexed_voltage_read_stats["fallbacks"] == 0
         assert indexed._indexed_voltage_probe_stats["mismatches"] == 0
 
+    def test_indexed_state_storage_preserves_stateful_waveform_and_counts_writes(self):
+        src = """\
+`include "disciplines.vams"
+module stateful(out);
+    output voltage out;
+    real x = 0.0;
+    integer code = 0;
+    real accum[0:1];
+    analog begin
+        x = x + 0.25;
+        code = code + 1;
+        accum[1] = x + code;
+        V(out) <+ accum[1];
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(indexed_state_storage=False):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                indexed_state_storage=indexed_state_storage,
+            )
+            return result, sim
+
+        default_result, default_sim = run_model(False)
+        indexed_result, indexed_sim = run_model(True)
+
+        assert indexed_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert indexed_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert default_sim._perf_stats["indexed_state_storage_enabled"] == 0
+        assert indexed_sim._perf_stats["indexed_state_storage_enabled"] == 1
+        assert indexed_sim._perf_stats["indexed_state_storage_models"] == 1
+        assert indexed_sim._perf_stats["indexed_state_storage_scalar_slots"] == 2
+        assert indexed_sim._perf_stats["indexed_state_storage_integer_slots"] == 1
+        assert indexed_sim._perf_stats["indexed_state_storage_array_slots"] == 2
+        assert indexed_sim._perf_stats["indexed_state_scalar_writes_total"] > 0
+        assert indexed_sim._perf_stats["indexed_state_array_writes_total"] > 0
+        assert indexed_sim._perf_stats["indexed_state_array_oob_writes_total"] == 0
+
     def test_static_branch_fastpath_matches_default_and_counts_hits(self):
         src = """\
 `include "disciplines.vams"

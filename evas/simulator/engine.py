@@ -417,6 +417,7 @@ class Simulator:
             profile_model_io: bool = False,
             indexed_snapshot_profile: bool = False,
             indexed_arrays: bool = False,
+            indexed_state_storage: bool = False,
             static_branch_fastpath: bool = False,
             rust_static_eval: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
@@ -473,6 +474,14 @@ class Simulator:
             "indexed_output_write_through_nodes": 0,
             "indexed_output_write_throughs": 0,
             "indexed_post_model_sync_repairs": 0,
+            "indexed_state_storage_enabled": int(bool(indexed_state_storage)),
+            "indexed_state_storage_models": 0,
+            "indexed_state_storage_scalar_slots": 0,
+            "indexed_state_storage_integer_slots": 0,
+            "indexed_state_storage_array_slots": 0,
+            "indexed_state_scalar_writes_total": 0,
+            "indexed_state_array_writes_total": 0,
+            "indexed_state_array_oob_writes_total": 0,
             "indexed_voltage_probe_event_skips": 0,
             "indexed_voltage_probe_max_abs_diff": 0.0,
             "indexed_voltage_probe_mismatches": 0,
@@ -643,6 +652,68 @@ class Simulator:
                 if setter is not None:
                     setter(enabled)
 
+        def _set_model_indexed_state_storage_empty():
+            def _visit(model):
+                setter = getattr(model, "_set_indexed_state_storage", None)
+                if setter is not None:
+                    setter(None)
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+        def _install_indexed_state_storage():
+            models = 0
+            scalar_slots = 0
+            integer_slots = 0
+            array_slots = 0
+
+            def _visit(model):
+                nonlocal models, scalar_slots, integer_slots, array_slots
+                setter = getattr(model, "_set_indexed_state_storage", None)
+                model_cls = getattr(model, "__class__", type(model))
+                scalar_names = tuple(
+                    str(name)
+                    for name in getattr(model_cls, "_state_scalar_names", ()) or ()
+                )
+                array_ranges = tuple(
+                    (
+                        str(name),
+                        int(lo),
+                        int(hi),
+                        bool(integer),
+                    )
+                    for name, lo, hi, integer in (
+                        getattr(model_cls, "_state_array_ranges", ()) or ()
+                    )
+                )
+                if setter is not None:
+                    scalar_ids = {name: idx for idx, name in enumerate(scalar_names)}
+                    integer_names = tuple(
+                        str(name)
+                        for name in getattr(model_cls, "_integer_state_names", ()) or ()
+                    )
+                    setter(scalar_ids, integer_names, array_ranges)
+                    if scalar_names or array_ranges:
+                        models += 1
+                        scalar_slots += len(scalar_names)
+                        integer_slots += len(integer_names)
+                        array_slots += sum(
+                            max(0, hi - lo + 1)
+                            for _, lo, hi, _ in array_ranges
+                        )
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+            self._perf_stats["indexed_state_storage_models"] = models
+            self._perf_stats["indexed_state_storage_scalar_slots"] = scalar_slots
+            self._perf_stats["indexed_state_storage_integer_slots"] = integer_slots
+            self._perf_stats["indexed_state_storage_array_slots"] = array_slots
+
         def _set_model_static_branch_indexed_io_empty():
             def _visit(model):
                 setter = getattr(model, "_set_static_branch_indexed_io", None)
@@ -657,10 +728,13 @@ class Simulator:
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
+        _set_model_indexed_state_storage_empty()
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
         _set_model_static_branch_indexed_io_empty()
         _set_model_node_resolution_cache_enabled(True)
+        if indexed_state_storage:
+            _install_indexed_state_storage()
         if static_branch_fastpath:
             _set_model_static_branch_fastpath_enabled(True)
         if model_io_profile_enabled:
@@ -1661,6 +1735,9 @@ class Simulator:
                 "dynamic_node_cache_hits": "dynamic_node_cache_hits_total",
                 "dynamic_node_cache_misses": "dynamic_node_cache_misses_total",
                 "dynamic_node_cache_bypasses": "dynamic_node_cache_bypasses_total",
+                "indexed_state_scalar_writes": "indexed_state_scalar_writes_total",
+                "indexed_state_array_writes": "indexed_state_array_writes_total",
+                "indexed_state_array_oob_writes": "indexed_state_array_oob_writes_total",
             }
 
             def _visit(model):
@@ -1754,6 +1831,7 @@ class Simulator:
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
+        _set_model_indexed_state_storage_empty()
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
         _set_model_static_branch_indexed_io_empty()

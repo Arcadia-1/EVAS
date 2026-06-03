@@ -980,6 +980,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_INDEXED_ARRAYS", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    indexed_state_storage = _simopt_bool(
+        simopt,
+        'evas_indexed_state_storage',
+        False,
+    ) or os.environ.get("EVAS_INDEXED_STATE_STORAGE", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
     rust_static_eval = _simopt_bool(
         simopt,
         'evas_rust_static_eval',
@@ -1027,6 +1034,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_indexed_snapshot_profile = true")
     if indexed_arrays:
         log.write("    evas_indexed_arrays = true")
+    if indexed_state_storage:
+        log.write("    evas_indexed_state_storage = true")
     if static_branch_fastpath:
         log.write("    evas_static_branch_fastpath = true")
     if rust_static_eval:
@@ -1046,6 +1055,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      profile_model_io=profile_model_io,
                      indexed_snapshot_profile=indexed_snapshot_profile,
                      indexed_arrays=indexed_arrays,
+                     indexed_state_storage=indexed_state_storage,
                      static_branch_fastpath=static_branch_fastpath,
                      rust_static_eval=rust_static_eval)
 
