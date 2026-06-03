@@ -508,6 +508,11 @@ class Simulator:
             "model_post_update_skips": 0,
             "node_resolution_cache_entries": 0,
             "node_resolution_cache_models": 0,
+            "dynamic_node_cache_hits_total": 0,
+            "dynamic_node_cache_misses_total": 0,
+            "dynamic_node_cache_bypasses_total": 0,
+            "dynamic_node_cache_entries": 0,
+            "dynamic_node_cache_models": 0,
             "source_breakpoint_scan_calls": 0,
             "model_breakpoint_scan_calls": 0,
             "bound_step_scan_calls": 0,
@@ -1653,6 +1658,9 @@ class Simulator:
                 "timer_breakpoint_scans": "timer_breakpoint_scans_total",
                 "timer_state_updates": "timer_state_updates_total",
                 "static_branch_fastpath_fallbacks": "static_branch_fastpath_fallbacks_total",
+                "dynamic_node_cache_hits": "dynamic_node_cache_hits_total",
+                "dynamic_node_cache_misses": "dynamic_node_cache_misses_total",
+                "dynamic_node_cache_bypasses": "dynamic_node_cache_bypasses_total",
             }
 
             def _visit(model):
@@ -1719,6 +1727,28 @@ class Simulator:
             self._perf_stats["node_resolution_cache_models"] = models_with_entries
 
         _aggregate_node_resolution_cache_stats()
+
+        def _aggregate_dynamic_node_cache_stats():
+            entries = 0
+            models_with_entries = 0
+
+            def _visit(model):
+                nonlocal entries, models_with_entries
+                cache = getattr(model, "_dynamic_node_cache", {}) or {}
+                size = len(cache)
+                if size:
+                    models_with_entries += 1
+                    entries += size
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+            self._perf_stats["dynamic_node_cache_entries"] = entries
+            self._perf_stats["dynamic_node_cache_models"] = models_with_entries
+
+        _aggregate_dynamic_node_cache_stats()
         _refresh_model_io_profile_stats()
 
         _set_model_indexed_output_writer(None)

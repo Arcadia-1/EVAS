@@ -39,6 +39,7 @@ class CompiledModel:
     _state_array_ranges = ()
     _rust_static_affine_ops = ()
     _static_branch_fastpath_codegen = False
+    _dynamic_node_cache_limit = 4096
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
     _has_dynamic_breakpoints: bool = True
@@ -103,6 +104,9 @@ class CompiledModel:
             "cross_fires": 0,
             "above_fires": 0,
             "static_branch_fastpath_fallbacks": 0,
+            "dynamic_node_cache_hits": 0,
+            "dynamic_node_cache_misses": 0,
+            "dynamic_node_cache_bypasses": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
@@ -120,6 +124,7 @@ class CompiledModel:
         self._static_branch_write_external_nodes: tuple[str, ...] = ()
         self._node_resolution_cache_enabled: bool = False
         self._node_resolution_cache: Dict[str, str] = {}
+        self._dynamic_node_cache: Dict[Tuple[str, int, Optional[int]], str] = {}
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -273,6 +278,28 @@ class CompiledModel:
         if index2 is None:
             return f"{base}[{int(index)}]"
         return f"{base}[{int(index)}][{int(index2)}]"
+
+    def _resolve_dynamic_node(self, base: str, index: Any, index2: Any = None) -> str:
+        """Resolve a dynamic bus node using a run-local base/index cache."""
+        idx = int(index)
+        idx2 = None if index2 is None else int(index2)
+        key = (base, idx, idx2)
+        node = self._dynamic_node_cache.get(key)
+        if node is not None:
+            self._perf_stats["dynamic_node_cache_hits"] += 1
+            return node
+        if len(self._dynamic_node_cache) >= self._dynamic_node_cache_limit:
+            self._perf_stats["dynamic_node_cache_bypasses"] += 1
+            if idx2 is None:
+                return f"{base}[{idx}]"
+            return f"{base}[{idx}][{idx2}]"
+        if idx2 is None:
+            node = f"{base}[{idx}]"
+        else:
+            node = f"{base}[{idx}][{idx2}]"
+        self._dynamic_node_cache[key] = node
+        self._perf_stats["dynamic_node_cache_misses"] += 1
+        return node
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -3341,9 +3368,9 @@ class _ModuleCompiler:
             idx_expr = self._compile_expr(branch.node1_index)
             if branch.node1_index2 is not None:
                 idx_expr2 = self._compile_expr(branch.node1_index2)
-                node_expr = f"self._format_dynamic_node({node!r}, {idx_expr}, {idx_expr2})"
+                node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr}, {idx_expr2})"
                 return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
-            node_expr = f"self._format_dynamic_node({node!r}, {idx_expr})"
+            node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr})"
             return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
         if self.static_branch_fastpath_codegen:
             slot = self._static_branch_write_slot_by_node.get(node)
@@ -3675,9 +3702,9 @@ class _ModuleCompiler:
             idx = self._compile_expr(index_expr)
             if index_expr2 is not None:
                 idx2 = self._compile_expr(index_expr2)
-                node_expr = f"self._format_dynamic_node({node!r}, {idx}, {idx2})"
+                node_expr = f"self._resolve_dynamic_node({node!r}, {idx}, {idx2})"
                 return f"self._get_voltage({node_expr}, nv)"
-            node_expr = f"self._format_dynamic_node({node!r}, {idx})"
+            node_expr = f"self._resolve_dynamic_node({node!r}, {idx})"
             return f"self._get_voltage({node_expr}, nv)"
         if self.static_branch_fastpath_codegen:
             slot = self._static_branch_read_slot_by_node.get(node)

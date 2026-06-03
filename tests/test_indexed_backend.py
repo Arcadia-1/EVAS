@@ -246,7 +246,8 @@ endmodule
     assert ModelCls._dynamic_branch_accesses == (
         ("output_write", "dout", 1, "ordinary"),
     )
-    assert "self._format_dynamic_node('dout'" in FastModelCls._generated_code
+    assert "self._resolve_dynamic_node('dout'" in FastModelCls._generated_code
+    assert "self._format_dynamic_node('dout'" not in FastModelCls._generated_code
     assert "_set_static_branch_output('dout'" not in FastModelCls._generated_code
     assert "_set_static_branch_output_by_slot" not in FastModelCls._generated_code
 
@@ -347,9 +348,44 @@ endmodule
     model = ModelCls()
 
     model.evaluate({"vout": 0.75}, 0.0)
+    model.evaluate({"vout": 0.5}, 1e-9)
 
-    assert model.output_nodes["dout[1]"] == pytest.approx(0.75)
-    assert "self._format_dynamic_node('dout'" in ModelCls._generated_code
+    assert model.output_nodes["dout[1]"] == pytest.approx(0.5)
+    assert "self._resolve_dynamic_node('dout'" in ModelCls._generated_code
+    assert "self._format_dynamic_node('dout'" not in ModelCls._generated_code
+    assert model._perf_stats["dynamic_node_cache_misses"] == 1
+    assert model._perf_stats["dynamic_node_cache_hits"] == 1
+
+
+def test_simulator_aggregates_dynamic_bus_node_cache_stats():
+    src = """\
+`include "disciplines.vams"
+module bus_drive(vin);
+    input voltage vin;
+    electrical [0:3] dout;
+    integer ch = 2;
+    analog begin
+        V(dout[ch]) <+ V(vin);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    model.node_map = {"vin": "VIN"}
+
+    sim = Simulator()
+    sim.add_source("VIN", dc(0.8))
+    sim.add_model(model)
+    sim.record("dout[2]")
+
+    result = sim.run(tstop=3e-9, tstep=1e-9)
+
+    assert result.signals["dout[2]"].tolist()[-1] == pytest.approx(0.8)
+    assert sim._perf_stats["dynamic_node_cache_misses_total"] == 1
+    assert sim._perf_stats["dynamic_node_cache_hits_total"] > 0
+    assert sim._perf_stats["dynamic_node_cache_bypasses_total"] == 0
+    assert sim._perf_stats["dynamic_node_cache_entries"] == 1
+    assert sim._perf_stats["dynamic_node_cache_models"] == 1
 
 
 def test_compiled_model_records_dynamic_branch_access_ir_for_2d_reads():
