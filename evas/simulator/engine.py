@@ -499,6 +499,7 @@ class Simulator:
             "rust_static_eval_output_syncs": 0,
             "rust_static_eval_node_voltage_syncs": 0,
             "rust_static_eval_deferred_output_syncs": 0,
+            "rust_static_eval_lifecycle_model_skips": 0,
             "rust_static_eval_fallback_models": 0,
             "rust_static_eval_errors": 0,
             "model_post_update_calls": 0,
@@ -1329,38 +1330,6 @@ class Simulator:
                 if rust_segment is not None and indexed_array is not None and rust_backend is not None:
                     segment_model_indices, batch, sync_entries = rust_segment
                     segment_models = [self.models[idx] for idx in segment_model_indices]
-                    for segment_model_index, segment_model in zip(segment_model_indices, segment_models):
-                        _section_start = profile_clock() if profile_clock is not None else 0.0
-                        segment_model_needs_future = model_needs_future_node_voltages[
-                            segment_model_index
-                        ]
-                        segment_model_future_nv = (
-                            future_nv
-                            if future_nv is not None
-                            and segment_model_needs_future
-                            else None
-                        )
-                        segment_model._prepare_step(
-                            prev_nv,
-                            self.node_voltages,
-                            prev_time,
-                            time,
-                            segment_model_future_nv,
-                        )
-                        if profile_clock is not None:
-                            elapsed = _add_profile_time(
-                                "model_prepare_step_s",
-                                _section_start,
-                            )
-                            _add_model_profile_time(
-                                segment_model_index,
-                                segment_model,
-                                "prepare_step_s",
-                                elapsed,
-                            )
-                        segment_model._event_time = time
-                        segment_model._bound_step = 0.0
-
                     _section_start = profile_clock() if profile_clock is not None else 0.0
                     rust_segment_succeeded = False
                     try:
@@ -1376,6 +1345,10 @@ class Simulator:
                         self._perf_stats["rust_static_eval_errors"] += 1
 
                     if rust_segment_succeeded:
+                        self._perf_stats["model_post_update_skips"] += len(segment_models)
+                        self._perf_stats["rust_static_eval_lifecycle_model_skips"] += len(
+                            segment_models
+                        )
                         if profile_clock is not None:
                             elapsed = _add_profile_time(
                                 "rust_static_eval_s",
@@ -1404,6 +1377,36 @@ class Simulator:
                             segment_models,
                         ):
                             _section_start = profile_clock() if profile_clock is not None else 0.0
+                            segment_model_needs_future = model_needs_future_node_voltages[
+                                segment_model_index
+                            ]
+                            segment_model_future_nv = (
+                                future_nv
+                                if future_nv is not None
+                                and segment_model_needs_future
+                                else None
+                            )
+                            segment_model._prepare_step(
+                                prev_nv,
+                                self.node_voltages,
+                                prev_time,
+                                time,
+                                segment_model_future_nv,
+                            )
+                            if profile_clock is not None:
+                                elapsed = _add_profile_time(
+                                    "model_prepare_step_s",
+                                    _section_start,
+                                )
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "prepare_step_s",
+                                    elapsed,
+                                )
+                            segment_model._event_time = time
+                            segment_model._bound_step = 0.0
+                            _section_start = profile_clock() if profile_clock is not None else 0.0
                             segment_model.evaluate(self.node_voltages, time)
                             if profile_clock is not None:
                                 elapsed = _add_profile_time(
@@ -1426,34 +1429,34 @@ class Simulator:
                         self._perf_stats["indexed_post_model_sync_repairs"] += 1
                         _refresh_indexed_array_stats()
 
-                    for segment_model_index, segment_model in zip(
-                        segment_model_indices,
-                        segment_models,
-                    ):
-                        _section_start = profile_clock() if profile_clock is not None else 0.0
-                        segment_has_post_update_events = model_has_post_update_events[
-                            segment_model_index
-                        ]
-                        segment_model._expire_absolute_timers(time)
-                        if segment_has_post_update_events:
-                            self._perf_stats["model_post_update_calls"] += 1
-                            if segment_model.post_update_events(self.node_voltages, time):
-                                segment_model.refresh_outputs(self.node_voltages, time)
-                        else:
-                            self._perf_stats["model_post_update_skips"] += 1
-                        if profile_clock is not None:
-                            elapsed = _add_profile_time(
-                                "model_post_update_s",
-                                _section_start,
-                            )
-                            _add_model_profile_time(
-                                segment_model_index,
-                                segment_model,
-                                "post_update_s",
-                                elapsed,
-                            )
-                        if getattr(segment_model, "_step_event_fired", False):
-                            cross_fired = True
+                        for segment_model_index, segment_model in zip(
+                            segment_model_indices,
+                            segment_models,
+                        ):
+                            _section_start = profile_clock() if profile_clock is not None else 0.0
+                            segment_has_post_update_events = model_has_post_update_events[
+                                segment_model_index
+                            ]
+                            segment_model._expire_absolute_timers(time)
+                            if segment_has_post_update_events:
+                                self._perf_stats["model_post_update_calls"] += 1
+                                if segment_model.post_update_events(self.node_voltages, time):
+                                    segment_model.refresh_outputs(self.node_voltages, time)
+                            else:
+                                self._perf_stats["model_post_update_skips"] += 1
+                            if profile_clock is not None:
+                                elapsed = _add_profile_time(
+                                    "model_post_update_s",
+                                    _section_start,
+                                )
+                                _add_model_profile_time(
+                                    segment_model_index,
+                                    segment_model,
+                                    "post_update_s",
+                                    elapsed,
+                                )
+                            if getattr(segment_model, "_step_event_fired", False):
+                                cross_fired = True
                     continue
 
                 _section_start = profile_clock() if profile_clock is not None else 0.0

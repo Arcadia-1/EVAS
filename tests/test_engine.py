@@ -900,7 +900,11 @@ endmodule
         assert rust._perf_stats["rust_static_eval_deferred_output_syncs"] == (
             rust._perf_stats["steps_total"]
         )
+        assert rust._perf_stats["rust_static_eval_lifecycle_model_skips"] == (
+            rust._perf_stats["steps_total"]
+        )
         assert rust._perf_stats["rust_static_eval_output_syncs"] == 1
+        assert rust._perf_stats["model_post_update_skips"] == rust._perf_stats["steps_total"]
         assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
         assert rust._perf_stats["indexed_array_dirty_syncs"] == rust._perf_stats["steps_total"]
         assert rust._perf_stats["indexed_array_prev_snapshot_dirty_skips"] == (
@@ -964,7 +968,13 @@ endmodule
         assert rust._perf_stats["rust_static_eval_deferred_output_syncs"] == (
             rust._perf_stats["steps_total"] * 3
         )
+        assert rust._perf_stats["rust_static_eval_lifecycle_model_skips"] == (
+            rust._perf_stats["steps_total"] * 3
+        )
         assert rust._perf_stats["rust_static_eval_output_syncs"] == 3
+        assert rust._perf_stats["model_post_update_skips"] == (
+            rust._perf_stats["steps_total"] * 3
+        )
         assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
         assert rust._perf_stats["indexed_array_dirty_syncs"] == rust._perf_stats["steps_total"]
         assert rust._perf_stats["indexed_array_prev_snapshot_dirty_skips"] == (
@@ -1015,6 +1025,10 @@ endmodule
         assert rust._perf_stats["rust_static_eval_node_voltage_syncs"] == (
             rust._perf_stats["steps_total"]
         )
+        assert rust._perf_stats["rust_static_eval_lifecycle_model_skips"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["model_post_update_skips"] == rust._perf_stats["steps_total"]
         assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
         assert rust.models[0].output_nodes["vout"] == pytest.approx(
             rust_result.signals["vout"][-1]
@@ -1063,6 +1077,13 @@ endmodule
             default_result.signals["VOUT"].tolist()
         )
         assert rust._perf_stats["rust_static_eval_models"] == 1
+        assert rust._perf_stats["rust_static_eval_lifecycle_model_skips"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["model_post_update_skips"] == (
+            rust._perf_stats["rust_static_eval_lifecycle_model_skips"]
+        )
+        assert rust._perf_stats["model_post_update_calls"] == rust._perf_stats["steps_total"]
         assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 0
         assert rust._perf_stats["indexed_array_dirty_syncs"] == 0
         assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
