@@ -10,6 +10,8 @@ This is a behavioral simulator that:
 - Records output waveforms
 """
 import math
+import os
+import random
 import time as _wall_time
 from array import array
 from dataclasses import dataclass, field
@@ -22,9 +24,21 @@ from evas.simulator.indexed import (
     IndexedVoltageSnapshotter,
     build_indexed_model_io_plan,
 )
+from evas.simulator.evaluate_ir import (
+    SOURCE_NODE,
+    SOURCE_STATE,
+    TARGET_NODE,
+    TARGET_STATE,
+    linear_op_uses_params,
+    normalize_linear_ops,
+    normalize_transition_target_ops,
+)
 from evas.simulator.rust_backend import (
+    LinearCondition,
+    LinearOp,
+    LinearTerm,
     RustBackendError,
-    StaticAffineOp,
+    TransitionTargetOp,
     load_optional_rust_backend,
 )
 
@@ -403,6 +417,2532 @@ class Simulator:
         for n in nodes:
             self.recorded_signals[n] = []
 
+    @staticmethod
+    def _waveform_metadata(waveform):
+        meta = getattr(waveform, "_evas_waveform", None)
+        return meta if isinstance(meta, dict) else None
+
+    @staticmethod
+    def _dedupe_times(times: List[float], tstop: float) -> array:
+        eps = 1.0e-18
+        cleaned = []
+        for value in sorted(times):
+            if value < -eps or value > tstop + eps:
+                continue
+            value = 0.0 if abs(value) <= eps else value
+            value = tstop if abs(value - tstop) <= eps else value
+            if cleaned and abs(value - cleaned[-1]) <= eps:
+                continue
+            cleaned.append(value)
+        if not cleaned or cleaned[0] != 0.0:
+            cleaned.insert(0, 0.0)
+        if cleaned[-1] < tstop - eps:
+            cleaned.append(tstop)
+        return array("d", cleaned)
+
+    @staticmethod
+    def _add_pulse_schedule_times(
+        times: List[float],
+        meta: Dict[str, object],
+        tstop: float,
+        vth: Optional[float] = None,
+        transition_offsets: Tuple[float, ...] = (),
+    ) -> int:
+        period = float(meta.get("period", 0.0) or 0.0)
+        rise = float(meta.get("rise", 0.0) or 0.0)
+        fall = float(meta.get("fall", 0.0) or 0.0)
+        delay = float(meta.get("delay", 0.0) or 0.0)
+        duty = float(meta.get("duty", 0.5) or 0.5)
+        has_width = bool(meta.get("has_width", False))
+        width = float(meta.get("width", 0.0) or 0.0)
+        fall_start = rise + width if has_width else (
+            float("inf") if period <= 0.0 else period * duty
+        )
+        knees = [0.0, rise]
+        if math.isfinite(fall_start):
+            knees.append(fall_start)
+            knees.append(fall_start + fall)
+            if fall > 0.0:
+                knees.append(fall_start + 0.5 * fall)
+        if rise > 0.0:
+            knees.append(0.5 * rise)
+
+        cycles = 1 if period <= 0.0 else int(math.floor(max(0.0, (tstop - delay)) / period)) + 2
+        cross_count = 0
+        for n in range(max(1, cycles)):
+            base = delay + (period * n if period > 0.0 else 0.0)
+            for offset in knees:
+                if math.isfinite(offset):
+                    times.append(base + offset)
+            if vth is not None:
+                v_lo = float(meta.get("v_lo", 0.0) or 0.0)
+                v_hi = float(meta.get("v_hi", 0.0) or 0.0)
+                if rise <= 0.0:
+                    cross_offset = 0.0
+                elif v_hi != v_lo and min(v_lo, v_hi) <= vth <= max(v_lo, v_hi):
+                    cross_offset = rise * ((vth - v_lo) / (v_hi - v_lo))
+                else:
+                    cross_offset = None
+                if cross_offset is not None and 0.0 <= cross_offset <= rise:
+                    cross_time = base + cross_offset
+                    if -1.0e-18 <= cross_time <= tstop + 1.0e-18:
+                        times.append(cross_time)
+                        for extra in transition_offsets:
+                            times.append(cross_time + extra)
+                        cross_count += 1
+            if period <= 0.0:
+                break
+        return cross_count
+
+    @staticmethod
+    def _pulse_threshold_cross_times(
+        meta: Dict[str, object],
+        tstop: float,
+        vth: float,
+        direction: int,
+    ) -> List[float]:
+        period = float(meta.get("period", 0.0) or 0.0)
+        rise = float(meta.get("rise", 0.0) or 0.0)
+        fall = float(meta.get("fall", 0.0) or 0.0)
+        delay = float(meta.get("delay", 0.0) or 0.0)
+        duty = float(meta.get("duty", 0.5) or 0.5)
+        has_width = bool(meta.get("has_width", False))
+        width = float(meta.get("width", 0.0) or 0.0)
+        v_lo = float(meta.get("v_lo", 0.0) or 0.0)
+        v_hi = float(meta.get("v_hi", 0.0) or 0.0)
+        if v_hi == v_lo:
+            return []
+        fall_start = rise + width if has_width else (
+            float("inf") if period <= 0.0 else period * duty
+        )
+        times: List[float] = []
+        cycles = 1 if period <= 0.0 else int(math.floor(max(0.0, (tstop - delay)) / period)) + 2
+        for n in range(max(1, cycles)):
+            base = delay + (period * n if period > 0.0 else 0.0)
+            if direction >= 0 and rise >= 0.0 and min(v_lo, v_hi) <= vth <= max(v_lo, v_hi):
+                frac = 1.0 if rise <= 0.0 else (vth - v_lo) / (v_hi - v_lo)
+                t_cross = base + max(0.0, min(1.0, frac)) * rise
+                if -1.0e-18 <= t_cross <= tstop + 1.0e-18:
+                    times.append(t_cross)
+            if (
+                direction <= 0
+                and math.isfinite(fall_start)
+                and fall >= 0.0
+                and min(v_lo, v_hi) <= vth <= max(v_lo, v_hi)
+            ):
+                frac = 1.0 if fall <= 0.0 else (v_hi - vth) / (v_hi - v_lo)
+                t_cross = base + fall_start + max(0.0, min(1.0, frac)) * fall
+                if -1.0e-18 <= t_cross <= tstop + 1.0e-18:
+                    times.append(t_cross)
+            if period <= 0.0:
+                break
+        return times
+
+    @staticmethod
+    def _add_source_breakpoint_times(times: List[float], src: Source, tstop: float) -> None:
+        current = -1.0e-18
+        for _ in range(100000):
+            bp = src.next_breakpoint(current)
+            if bp is None or bp > tstop + 1.0e-18:
+                return
+            if bp >= -1.0e-18:
+                times.append(bp)
+            current = bp
+
+    @staticmethod
+    def _model_candidate(model, kind: str) -> Optional[tuple]:
+        model_cls = getattr(model, "__class__", type(model))
+        for candidate in getattr(model_cls, "_whole_segment_candidates", ()) or ():
+            if candidate and candidate[0] == kind:
+                return candidate
+        return None
+
+    @staticmethod
+    def _external_node(model, port: str) -> str:
+        node_map = getattr(model, "node_map", {}) or {}
+        return node_map.get(port, port)
+
+    def _record_trace_result(
+        self,
+        times: array,
+        columns: Dict[str, object],
+        *,
+        enabled_kind: str,
+        step_count: Optional[int] = None,
+    ) -> SimResult:
+        time_arr = np.frombuffer(times, dtype=np.float64).copy()
+        signals = {}
+        for name in self.recorded_signals:
+            values = columns[name]
+            if isinstance(values, np.ndarray) and values.dtype == np.float64:
+                signals[name] = values if values.flags.c_contiguous else np.ascontiguousarray(values)
+            else:
+                signals[name] = np.array(values, dtype=np.float64)
+        for name, values in signals.items():
+            self.recorded_signals[name] = values.tolist()
+            self.node_voltages[name] = float(values[-1]) if len(values) else 0.0
+        self.time_points = time_arr.tolist()
+        step_sizes = np.empty(len(time_arr), dtype=np.float64)
+        if len(step_sizes):
+            step_sizes[0] = 0.0
+        if len(step_sizes) > 1:
+            step_sizes[1:] = np.diff(time_arr)
+        self._step_sizes = step_sizes.tolist()
+        self._perf_stats["rust_full_model_fastpath_enabled"] = 1
+        self._perf_stats["rust_full_model_whole_segment_points"] = len(time_arr)
+        self._perf_stats[f"rust_full_model_{enabled_kind}_enabled"] = 1
+        self._perf_stats["steps_total"] = (
+            int(step_count) if step_count is not None else max(0, len(time_arr) - 1)
+        )
+        return SimResult(time=time_arr, signals=signals, step_sizes=step_sizes)
+
+    def _whole_segment_uniform_times(
+        self,
+        *,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> List[float]:
+        sample_step = float(record_step or tstep)
+        if sample_step <= 0.0:
+            return [0.0, float(tstop)]
+        count = int(math.floor(tstop / sample_step + 1.0e-9)) + 1
+        raw = [min(tstop, idx * sample_step) for idx in range(max(1, count))]
+        if not raw or raw[-1] < tstop - 1.0e-18:
+            raw.append(tstop)
+        return raw
+
+    def _whole_segment_timer_adaptive_times(
+        self,
+        *,
+        tstop: float,
+        tstep: float,
+        max_step: float,
+        min_step: float,
+        timer_starts: Tuple[float, ...],
+        timer_periods: Tuple[float, ...],
+        source_breakpoint_sources: Tuple[Source, ...] = (),
+    ) -> List[float]:
+        """Mirror the default trace scheduler for restricted timer-linear models."""
+        eps = 1.0e-18
+        time = 0.0
+        dynamic_step = float(tstep)
+        times = [0.0]
+        next_timer_times: List[float] = []
+        for start, period in zip(timer_starts, timer_periods):
+            if period <= 0.0 or not math.isfinite(period):
+                continue
+            fire_time = max(0.0, float(start))
+            while fire_time <= time + eps:
+                fire_time += float(period)
+            next_timer_times.append(fire_time)
+
+        while time < tstop - eps:
+            dt = min(dynamic_step, tstep, max_step, tstop - time)
+            next_kind = ""
+            next_time: Optional[float] = None
+
+            for fire_time in next_timer_times:
+                if fire_time > time + eps and fire_time < time + dt:
+                    if next_time is None or fire_time < next_time:
+                        next_time = fire_time
+                        next_kind = "timer"
+
+            for src in source_breakpoint_sources:
+                bp = src.next_breakpoint(time)
+                if bp is not None and bp > time and bp < time + dt:
+                    if next_time is None or bp < next_time:
+                        next_time = float(bp)
+                        next_kind = "source"
+
+            if next_time is not None:
+                dt = next_time - time
+            if dt < min_step:
+                dt = min_step
+
+            time = min(float(tstop), time + dt)
+            times.append(time)
+
+            timer_due = next_kind == "timer"
+            for idx, fire_time in enumerate(tuple(next_timer_times)):
+                if time >= fire_time - eps:
+                    timer_due = True
+                    period = float(timer_periods[idx])
+                    while next_timer_times[idx] <= time + eps:
+                        next_timer_times[idx] += period
+
+            if timer_due:
+                dynamic_step = max(min_step, dynamic_step / 4.0)
+            else:
+                dynamic_step = min(tstep, dynamic_step * 1.15)
+
+        return times
+
+    @staticmethod
+    def _wave_value(source_by_node: Dict[str, Source], node: str, time: float, default: float = 0.0) -> float:
+        src = source_by_node.get(node)
+        if src is None:
+            return default
+        return float(src.waveform(time))
+
+    @staticmethod
+    def _crossed(prev: float, cur: float, direction: int, eps: float = 1.0e-12) -> bool:
+        if direction > 0:
+            return prev < -eps and cur >= -eps
+        if direction < 0:
+            return prev > eps and cur <= eps
+        return (prev < -eps and cur >= -eps) or (prev > eps and cur <= eps)
+
+    def _try_compiler_whole_segment_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+        max_step: float,
+        min_step: float,
+    ) -> Optional[SimResult]:
+        result = self._try_rust_prbs7_full_model_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        result = self._try_timer_static_linear_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+            max_step=max_step,
+            min_step=min_step,
+        )
+        if result is not None:
+            return result
+        result = self._try_gain_timer_reduction_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        result = self._try_gain_measurement_flow_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        result = self._try_cmp_delay_measurement_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        result = self._try_weighted_sar_loop_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        result = self._try_cppll_reacquire_fastpath(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if result is not None:
+            return result
+        # Audit 091c gate inspector + audit 091d executor body. The
+        # inspector still records perf counters; if all gates pass and the
+        # caller did not disable the 091d executor, run the generic
+        # fixed-grid trace.
+        self._inspect_generic_event_state_transition_dispatch(
+            rust_backend=rust_backend,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if getattr(self, "_generic_executor_enabled", False):
+            result = self._try_generic_event_state_transition_fastpath(
+                rust_backend=rust_backend,
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+            )
+            if result is not None:
+                return result
+        return None
+
+    def _try_generic_event_state_transition_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        """Audit 091d executor body.
+
+        For models matching `generic_event_state_transition_v1`, run a
+        fixed-grid time loop that calls model.evaluate() at each sample
+        point. This bypasses engine's adaptive stepping, source-breakpoint
+        scan, err-ratio scan, dynamic-breakpoint scan, and most prepare-step
+        orchestration. Body interpretation (event detection, transition
+        evolution) stays in the model's compiled Python evaluate(); the
+        savings come from skipping engine-side scaffolding.
+
+        Returns SimResult on success, None to fall through to default
+        Python path on any gate miss or unsupported feature.
+        """
+        if len(self.models) != 1 or not self.recorded_signals:
+            return None
+        model = self.models[0]
+        if getattr(model, "_child_models", []) or []:
+            return None
+        candidate = self._model_candidate(model, "generic_event_state_transition_v1")
+        if candidate is None:
+            return None
+        if tstep is None or tstep <= 0.0 or tstop is None or tstop <= 0.0:
+            return None
+
+        model_cls = type(model)
+        # Construct the fixed time grid.
+        times = self._whole_segment_uniform_times(
+            tstop=tstop, record_step=record_step, tstep=tstep,
+        )
+        # Add source breakpoint times so the executor still hits clk edges.
+        for src in self.sources:
+            if src.breakpoint_fn is not None:
+                self._add_source_breakpoint_times(times, src, tstop)
+        times = self._dedupe_times(times, tstop)
+
+        # Build fresh model for the fastpath so we don't perturb the
+        # original model's state.
+        try:
+            fast_model = model_cls()
+        except Exception:
+            return None
+        fast_model.params.update(getattr(model, "params", {}) or {})
+        fast_model.node_map = dict(getattr(model, "node_map", {}) or {})
+
+        # Initialize node-voltage dict from source waveforms at t=0.
+        nv: Dict[str, float] = {}
+        for src in self.sources:
+            try:
+                nv[src.node] = float(src.waveform(0.0))
+            except Exception:
+                return None
+        try:
+            fast_model.initial_step(nv, 0.0)
+        except Exception:
+            return None
+
+        # Audit 092 Phase B: adaptive refinement. Between consecutive
+        # entries in the planned (record-step + source-breakpoint) grid,
+        # query model.next_breakpoint() and insert any model-driven
+        # breakpoints (transition completion times, timer fires, etc.).
+        # This recovers ramp-edge samples that pure fixed-grid sampling
+        # would miss. Recording still happens only at the planned grid
+        # points, so the CSV column structure matches Python's output.
+        # Audit 095: record ALL evaluated time points (planned + adaptive
+        # substeps from next_breakpoint), matching Python adaptive
+        # stepper's behavior of emitting record samples at cross/transition
+        # events. This closes the 091d parity gap by including the
+        # high-precision timestamps Python normally emits.
+        recorded_names = tuple(self.recorded_signals)
+        columns: Dict[str, List[float]] = {name: [] for name in recorded_names}
+        emitted_times: List[float] = []
+        sources_tuple = tuple(self.sources)
+        planned = list(times)
+        try:
+            prev_t = 0.0
+            for record_t in planned:
+                rt = float(record_t)
+                # Step adaptive substeps until we reach the next planned grid.
+                while True:
+                    try:
+                        bp = fast_model.next_breakpoint(prev_t)
+                    except Exception:
+                        bp = None
+                    if bp is not None and prev_t < bp < rt:
+                        sub_t = float(bp)
+                        for src in sources_tuple:
+                            nv[src.node] = float(src.waveform(sub_t))
+                        fast_model.evaluate(nv, sub_t)
+                        # Audit 095: record at adaptive breakpoint too.
+                        emitted_times.append(sub_t)
+                        for name in recorded_names:
+                            columns[name].append(float(nv.get(name, 0.0)))
+                        prev_t = sub_t
+                    else:
+                        break
+                # Step to the planned grid point and record.
+                for src in sources_tuple:
+                    nv[src.node] = float(src.waveform(rt))
+                fast_model.evaluate(nv, rt)
+                emitted_times.append(rt)
+                for name in recorded_names:
+                    columns[name].append(float(nv.get(name, 0.0)))
+                prev_t = rt
+        except Exception:
+            self._perf_stats["generic_executor_runtime_fallbacks"] = (
+                self._perf_stats.get("generic_executor_runtime_fallbacks", 0) + 1
+            )
+            return None
+
+        # Build SimResult via the existing helper.
+        times_arr = array("d", emitted_times)
+        self._perf_stats["generic_executor_runs"] = (
+            self._perf_stats.get("generic_executor_runs", 0) + 1
+        )
+        return self._record_trace_result(
+            times_arr,
+            columns,
+            enabled_kind="generic_event_state_transition",
+        )
+
+    def _inspect_generic_event_state_transition_dispatch(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> None:
+        """Audit 091c gate inspector.
+
+        Walks through the simulator state and records, in perf_stats, whether
+        a `generic_event_state_transition_v1` candidate is reachable and (if
+        not) which gate blocked it. Returns nothing; the caller falls through
+        to the default Python evaluate path. 091d will replace this with an
+        actual segment-trace executor.
+        """
+        stats = self._perf_stats
+        # Always increment "saw any model with candidate metadata" so users can
+        # quickly see whether the matcher fired during their run.
+        eligible_models = 0
+        block_reason: Optional[str] = None
+        for model in self.models:
+            candidate = self._model_candidate(model, "generic_event_state_transition_v1")
+            if candidate is None:
+                continue
+            eligible_models += 1
+        stats["generic_executor_models_with_candidate"] = (
+            stats.get("generic_executor_models_with_candidate", 0) + eligible_models
+        )
+        if eligible_models == 0:
+            return
+        # Walk the same gates a future executor would enforce.
+        if len(self.models) != 1:
+            block_reason = "multi_model_simulation"
+        elif rust_backend is None:
+            block_reason = "rust_backend_unavailable"
+        else:
+            model = self.models[0]
+            if getattr(model, "_child_models", []) or []:
+                block_reason = "model_has_children"
+            elif self._model_candidate(
+                model, "generic_event_state_transition_v1"
+            ) is None:
+                block_reason = "top_model_no_candidate"
+            elif not self.recorded_signals:
+                block_reason = "no_recorded_signals"
+            elif tstep is None or tstep <= 0.0:
+                block_reason = "invalid_tstep"
+            elif tstop is None or tstop <= 0.0:
+                block_reason = "invalid_tstop"
+        if block_reason is None:
+            stats["generic_executor_dispatchable_runs"] = (
+                stats.get("generic_executor_dispatchable_runs", 0) + 1
+            )
+        else:
+            stats["generic_executor_blocked_runs"] = (
+                stats.get("generic_executor_blocked_runs", 0) + 1
+            )
+            key = f"generic_executor_block_reason_{block_reason}"
+            stats[key] = stats.get(key, 0) + 1
+
+    def _try_timer_static_linear_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+        max_step: float,
+        min_step: float,
+    ) -> Optional[SimResult]:
+        if (
+            rust_backend is None
+            or len(self.models) != 1
+            or not self.recorded_signals
+        ):
+            return None
+        model = self.models[0]
+        if getattr(model, "_child_models", []) or []:
+            return None
+        model_cls = getattr(model, "__class__", type(model))
+        timer_specs = tuple(
+            getattr(model_cls, "_event_timer_static_linear_ir_ops", ()) or ()
+        )
+        evaluate_raw_ops = tuple(
+            getattr(model_cls, "_evaluate_ir_static_linear_non_event_ops", ()) or ()
+        )
+        if not timer_specs or not evaluate_raw_ops:
+            return None
+
+        try:
+            evaluate_ops_ir = normalize_linear_ops(evaluate_raw_ops)
+            timer_starts = []
+            timer_periods = []
+            event_ops_by_timer = []
+            for _key, start_expr, period_expr, event_raw_ops in timer_specs:
+                event_ops_ir = normalize_linear_ops(tuple(event_raw_ops))
+                timer_start = model._evaluate_rust_static_affine_scalar(
+                    start_expr,
+                    model.params,
+                )
+                timer_period = model._evaluate_rust_static_affine_scalar(
+                    period_expr,
+                    model.params,
+                )
+                timer_starts.append(float(timer_start))
+                timer_periods.append(float(timer_period))
+                event_ops_by_timer.append(event_ops_ir)
+        except (TypeError, ValueError, KeyError, ZeroDivisionError):
+            return None
+        for timer_start, timer_period in zip(timer_starts, timer_periods):
+            if timer_period <= 0.0 or not math.isfinite(timer_period):
+                return None
+            if not math.isfinite(timer_start) or timer_start < -1.0e-18:
+                return None
+
+        for event_ops_ir in event_ops_by_timer:
+            if any(op.target_kind != TARGET_STATE for op in event_ops_ir):
+                return None
+            if self._linear_ops_use_node_sources(event_ops_ir):
+                return None
+        if any(op.target_kind != TARGET_NODE for op in evaluate_ops_ir):
+            return None
+
+        state_ids = self._model_state_ids(model)
+        if state_ids is None:
+            return None
+        node_names = self._timer_static_linear_node_names(
+            model,
+            evaluate_ops_ir,
+            extra_nodes=tuple(self.recorded_signals),
+        )
+        node_names.update(src.node for src in self.sources)
+        node_index = {name: idx for idx, name in enumerate(sorted(node_names))}
+
+        try:
+            event_batches = [
+                self._rust_linear_batch_for_model(
+                    rust_backend,
+                    model,
+                    event_ops_ir,
+                    node_index,
+                    state_ids,
+                )
+                for event_ops_ir in event_ops_by_timer
+            ]
+            evaluate_batch = self._rust_linear_batch_for_model(
+                rust_backend,
+                model,
+                evaluate_ops_ir,
+                node_index,
+                state_ids,
+            )
+        except (TypeError, ValueError, KeyError, ZeroDivisionError, RustBackendError):
+            return None
+        if any(batch is None for batch in event_batches) or evaluate_batch is None:
+            return None
+        event_op_starts = []
+        event_op_counts = []
+        combined_event_ops = []
+        for batch in event_batches:
+            event_op_starts.append(len(combined_event_ops))
+            event_op_counts.append(len(batch))
+            combined_event_ops.extend(batch.ops)
+        combined_event_batch = rust_backend.make_static_linear_batch(combined_event_ops)
+
+        if record_step is None:
+            raw_times = self._whole_segment_timer_adaptive_times(
+                tstop=tstop,
+                tstep=tstep,
+                max_step=max_step,
+                min_step=min_step,
+                timer_starts=tuple(timer_starts),
+                timer_periods=tuple(timer_periods),
+                source_breakpoint_sources=tuple(
+                    src for src in self.sources if src.breakpoint_fn is not None
+                ),
+            )
+        else:
+            raw_times = self._whole_segment_uniform_times(
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+            )
+            for src in self.sources:
+                if src.breakpoint_fn is not None:
+                    self._add_source_breakpoint_times(raw_times, src, tstop)
+            for timer_start, timer_period in zip(timer_starts, timer_periods):
+                self._add_periodic_timer_breakpoint_times(
+                    raw_times,
+                    tstop=tstop,
+                    start=timer_start,
+                    period=timer_period,
+                )
+        times = self._dedupe_times(raw_times, tstop)
+
+        source_by_node = {src.node: src for src in self.sources}
+        source_nodes = tuple(sorted(source_by_node))
+        source_node_ids = [node_index[node] for node in source_nodes]
+        source_values = array("d")
+        for time_value in times:
+            for node in source_nodes:
+                source_values.append(
+                    float(source_by_node[node].waveform(float(time_value)))
+                )
+
+        node_values = array("d", [0.0]) * len(node_index)
+        for node, src in source_by_node.items():
+            node_values[node_index[node]] = float(src.waveform(0.0))
+
+        fast_model = model_cls()
+        fast_model.params.update(model.params)
+        fast_model.node_map = dict(getattr(model, "node_map", {}) or {})
+        integer_names = tuple(str(name) for name in getattr(model_cls, "_integer_state_names", ()) or ())
+        array_layouts = tuple(getattr(model_cls, "_state_array_ranges", ()) or ())
+        fast_model._set_indexed_state_storage(dict(state_ids), integer_names, array_layouts)
+        initial_nv = {name: float(node_values[idx]) for name, idx in node_index.items()}
+        fast_model.initial_step(initial_nv, 0.0)
+        state_values = array("d", fast_model._indexed_state_values or [])
+
+        record_node_ids = []
+        for name in self.recorded_signals:
+            if name not in node_index:
+                return None
+            record_node_ids.append(node_index[name])
+
+        self._perf_stats["rust_full_model_timer_static_linear_rust_requested"] = 1
+        try:
+            if len(timer_starts) == 1:
+                flat_values, event_count = rust_backend.timer_static_linear_trace(
+                    times,
+                    source_node_ids=source_node_ids,
+                    source_values=source_values,
+                    node_values=node_values,
+                    state_values=state_values,
+                    event_batch=event_batches[0],
+                    evaluate_batch=evaluate_batch,
+                    record_node_ids=record_node_ids,
+                    timer_start=timer_starts[0],
+                    timer_period=timer_periods[0],
+                    has_start=True,
+                )
+            else:
+                flat_values, event_count = rust_backend.timer_static_linear_queue_trace(
+                    times,
+                    source_node_ids=source_node_ids,
+                    source_values=source_values,
+                    node_values=node_values,
+                    state_values=state_values,
+                    timer_starts=timer_starts,
+                    timer_periods=timer_periods,
+                    event_op_starts=event_op_starts,
+                    event_op_counts=event_op_counts,
+                    event_batch=combined_event_batch,
+                    evaluate_batch=evaluate_batch,
+                    record_node_ids=record_node_ids,
+                )
+        except RustBackendError:
+            self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+            self._perf_stats["rust_full_model_timer_static_linear_rust_fallbacks"] += 1
+            return None
+
+        matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(
+            len(times),
+            len(record_node_ids),
+        )
+        columns = {
+            name: np.array(matrix[:, idx], copy=True)
+            for idx, name in enumerate(self.recorded_signals)
+        }
+        self._perf_stats["rust_full_model_timer_static_linear_events"] = int(event_count)
+        self._perf_stats["rust_full_model_timer_static_linear_rust_enabled"] = 1
+        self._perf_stats["rust_full_model_timer_static_linear_rust_points"] = len(times)
+        self._perf_stats[
+            "rust_full_model_timer_static_linear_default_trace_enabled"
+        ] = int(record_step is None)
+        self._perf_stats["rust_full_model_timer_static_linear_timer_count"] = len(
+            timer_starts
+        )
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="timer_static_linear",
+            step_count=max(0, len(times) - 1),
+        )
+
+    @staticmethod
+    def _add_periodic_timer_breakpoint_times(
+        times: List[float],
+        *,
+        tstop: float,
+        start: float,
+        period: float,
+    ) -> None:
+        if period <= 0.0 or not math.isfinite(period) or not math.isfinite(start):
+            return
+        if start < -1.0e-18:
+            return
+        fire_time = max(0.0, start)
+        while fire_time <= tstop + 1.0e-18:
+            times.append(min(float(tstop), max(0.0, float(fire_time))))
+            fire_time += period
+
+    @staticmethod
+    def _linear_ops_use_node_sources(ops) -> bool:
+        def terms_use_nodes(terms) -> bool:
+            return any(term.source_kind == SOURCE_NODE for term in terms)
+
+        for op in ops:
+            if terms_use_nodes(op.terms) or terms_use_nodes(op.false_terms):
+                return True
+            condition = op.condition
+            if condition is not None and (
+                terms_use_nodes(condition.left_terms)
+                or terms_use_nodes(condition.right_terms)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _model_state_ids(model) -> Optional[Dict[str, int]]:
+        model_cls = getattr(model, "__class__", type(model))
+        state_ids: Dict[str, int] = {}
+        for name in tuple(getattr(model_cls, "_state_scalar_names", ()) or ()):
+            state_ids[str(name)] = len(state_ids)
+        slot_name_fn = getattr(model, "_state_array_slot_name", None)
+        for array_name, lo, hi, _integer in (
+            tuple(getattr(model_cls, "_state_array_ranges", ()) or ())
+        ):
+            for idx in range(int(lo), int(hi) + 1):
+                slot_name = (
+                    slot_name_fn(str(array_name), idx)
+                    if slot_name_fn is not None
+                    else f"{array_name}[{idx}]"
+                )
+                state_ids[str(slot_name)] = len(state_ids)
+        return state_ids
+
+    def _timer_static_linear_node_names(
+        self,
+        model,
+        ops,
+        *,
+        extra_nodes: Tuple[str, ...],
+    ) -> set[str]:
+        nodes = {str(name) for name in extra_nodes}
+
+        def add_node(local_name: str) -> None:
+            nodes.add(self._external_node(model, str(local_name)))
+
+        def add_terms(terms) -> None:
+            for term in terms:
+                if term.source_kind == SOURCE_NODE:
+                    add_node(term.source_name)
+
+        for op in ops:
+            if op.target_kind == TARGET_NODE:
+                add_node(op.target_name)
+            add_terms(op.terms)
+            add_terms(op.false_terms)
+            if op.condition is not None:
+                add_terms(op.condition.left_terms)
+                add_terms(op.condition.right_terms)
+        return nodes
+
+    def _rust_linear_batch_for_model(
+        self,
+        rust_backend,
+        model,
+        ops,
+        node_index: Dict[str, int],
+        state_ids: Dict[str, int],
+    ):
+        converted = []
+
+        def scalar(value):
+            return model._evaluate_rust_static_affine_scalar(value, model.params)
+
+        def convert_terms(ir_terms):
+            terms = []
+            for term in ir_terms:
+                gain = scalar(term.gain)
+                if term.source_kind == SOURCE_NODE:
+                    external = self._external_node(model, term.source_name)
+                    terms.append(
+                        LinearTerm(
+                            source_kind=SOURCE_NODE,
+                            source_id=node_index[external],
+                            gain=gain,
+                        )
+                    )
+                elif term.source_kind == SOURCE_STATE:
+                    terms.append(
+                        LinearTerm(
+                            source_kind=SOURCE_STATE,
+                            source_id=state_ids[term.source_name],
+                            gain=gain,
+                        )
+                    )
+                else:
+                    raise ValueError(f"unsupported source kind: {term.source_kind!r}")
+            return tuple(terms)
+
+        def convert_condition(condition):
+            if condition is None:
+                return None
+            return LinearCondition(
+                op_kind=condition.op_kind,
+                left_bias=scalar(condition.left_bias),
+                left_terms=convert_terms(condition.left_terms),
+                right_bias=scalar(condition.right_bias),
+                right_terms=convert_terms(condition.right_terms),
+            )
+
+        for op in ops:
+            if op.target_kind == TARGET_NODE:
+                target_id = node_index[self._external_node(model, op.target_name)]
+            elif op.target_kind == TARGET_STATE:
+                target_id = state_ids[op.target_name]
+            else:
+                raise ValueError(f"unsupported target kind: {op.target_kind!r}")
+            converted.append(
+                LinearOp(
+                    target_kind=op.target_kind,
+                    target_id=target_id,
+                    bias=scalar(op.bias),
+                    terms=convert_terms(op.terms),
+                    condition=convert_condition(op.condition),
+                    false_bias=scalar(op.false_bias),
+                    false_terms=convert_terms(op.false_terms),
+                    target_integer=op.target_integer,
+                )
+            )
+        return rust_backend.make_static_linear_batch(converted)
+
+    def _try_gain_timer_reduction_fastpath(
+        self,
+        *,
+        rust_backend=None,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        if not self.models or len(self.models) != 1:
+            return None
+        model = self.models[0]
+        candidate = self._model_candidate(model, "gain_timer_reduction_v1")
+        if candidate is None:
+            return None
+        try:
+            (
+                _kind,
+                vdd_port,
+                vss_port,
+                vinp_port,
+                vinn_port,
+                voutp_port,
+                voutn_port,
+                gain_port,
+                valid_port,
+                sample_period_param,
+                start_time_param,
+                gain_scale_param,
+                min_input_span_param,
+                tedge_param,
+            ) = candidate
+        except (TypeError, ValueError):
+            return None
+        port_nodes = {
+            port: self._external_node(model, port)
+            for port in (
+                vdd_port, vss_port, vinp_port, vinn_port,
+                voutp_port, voutn_port, gain_port, valid_port,
+            )
+        }
+        generated_nodes = set(port_nodes.values())
+        if any(name not in generated_nodes for name in self.recorded_signals):
+            return None
+        source_by_node = {src.node: src for src in self.sources}
+        required_sources = (
+            port_nodes[vdd_port],
+            port_nodes[vss_port],
+            port_nodes[vinp_port],
+            port_nodes[vinn_port],
+            port_nodes[voutp_port],
+            port_nodes[voutn_port],
+        )
+        if any(node not in source_by_node for node in required_sources):
+            return None
+        try:
+            sample_period = float(model.params[sample_period_param])
+            start_time = float(model.params[start_time_param])
+            gain_scale = float(model.params[gain_scale_param])
+            min_input_span = float(model.params[min_input_span_param])
+            tedge = float(model.params[tedge_param])
+        except Exception:
+            return None
+        if sample_period <= 0.0 or gain_scale == 0.0:
+            return None
+
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        sample_times: List[float] = []
+        sample_count_est = int(math.floor(tstop / sample_period + 1.0e-9)) + 1
+        for idx in range(max(1, sample_count_est + 1)):
+            event_t = idx * sample_period
+            if event_t > tstop + 1.0e-18:
+                break
+            sample_times.append(event_t)
+            raw_times.append(event_t)
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                raw_times.append(event_t + frac * tedge)
+        times = self._dedupe_times(raw_times, tstop)
+        rust_gain_trace_enabled = (
+            os.environ.get("EVAS_RUST_GAIN_TIMER_TRACE", "1").strip().lower()
+            not in {"0", "false", "no", "off", "disabled"}
+        )
+        self._perf_stats["rust_full_model_gain_timer_reduction_rust_requested"] = int(
+            bool(rust_backend is not None and rust_gain_trace_enabled)
+        )
+        if rust_backend is not None and rust_gain_trace_enabled:
+            try:
+                def values_for(node: str, rows) -> array:
+                    return array(
+                        "d",
+                        (
+                            self._wave_value(source_by_node, node, float(time))
+                            for time in rows
+                        ),
+                    )
+
+                flat_values, sample_events = rust_backend.gain_timer_reduction_trace(
+                    times,
+                    array("d", sample_times),
+                    point_vdd=values_for(port_nodes[vdd_port], times),
+                    point_vss=values_for(port_nodes[vss_port], times),
+                    point_vinp=values_for(port_nodes[vinp_port], times),
+                    point_vinn=values_for(port_nodes[vinn_port], times),
+                    point_voutp=values_for(port_nodes[voutp_port], times),
+                    point_voutn=values_for(port_nodes[voutn_port], times),
+                    sample_vdd=values_for(port_nodes[vdd_port], sample_times),
+                    sample_vss=values_for(port_nodes[vss_port], sample_times),
+                    sample_vinp=values_for(port_nodes[vinp_port], sample_times),
+                    sample_vinn=values_for(port_nodes[vinn_port], sample_times),
+                    sample_voutp=values_for(port_nodes[voutp_port], sample_times),
+                    sample_voutn=values_for(port_nodes[voutn_port], sample_times),
+                    start_time=start_time,
+                    gain_scale=gain_scale,
+                    min_input_span=min_input_span,
+                    tedge=tedge,
+                )
+                matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(
+                    len(times),
+                    8,
+                )
+                column_by_node = {
+                    port_nodes[vdd_port]: 0,
+                    port_nodes[vss_port]: 1,
+                    port_nodes[vinp_port]: 2,
+                    port_nodes[vinn_port]: 3,
+                    port_nodes[voutp_port]: 4,
+                    port_nodes[voutn_port]: 5,
+                    port_nodes[gain_port]: 6,
+                    port_nodes[valid_port]: 7,
+                }
+                columns = {
+                    name: np.array(matrix[:, column_by_node[name]], copy=True)
+                    for name in self.recorded_signals
+                }
+                self._perf_stats["rust_full_model_gain_timer_reduction_samples"] = sample_events
+                self._perf_stats["rust_full_model_gain_timer_reduction_rust_enabled"] = 1
+                self._perf_stats["rust_full_model_gain_timer_reduction_rust_points"] = len(times)
+                return self._record_trace_result(
+                    times,
+                    columns,
+                    enabled_kind="gain_timer_reduction",
+                )
+            except RustBackendError:
+                self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+                self._perf_stats["rust_full_model_gain_timer_reduction_rust_fallbacks"] += 1
+
+        gain_transition = TransitionState()
+        valid_transition = TransitionState()
+        in_min = 1.0e9
+        in_max = -1.0e9
+        out_min = 1.0e9
+        out_max = -1.0e9
+        gain_q = 0.0
+        valid_q = 0
+        next_sample = 0.0
+        sample_events = 0
+        columns = {name: [] for name in self.recorded_signals}
+
+        for t in times:
+            while next_sample <= t + 1.0e-18:
+                vdd_val = self._wave_value(source_by_node, port_nodes[vdd_port], next_sample)
+                vss_val = self._wave_value(source_by_node, port_nodes[vss_port], next_sample)
+                if next_sample >= start_time - 1.0e-18:
+                    vin_diff = (
+                        self._wave_value(source_by_node, port_nodes[vinp_port], next_sample)
+                        - self._wave_value(source_by_node, port_nodes[vinn_port], next_sample)
+                    )
+                    vout_diff = (
+                        self._wave_value(source_by_node, port_nodes[voutp_port], next_sample)
+                        - self._wave_value(source_by_node, port_nodes[voutn_port], next_sample)
+                    )
+                    in_min = min(in_min, vin_diff)
+                    in_max = max(in_max, vin_diff)
+                    out_min = min(out_min, vout_diff)
+                    out_max = max(out_max, vout_diff)
+                    in_span = in_max - in_min
+                    out_span = out_max - out_min
+                    if in_span > min_input_span:
+                        gain_q = out_span / in_span
+                        valid_q = 1
+                gain_transition.evaluate(next_sample)
+                valid_transition.evaluate(next_sample)
+                gain_transition.set_target(
+                    next_sample,
+                    (vdd_val - vss_val) * gain_q / gain_scale,
+                    0.0,
+                    tedge,
+                    tedge,
+                )
+                valid_transition.set_target(
+                    next_sample,
+                    (vdd_val - vss_val) if valid_q else 0.0,
+                    0.0,
+                    tedge,
+                    tedge,
+                )
+                sample_events += 1
+                next_sample += sample_period
+
+            values_by_node = {
+                port_nodes[vdd_port]: self._wave_value(source_by_node, port_nodes[vdd_port], float(t)),
+                port_nodes[vss_port]: self._wave_value(source_by_node, port_nodes[vss_port], float(t)),
+                port_nodes[vinp_port]: self._wave_value(source_by_node, port_nodes[vinp_port], float(t)),
+                port_nodes[vinn_port]: self._wave_value(source_by_node, port_nodes[vinn_port], float(t)),
+                port_nodes[voutp_port]: self._wave_value(source_by_node, port_nodes[voutp_port], float(t)),
+                port_nodes[voutn_port]: self._wave_value(source_by_node, port_nodes[voutn_port], float(t)),
+            }
+            vss_now = values_by_node[port_nodes[vss_port]]
+            values_by_node[port_nodes[gain_port]] = vss_now + gain_transition.evaluate(float(t))
+            values_by_node[port_nodes[valid_port]] = vss_now + valid_transition.evaluate(float(t))
+            for name in columns:
+                columns[name].append(float(values_by_node.get(name, 0.0)))
+
+        self._perf_stats["rust_full_model_gain_timer_reduction_samples"] = sample_events
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="gain_timer_reduction",
+        )
+
+    def _try_gain_measurement_flow_fastpath(
+        self,
+        *,
+        rust_backend=None,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        if rust_backend is None or len(self.models) != 4:
+            return None
+
+        rust_gain_flow_enabled = (
+            os.environ.get("EVAS_RUST_GAIN_MEASUREMENT_FLOW_TRACE", "1").strip().lower()
+            not in {"0", "false", "no", "off", "disabled"}
+        )
+        if not rust_gain_flow_enabled:
+            return None
+
+        def has_shape(model, ports: Tuple[str, ...], params: Tuple[str, ...]) -> bool:
+            model_ports = tuple(getattr(model.__class__, "_module_ports", ()) or ())
+            if set(model_ports) != set(ports):
+                return False
+            return all(name in getattr(model, "params", {}) for name in params)
+
+        def one_model(ports: Tuple[str, ...], params: Tuple[str, ...]):
+            matches = [model for model in self.models if has_shape(model, ports, params)]
+            return matches[0] if len(matches) == 1 else None
+
+        vin_model = one_model(
+            ("CLK", "RST_N", "VOUT_P", "VOUT_N"),
+            ("vdd", "vth", "ampl", "freq", "sigma", "SEED"),
+        )
+        lfsr_model = one_model(
+            ("DPN", "VDD", "VSS", "CLK", "EN", "RSTB"),
+            ("seed",),
+        )
+        dither_model = one_model(
+            ("VRES_P", "VRES_N", "DPN", "VOUT_P", "VOUT_N"),
+            ("vth", "DITHER_AMP"),
+        )
+        amp_model = one_model(
+            ("VIN_P", "VIN_N", "VOUT_P", "VOUT_N"),
+            ("vdd", "ACTUAL_GAIN"),
+        )
+        if None in (vin_model, lfsr_model, dither_model, amp_model):
+            return None
+
+        lfsr_arrays = tuple(getattr(lfsr_model.__class__, "_state_array_ranges", ()) or ())
+        if ("lfsr_r", 0, 31, True) not in lfsr_arrays or ("tmp_lfsr_r", 0, 32, True) not in lfsr_arrays:
+            return None
+
+        vin_nodes = {port: self._external_node(vin_model, port) for port in ("CLK", "RST_N", "VOUT_P", "VOUT_N")}
+        lfsr_nodes = {port: self._external_node(lfsr_model, port) for port in ("DPN", "VDD", "VSS", "CLK", "EN", "RSTB")}
+        dither_nodes = {port: self._external_node(dither_model, port) for port in ("VRES_P", "VRES_N", "DPN", "VOUT_P", "VOUT_N")}
+        amp_nodes = {port: self._external_node(amp_model, port) for port in ("VIN_P", "VIN_N", "VOUT_P", "VOUT_N")}
+
+        if (
+            vin_nodes["CLK"] != lfsr_nodes["CLK"]
+            or vin_nodes["RST_N"] != lfsr_nodes["RSTB"]
+            or vin_nodes["VOUT_P"] != dither_nodes["VRES_P"]
+            or vin_nodes["VOUT_N"] != dither_nodes["VRES_N"]
+            or lfsr_nodes["DPN"] != dither_nodes["DPN"]
+            or dither_nodes["VOUT_P"] != amp_nodes["VIN_P"]
+            or dither_nodes["VOUT_N"] != amp_nodes["VIN_N"]
+        ):
+            return None
+
+        generated_nodes = {
+            vin_nodes["VOUT_P"],
+            vin_nodes["VOUT_N"],
+            amp_nodes["VOUT_P"],
+            amp_nodes["VOUT_N"],
+        }
+        if any(name not in generated_nodes for name in self.recorded_signals):
+            return None
+
+        source_by_node = {src.node: src for src in self.sources}
+        required_source_nodes = (
+            vin_nodes["CLK"],
+            vin_nodes["RST_N"],
+            lfsr_nodes["VDD"],
+            lfsr_nodes["VSS"],
+        )
+        if any(node not in source_by_node for node in required_source_nodes):
+            return None
+
+        clk_meta = self._waveform_metadata(source_by_node[vin_nodes["CLK"]].waveform)
+        vdd_meta = self._waveform_metadata(source_by_node[lfsr_nodes["VDD"]].waveform)
+        vss_meta = self._waveform_metadata(source_by_node[lfsr_nodes["VSS"]].waveform)
+        if (
+            not clk_meta
+            or clk_meta.get("kind") != "pulse"
+            or not vdd_meta
+            or vdd_meta.get("kind") != "dc"
+            or not vss_meta
+            or vss_meta.get("kind") != "dc"
+        ):
+            return None
+
+        try:
+            vdd = float(vdd_meta["voltage"])
+            vss = float(vss_meta["voltage"])
+            vin_vdd = float(vin_model.params["vdd"])
+            vin_vth = float(vin_model.params["vth"])
+            ampl = float(vin_model.params["ampl"])
+            freq = float(vin_model.params["freq"])
+            sigma = float(vin_model.params["sigma"])
+            seed = int(float(vin_model.params["SEED"]))
+            lfsr_seed = int(float(lfsr_model.params["seed"]))
+            dither_vth = float(dither_model.params["vth"])
+            dither_amp = float(dither_model.params["DITHER_AMP"])
+            amp_vdd = float(amp_model.params["vdd"])
+            actual_gain = float(amp_model.params["ACTUAL_GAIN"])
+            vin_transition = float(getattr(vin_model, "default_transition", 30.0e-12) or 30.0e-12)
+            lfsr_transition = float(getattr(lfsr_model, "default_transition", 10.0e-12) or 10.0e-12)
+        except Exception:
+            return None
+        if (
+            freq <= 0.0
+            or vin_transition <= 0.0
+            or lfsr_transition <= 0.0
+            or abs(vin_vdd - amp_vdd) > 1.0e-12
+            or abs(vin_vdd - vdd) > 1.0e-12
+        ):
+            return None
+
+        self._perf_stats["rust_full_model_gain_measurement_flow_rust_requested"] = 1
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        for src in source_by_node.values():
+            self._add_source_breakpoint_times(raw_times, src, tstop)
+
+        rst_node = vin_nodes["RST_N"]
+        vcm = 0.5 * vin_vdd
+        rng = random.Random(seed)
+        vin_event_times: List[float] = []
+        vin_event_vinp: List[float] = []
+        vin_event_vinn: List[float] = []
+        for event_t in self._pulse_threshold_cross_times(clk_meta, tstop, vin_vth, +1):
+            if self._wave_value(source_by_node, rst_node, event_t) <= vin_vth:
+                continue
+            target_vinp = (
+                vcm
+                + ampl * math.sin(2.0 * math.pi * freq * event_t)
+                + sigma * rng.gauss(0.0, 1.0)
+            )
+            vin_event_times.append(event_t)
+            vin_event_vinp.append(target_vinp)
+            vin_event_vinn.append(vcm)
+            raw_times.append(event_t)
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                raw_times.append(event_t + frac * vin_transition)
+
+        lfsr_event_times: List[float] = []
+        for event_t in self._pulse_threshold_cross_times(clk_meta, tstop, 0.5, +1):
+            if self._wave_value(source_by_node, rst_node, event_t) <= 0.5:
+                continue
+            lfsr_event_times.append(event_t)
+            raw_times.append(event_t)
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                raw_times.append(event_t + frac * lfsr_transition)
+
+        times = self._dedupe_times(raw_times, tstop)
+        try:
+            flat_values, vin_events, lfsr_events = rust_backend.gain_measurement_flow_trace(
+                times,
+                vin_event_times=array("d", vin_event_times),
+                vin_event_vinp=array("d", vin_event_vinp),
+                vin_event_vinn=array("d", vin_event_vinn),
+                lfsr_event_times=array("d", lfsr_event_times),
+                vcm=vcm,
+                vth=dither_vth,
+                dither_amp=dither_amp,
+                actual_gain=actual_gain,
+                vin_transition=vin_transition,
+                lfsr_transition=lfsr_transition,
+                vdd=vdd,
+                vss=vss,
+                lfsr_seed=lfsr_seed,
+            )
+        except RustBackendError:
+            self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+            self._perf_stats["rust_full_model_gain_measurement_flow_rust_fallbacks"] += 1
+            return None
+
+        matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(len(times), 4)
+        column_by_node = {
+            vin_nodes["VOUT_P"]: 0,
+            vin_nodes["VOUT_N"]: 1,
+            amp_nodes["VOUT_P"]: 2,
+            amp_nodes["VOUT_N"]: 3,
+        }
+        columns = {
+            name: np.array(matrix[:, column_by_node[name]], copy=True)
+            for name in self.recorded_signals
+        }
+        self._perf_stats["rust_full_model_gain_measurement_flow_vin_events"] = vin_events
+        self._perf_stats["rust_full_model_gain_measurement_flow_lfsr_events"] = lfsr_events
+        self._perf_stats["rust_full_model_gain_measurement_flow_rust_enabled"] = 1
+        self._perf_stats["rust_full_model_gain_measurement_flow_rust_points"] = len(times)
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="gain_measurement_flow",
+        )
+
+    def _try_cmp_delay_measurement_fastpath(
+        self,
+        *,
+        rust_backend=None,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        cmp_model = None
+        edge_model = None
+        cmp_candidate = None
+        edge_candidate = None
+        for model in self.models:
+            candidate = self._model_candidate(model, "cmp_delay_log_transition_v1")
+            if candidate is not None:
+                cmp_model = model
+                cmp_candidate = candidate
+            candidate = self._model_candidate(model, "edge_interval_timer_v1")
+            if candidate is not None:
+                edge_model = model
+                edge_candidate = candidate
+        if cmp_model is None or edge_model is None or cmp_candidate is None or edge_candidate is None:
+            return None
+        try:
+            (
+                _kind,
+                clk_port,
+                vinn_port,
+                vinp_port,
+                outn_port,
+                outp_port,
+                vss_port,
+                vdd_port,
+                voffset_param,
+                tau_param,
+                td0_param,
+                tdmin_param,
+                tdmax_param,
+                tedge_state,
+            ) = cmp_candidate
+            (
+                _edge_kind,
+                edge_clk1_port,
+                edge_clk2_port,
+                delay_port,
+                edge_vth_param,
+            ) = edge_candidate
+        except (TypeError, ValueError):
+            return None
+        cmp_nodes = {
+            port: self._external_node(cmp_model, port)
+            for port in (clk_port, vinn_port, vinp_port, outn_port, outp_port, vss_port, vdd_port)
+        }
+        edge_nodes = {
+            port: self._external_node(edge_model, port)
+            for port in (edge_clk1_port, edge_clk2_port, delay_port)
+        }
+        if (
+            edge_nodes[edge_clk1_port] != cmp_nodes[clk_port]
+            or edge_nodes[edge_clk2_port] != cmp_nodes[outp_port]
+        ):
+            return None
+        generated_nodes = {
+            cmp_nodes[clk_port],
+            cmp_nodes[vinn_port],
+            cmp_nodes[vinp_port],
+            cmp_nodes[outn_port],
+            cmp_nodes[outp_port],
+            edge_nodes[delay_port],
+        }
+        if any(name not in generated_nodes for name in self.recorded_signals):
+            return None
+        source_by_node = {src.node: src for src in self.sources}
+        for node in (cmp_nodes[clk_port], cmp_nodes[vinn_port], cmp_nodes[vinp_port], cmp_nodes[vss_port], cmp_nodes[vdd_port]):
+            if node not in source_by_node:
+                return None
+        try:
+            voffset = float(cmp_model.params[voffset_param])
+            tau = float(cmp_model.params[tau_param])
+            td0 = float(cmp_model.params[td0_param])
+            td_min = float(cmp_model.params[tdmin_param])
+            td_max = float(cmp_model.params[tdmax_param])
+            tedge = float(cmp_model.state.get(tedge_state, 30.0e-12))
+            edge_vth = float(edge_model.params[edge_vth_param])
+        except Exception:
+            return None
+        clk_src = source_by_node[cmp_nodes[clk_port]]
+        clk_meta = self._waveform_metadata(clk_src.waveform)
+        if not clk_meta or clk_meta.get("kind") != "pulse":
+            return None
+
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        for src in source_by_node.values():
+            self._add_source_breakpoint_times(raw_times, src, tstop)
+        clk_rises = self._pulse_threshold_cross_times(clk_meta, tstop, edge_vth, +1)
+        clk_falls = self._pulse_threshold_cross_times(clk_meta, tstop, edge_vth, -1)
+        for event_t in (*clk_rises, *clk_falls):
+            raw_times.append(event_t)
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                raw_times.append(event_t + frac * tedge)
+        for event_t in clk_rises:
+            vdd_val = self._wave_value(source_by_node, cmp_nodes[vdd_port], event_t, 0.9)
+            vdiff = (
+                self._wave_value(source_by_node, cmp_nodes[vinp_port], event_t)
+                - self._wave_value(source_by_node, cmp_nodes[vinn_port], event_t)
+                - voffset
+            )
+            vdiff_eff = max(abs(vdiff), 1.0e-9)
+            td = td0 + tau * math.log(vdd_val / vdiff_eff)
+            td = min(td_max, max(td_min, td))
+            if vdiff > 0.0:
+                out_cross = event_t + td + 0.5 * tedge
+                raw_times.append(out_cross)
+                for frac in (0.25, 0.5, 0.75, 1.0):
+                    raw_times.append(event_t + td + frac * tedge)
+        times = self._dedupe_times(raw_times, tstop)
+
+        rust_cmp_trace_enabled = (
+            os.environ.get("EVAS_RUST_CMP_DELAY_TRACE", "1").strip().lower()
+            not in {"0", "false", "no", "off", "disabled"}
+        )
+        self._perf_stats["rust_full_model_cmp_delay_rust_requested"] = int(
+            bool(rust_backend is not None and rust_cmp_trace_enabled)
+        )
+        if rust_backend is not None and rust_cmp_trace_enabled:
+            try:
+                def values_for(node: str) -> array:
+                    return array(
+                        "d",
+                        (
+                            self._wave_value(source_by_node, node, float(time))
+                            for time in times
+                        ),
+                    )
+
+                flat_values, clock_events = rust_backend.cmp_delay_trace(
+                    times,
+                    point_clk=values_for(cmp_nodes[clk_port]),
+                    point_vinn=values_for(cmp_nodes[vinn_port]),
+                    point_vinp=values_for(cmp_nodes[vinp_port]),
+                    point_vdd=values_for(cmp_nodes[vdd_port]),
+                    voffset=voffset,
+                    tau=tau,
+                    td0=td0,
+                    td_min=td_min,
+                    td_max=td_max,
+                    tedge=tedge,
+                    edge_vth=edge_vth,
+                )
+                matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(
+                    len(times),
+                    6,
+                )
+                column_by_node = {
+                    cmp_nodes[clk_port]: 0,
+                    cmp_nodes[vinn_port]: 1,
+                    cmp_nodes[vinp_port]: 2,
+                    cmp_nodes[outn_port]: 3,
+                    cmp_nodes[outp_port]: 4,
+                    edge_nodes[delay_port]: 5,
+                }
+                columns = {
+                    name: np.array(matrix[:, column_by_node[name]], copy=True)
+                    for name in self.recorded_signals
+                }
+                self._perf_stats["rust_full_model_cmp_delay_clock_events"] = clock_events
+                self._perf_stats["rust_full_model_cmp_delay_rust_enabled"] = 1
+                self._perf_stats["rust_full_model_cmp_delay_rust_points"] = len(times)
+                return self._record_trace_result(
+                    times,
+                    columns,
+                    enabled_kind="cmp_delay",
+                )
+            except RustBackendError:
+                self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+                self._perf_stats["rust_full_model_cmp_delay_rust_fallbacks"] += 1
+
+        outp_transition = TransitionState()
+        outn_transition = TransitionState()
+        delay_transition = TransitionState()
+        prev_clk_expr = self._wave_value(source_by_node, cmp_nodes[clk_port], 0.0) - edge_vth
+        prev_outp_expr = -edge_vth
+        t_start = 0.0
+        armed = False
+        clock_events = 0
+        columns = {name: [] for name in self.recorded_signals}
+
+        for raw_t in times:
+            t = float(raw_t)
+            clk_val = self._wave_value(source_by_node, cmp_nodes[clk_port], t)
+            vinp_val = self._wave_value(source_by_node, cmp_nodes[vinp_port], t)
+            vinn_val = self._wave_value(source_by_node, cmp_nodes[vinn_port], t)
+            vdd_val = self._wave_value(source_by_node, cmp_nodes[vdd_port], t, 0.9)
+            clk_expr = clk_val - edge_vth
+            if self._crossed(prev_clk_expr, clk_expr, +1):
+                t_start = t
+                armed = True
+                vdiff = vinp_val - vinn_val - voffset
+                vdiff_eff = max(abs(vdiff), 1.0e-9)
+                td = td0 + tau * math.log(vdd_val / vdiff_eff)
+                td = min(td_max, max(td_min, td))
+                outp_transition.evaluate(t)
+                outn_transition.evaluate(t)
+                if vdiff > 0.0:
+                    outp_transition.set_target(t, vdd_val, td, tedge, tedge)
+                    outn_transition.set_target(t, 0.0, td, tedge, tedge)
+                else:
+                    outp_transition.set_target(t, 0.0, td, tedge, tedge)
+                    outn_transition.set_target(t, vdd_val, td, tedge, tedge)
+                clock_events += 1
+            elif self._crossed(prev_clk_expr, clk_expr, -1):
+                outp_transition.evaluate(t)
+                outn_transition.evaluate(t)
+                outp_transition.set_target(t, 0.0, 0.0, tedge, tedge)
+                outn_transition.set_target(t, 0.0, 0.0, tedge, tedge)
+                clock_events += 1
+            outp_val = outp_transition.evaluate(t)
+            outn_val = outn_transition.evaluate(t)
+            outp_expr = outp_val - edge_vth
+            if armed and self._crossed(prev_outp_expr, outp_expr, +1):
+                delay_ps = (t - t_start) * 1.0e12
+                delay_transition.evaluate(t)
+                delay_transition.set_target(t, delay_ps, 0.0, 10.0e-12, 10.0e-12)
+                armed = False
+            delay_val = delay_transition.evaluate(t)
+            values_by_node = {
+                cmp_nodes[clk_port]: clk_val,
+                cmp_nodes[vinp_port]: vinp_val,
+                cmp_nodes[vinn_port]: vinn_val,
+                cmp_nodes[outp_port]: outp_val,
+                cmp_nodes[outn_port]: outn_val,
+                edge_nodes[delay_port]: delay_val,
+            }
+            for name in columns:
+                columns[name].append(float(values_by_node.get(name, 0.0)))
+            prev_clk_expr = clk_expr
+            prev_outp_expr = outp_expr
+
+        self._perf_stats["rust_full_model_cmp_delay_clock_events"] = clock_events
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="cmp_delay",
+        )
+
+    def _try_weighted_sar_loop_fastpath(
+        self,
+        *,
+        rust_backend=None,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        sar_model = dac_model = sh_model = None
+        sar_candidate = dac_candidate = sh_candidate = None
+        for model in self.models:
+            candidate = self._model_candidate(model, "weighted_sar_adc_v1")
+            if candidate is not None:
+                sar_model = model
+                sar_candidate = candidate
+            candidate = self._model_candidate(model, "weighted_dac_v1")
+            if candidate is not None:
+                dac_model = model
+                dac_candidate = candidate
+            candidate = self._model_candidate(model, "sample_hold_rising_v1")
+            if candidate is not None:
+                sh_model = model
+                sh_candidate = candidate
+        if sar_model is None or dac_model is None or sh_model is None:
+            return None
+        try:
+            (
+                _sar_kind,
+                vin_port,
+                clks_port,
+                rst_port,
+                dout_ports,
+                bit_index_port,
+                trial_code_port,
+                trial_vdac_port,
+                cmp_decision_port,
+                conv_done_port,
+                vin_sample_port,
+                vdd_param,
+                vth_param,
+                width,
+            ) = sar_candidate
+            (_dac_kind, dac_din_ports, dac_vout_port, dac_vdd_param, dac_vth_param) = dac_candidate
+            (_sh_kind, sh_vin_port, sh_clk_port, sh_vdd_port, sh_vss_port, sh_rst_port, sh_vout_port, sh_tr_param) = sh_candidate
+        except (TypeError, ValueError):
+            return None
+        width = int(width)
+        if width <= 0 or len(tuple(dout_ports)) != width or len(tuple(dac_din_ports)) != width:
+            return None
+        sar_nodes = {
+            port: self._external_node(sar_model, port)
+            for port in (
+                vin_port, clks_port, rst_port,
+                bit_index_port, trial_code_port, trial_vdac_port,
+                cmp_decision_port, conv_done_port, vin_sample_port,
+                *tuple(dout_ports),
+            )
+        }
+        dac_nodes = {
+            port: self._external_node(dac_model, port)
+            for port in (*tuple(dac_din_ports), dac_vout_port)
+        }
+        sh_nodes = {
+            port: self._external_node(sh_model, port)
+            for port in (sh_vin_port, sh_clk_port, sh_vdd_port, sh_vss_port, sh_rst_port, sh_vout_port)
+        }
+        if (
+            sar_nodes[vin_port] != sh_nodes[sh_vout_port]
+            or sar_nodes[clks_port] != sh_nodes[sh_clk_port]
+            or sar_nodes[rst_port] != sh_nodes[sh_rst_port]
+            or any(dac_nodes[dac_port] != sar_nodes[dout_port] for dac_port, dout_port in zip(tuple(dac_din_ports), tuple(dout_ports)))
+        ):
+            return None
+        generated_nodes = {
+            sh_nodes[sh_vin_port],
+            sar_nodes[vin_port],
+            sar_nodes[clks_port],
+            sar_nodes[rst_port],
+            dac_nodes[dac_vout_port],
+            sar_nodes[bit_index_port],
+            sar_nodes[trial_code_port],
+            sar_nodes[trial_vdac_port],
+            sar_nodes[cmp_decision_port],
+            sar_nodes[conv_done_port],
+            sar_nodes[vin_sample_port],
+            *[sar_nodes[port] for port in tuple(dout_ports)],
+        }
+        if any(name not in generated_nodes for name in self.recorded_signals):
+            return None
+        source_by_node = {src.node: src for src in self.sources}
+        for node in (
+            sh_nodes[sh_vin_port],
+            sar_nodes[clks_port],
+            sar_nodes[rst_port],
+            sh_nodes[sh_vdd_port],
+            sh_nodes[sh_vss_port],
+        ):
+            if node not in source_by_node:
+                return None
+        try:
+            vdd = float(sar_model.params[vdd_param])
+            vth = float(sar_model.params[vth_param])
+            dac_vdd = float(dac_model.params[dac_vdd_param])
+            dac_vth = float(dac_model.params[dac_vth_param])
+            sh_tr = float(sh_model.params[sh_tr_param])
+        except Exception:
+            return None
+        if abs(dac_vdd - vdd) > 1.0e-12 or abs(dac_vth - vth) > 1.0e-12:
+            return None
+        clk_src = source_by_node[sar_nodes[clks_port]]
+        clk_meta = self._waveform_metadata(clk_src.waveform)
+        if not clk_meta or clk_meta.get("kind") != "pulse":
+            return None
+        default_tr = float(getattr(sar_model, "default_transition", 30.0e-12) or 30.0e-12)
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        for src in source_by_node.values():
+            self._add_source_breakpoint_times(raw_times, src, tstop)
+        clk_rises = self._pulse_threshold_cross_times(clk_meta, tstop, vth, +1)
+        clk_falls = self._pulse_threshold_cross_times(clk_meta, tstop, vth, -1)
+        for event_t in (*clk_rises, *clk_falls):
+            raw_times.append(event_t)
+            for offset in (0.25 * default_tr, 0.5 * default_tr, 0.75 * default_tr, default_tr, 1.5 * default_tr):
+                raw_times.append(event_t + offset)
+        times = self._dedupe_times(raw_times, tstop)
+
+        rust_sar_trace_enabled = (
+            os.environ.get("EVAS_RUST_SAR_LOOP_TRACE", "1").strip().lower()
+            not in {"0", "false", "no", "off", "disabled"}
+        )
+        self._perf_stats["rust_full_model_sar_loop_rust_requested"] = int(
+            bool(rust_backend is not None and rust_sar_trace_enabled)
+        )
+        if rust_backend is not None and rust_sar_trace_enabled:
+            try:
+                def values_for(node: str) -> array:
+                    return array(
+                        "d",
+                        (
+                            self._wave_value(source_by_node, node, float(time))
+                            for time in times
+                        ),
+                    )
+
+                trace_values, clock_events = rust_backend.sar_loop_trace(
+                    times,
+                    point_vin=values_for(sh_nodes[sh_vin_port]),
+                    point_clk=values_for(sar_nodes[clks_port]),
+                    point_rst=values_for(sar_nodes[rst_port]),
+                    vdd=vdd,
+                    vth=vth,
+                    sh_tr=sh_tr,
+                    default_tr=default_tr,
+                    width=width,
+                )
+                signal_count = 11 + width
+                column_index = {
+                    sh_nodes[sh_vin_port]: 0,
+                    sar_nodes[vin_port]: 1,
+                    sar_nodes[clks_port]: 2,
+                    sar_nodes[rst_port]: 3,
+                    dac_nodes[dac_vout_port]: 4,
+                    sar_nodes[bit_index_port]: 5,
+                    sar_nodes[trial_code_port]: 6,
+                    sar_nodes[trial_vdac_port]: 7,
+                    sar_nodes[cmp_decision_port]: 8,
+                    sar_nodes[conv_done_port]: 9,
+                    sar_nodes[vin_sample_port]: 10,
+                }
+                for idx, port in enumerate(tuple(dout_ports)):
+                    column_index[sar_nodes[port]] = 11 + idx
+                columns = {name: [] for name in self.recorded_signals}
+                for name in columns:
+                    idx = column_index.get(name)
+                    if idx is None:
+                        raise RuntimeError(f"Rust SAR trace has no column for {name}")
+                    columns[name] = [
+                        float(trace_values[row_idx * signal_count + idx])
+                        for row_idx in range(len(times))
+                    ]
+                self._perf_stats["rust_full_model_sar_loop_enabled"] = 1
+                self._perf_stats["rust_full_model_sar_loop_clock_events"] = clock_events
+                self._perf_stats["rust_full_model_sar_loop_rust_enabled"] = 1
+                self._perf_stats["rust_full_model_sar_loop_rust_points"] = len(times)
+                return self._record_trace_result(
+                    times,
+                    columns,
+                    enabled_kind="sar_loop",
+                )
+            except Exception:
+                self._perf_stats["rust_full_model_sar_loop_rust_fallbacks"] += 1
+
+        dout_bits = [0 for _ in range(width)]
+        trial_bits = [0 for _ in range(width)]
+        bit_idx = 0
+        busy = 0
+        vsampled = 0.0
+        trial_vdac_state = 0.0
+        bit_index_v = 0.0
+        trial_code_v = 0.0
+        cmp_decision_v = 0.0
+        conv_done_v = 0.0
+        total_sum = float((1 << width) - 1)
+        weights = [float(1 << (width - 1 - idx)) for idx in range(width)]
+        transitions = {
+            "vin_sh": TransitionState(),
+            "vout": TransitionState(),
+            "bit_index": TransitionState(),
+            "trial_code": TransitionState(),
+            "trial_vdac": TransitionState(),
+            "cmp_decision": TransitionState(),
+            "conv_done": TransitionState(),
+            "vin_sample": TransitionState(),
+        }
+        dout_transitions = [TransitionState() for _ in range(width)]
+
+        def current_code(bits: List[int]) -> int:
+            return int(sum(bit * int(weight) for bit, weight in zip(bits, weights)))
+
+        def drive_outputs(event_t: float) -> None:
+            code = current_code(dout_bits)
+            transitions["vout"].evaluate(event_t)
+            transitions["vout"].set_target(event_t, code / total_sum * vdd, 0.0, default_tr, default_tr)
+            scalar_targets = {
+                "bit_index": bit_index_v,
+                "trial_code": trial_code_v,
+                "trial_vdac": trial_vdac_state,
+                "cmp_decision": cmp_decision_v,
+                "conv_done": conv_done_v,
+                "vin_sample": vsampled,
+            }
+            for key, target in scalar_targets.items():
+                transitions[key].evaluate(event_t)
+                transitions[key].set_target(event_t, float(target), 0.0, default_tr, default_tr)
+            for idx, bit in enumerate(dout_bits):
+                dout_transitions[idx].evaluate(event_t)
+                dout_transitions[idx].set_target(event_t, vdd if bit else 0.0, 0.0, default_tr, default_tr)
+
+        prev_clk_expr = self._wave_value(source_by_node, sar_nodes[clks_port], 0.0) - vth
+        clock_events = 0
+        columns = {name: [] for name in self.recorded_signals}
+        drive_outputs(0.0)
+
+        for raw_t in times:
+            t = float(raw_t)
+            vin_val = self._wave_value(source_by_node, sh_nodes[sh_vin_port], t)
+            clk_val = self._wave_value(source_by_node, sar_nodes[clks_port], t)
+            rst_val = self._wave_value(source_by_node, sar_nodes[rst_port], t)
+            clk_expr = clk_val - vth
+            if self._crossed(prev_clk_expr, clk_expr, +1):
+                if rst_val > vth:
+                    transitions["vin_sh"].evaluate(t)
+                    transitions["vin_sh"].set_target(t, vin_val, 0.0, sh_tr, sh_tr)
+                if rst_val < vth:
+                    dout_bits = [0 for _ in range(width)]
+                    trial_bits = [0 for _ in range(width)]
+                    bit_idx = 0
+                    busy = 0
+                    trial_vdac_state = 0.0
+                    bit_index_v = 0.0
+                    trial_code_v = 0.0
+                    cmp_decision_v = 0.0
+                    conv_done_v = 0.0
+                elif busy == 1 and bit_idx > 0:
+                    bit_pos = width - bit_idx
+                    if cmp_decision_v > vth and 0 <= bit_pos < width:
+                        dout_bits[bit_pos] = 1
+                    bit_idx -= 1
+                    if bit_idx > 0:
+                        trial_bits = list(dout_bits)
+                        next_pos = width - bit_idx
+                        if 0 <= next_pos < width:
+                            trial_bits[next_pos] = 1
+                        trial_code_int = current_code(trial_bits)
+                        trial_vdac_state = trial_code_int / total_sum * vdd
+                        cmp_decision_v = vdd if vsampled >= trial_vdac_state else 0.0
+                        bit_index_v = bit_idx / float(width) * vdd
+                        trial_code_v = trial_code_int / total_sum * vdd
+                        conv_done_v = 0.0
+                    else:
+                        final_code = current_code(dout_bits)
+                        trial_vdac_state = final_code / total_sum * vdd
+                        trial_code_v = trial_vdac_state
+                        bit_index_v = 0.0
+                        cmp_decision_v = vdd if vsampled >= trial_vdac_state else 0.0
+                        conv_done_v = vdd
+                        busy = 0
+                drive_outputs(t)
+                clock_events += 1
+            elif self._crossed(prev_clk_expr, clk_expr, -1):
+                if rst_val >= vth and busy == 0:
+                    vsampled = transitions["vin_sh"].evaluate(t)
+                    dout_bits = [0 for _ in range(width)]
+                    trial_bits = [0 for _ in range(width)]
+                    trial_bits[0] = 1
+                    bit_idx = width
+                    busy = 1
+                    conv_done_v = 0.0
+                    trial_code_int = current_code(trial_bits)
+                    trial_vdac_state = trial_code_int / total_sum * vdd
+                    cmp_decision_v = vdd if vsampled >= trial_vdac_state else 0.0
+                    bit_index_v = bit_idx / float(width) * vdd
+                    trial_code_v = trial_code_int / total_sum * vdd
+                    drive_outputs(t)
+                clock_events += 1
+            vin_sh_val = transitions["vin_sh"].evaluate(t)
+            vout_val = transitions["vout"].evaluate(t)
+            values_by_node = {
+                sh_nodes[sh_vin_port]: vin_val,
+                sar_nodes[vin_port]: vin_sh_val,
+                sar_nodes[clks_port]: clk_val,
+                sar_nodes[rst_port]: rst_val,
+                dac_nodes[dac_vout_port]: vout_val,
+                sar_nodes[bit_index_port]: transitions["bit_index"].evaluate(t),
+                sar_nodes[trial_code_port]: transitions["trial_code"].evaluate(t),
+                sar_nodes[trial_vdac_port]: transitions["trial_vdac"].evaluate(t),
+                sar_nodes[cmp_decision_port]: transitions["cmp_decision"].evaluate(t),
+                sar_nodes[conv_done_port]: transitions["conv_done"].evaluate(t),
+                sar_nodes[vin_sample_port]: transitions["vin_sample"].evaluate(t),
+            }
+            for port, trans in zip(tuple(dout_ports), dout_transitions):
+                values_by_node[sar_nodes[port]] = trans.evaluate(t)
+            for name in columns:
+                columns[name].append(float(values_by_node.get(name, 0.0)))
+            prev_clk_expr = clk_expr
+
+        self._perf_stats["rust_full_model_sar_loop_clock_events"] = clock_events
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="sar_loop",
+        )
+
+    def _try_cppll_reacquire_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        ref_model = None
+        pll_model = None
+        ref_candidate = None
+        pll_candidate = None
+        for model in self.models:
+            candidate = self._model_candidate(model, "ref_step_clock_v1")
+            if candidate is not None:
+                ref_model = model
+                ref_candidate = candidate
+            candidate = self._model_candidate(model, "cppll_timer_v1")
+            if candidate is not None:
+                pll_model = model
+                pll_candidate = candidate
+        if ref_model is None or pll_model is None or ref_candidate is None or pll_candidate is None:
+            return None
+        try:
+            (
+                _ref_kind,
+                ref_vdd_port,
+                ref_vss_port,
+                ref_clk_port,
+                period_pre_param,
+                period_post_param,
+                t_switch_param,
+                ref_tedge_param,
+            ) = ref_candidate
+            (
+                _pll_kind,
+                pll_vdd_port,
+                pll_vss_port,
+                pll_ref_port,
+                fb_port,
+                dco_port,
+                vctrl_port,
+                lock_port,
+                div_ratio_param,
+                f_center_param,
+                kvco_param,
+                f_min_param,
+                f_max_param,
+                kp_param,
+                ki_param,
+                integ_min_param,
+                integ_max_param,
+                vctrl_init_param,
+                pll_tedge_param,
+                lock_tol_param,
+                lock_count_target_param,
+            ) = pll_candidate
+        except (TypeError, ValueError):
+            return None
+
+        ref_nodes = {
+            port: self._external_node(ref_model, port)
+            for port in (ref_vdd_port, ref_vss_port, ref_clk_port)
+        }
+        pll_nodes = {
+            port: self._external_node(pll_model, port)
+            for port in (
+                pll_vdd_port, pll_vss_port, pll_ref_port,
+                fb_port, dco_port, vctrl_port, lock_port,
+            )
+        }
+        if (
+            ref_nodes[ref_vdd_port] != pll_nodes[pll_vdd_port]
+            or ref_nodes[ref_vss_port] != pll_nodes[pll_vss_port]
+            or ref_nodes[ref_clk_port] != pll_nodes[pll_ref_port]
+        ):
+            return None
+        source_by_node = {src.node: src for src in self.sources}
+        vdd_node = pll_nodes[pll_vdd_port]
+        vss_node = pll_nodes[pll_vss_port]
+        if vdd_node not in source_by_node or vss_node not in source_by_node:
+            return None
+        generated_nodes = {
+            ref_nodes[ref_clk_port],
+            pll_nodes[fb_port],
+            pll_nodes[dco_port],
+            pll_nodes[vctrl_port],
+            pll_nodes[lock_port],
+            vdd_node,
+            vss_node,
+        }
+        if any(name not in generated_nodes for name in self.recorded_signals):
+            return None
+
+        vdd_meta = self._waveform_metadata(source_by_node[vdd_node].waveform)
+        vss_meta = self._waveform_metadata(source_by_node[vss_node].waveform)
+        if not vdd_meta or not vss_meta or vdd_meta.get("kind") != "dc" or vss_meta.get("kind") != "dc":
+            return None
+        try:
+            vh = float(vdd_meta["voltage"])
+            vl = float(vss_meta["voltage"])
+            period_pre = float(ref_model.params[period_pre_param])
+            period_post = float(ref_model.params[period_post_param])
+            t_switch = float(ref_model.params[t_switch_param])
+            ref_tedge = float(ref_model.params[ref_tedge_param])
+            div_ratio = int(pll_model.params[div_ratio_param])
+            f_center = float(pll_model.params[f_center_param])
+            kvco = float(pll_model.params[kvco_param])
+            f_min = float(pll_model.params[f_min_param])
+            f_max = float(pll_model.params[f_max_param])
+            kp = float(pll_model.params[kp_param])
+            ki = float(pll_model.params[ki_param])
+            integ_min = float(pll_model.params[integ_min_param])
+            integ_max = float(pll_model.params[integ_max_param])
+            vctrl_init = float(pll_model.params[vctrl_init_param])
+            pll_tedge = float(pll_model.params[pll_tedge_param])
+            lock_tol = float(pll_model.params[lock_tol_param])
+            lock_count_target = int(pll_model.params[lock_count_target_param])
+        except Exception:
+            return None
+        if (
+            period_pre <= 0.0
+            or period_post <= 0.0
+            or ref_tedge <= 0.0
+            or pll_tedge <= 0.0
+            or div_ratio <= 0
+            or f_center <= 0.0
+            or kvco <= 0.0
+            or f_min <= 0.0
+            or f_max <= 0.0
+            or lock_count_target <= 0
+        ):
+            return None
+
+        vcm = 0.5 * (vh + vl)
+        vth = vcm
+
+        def clamp(value: float, lo: float, hi: float) -> float:
+            return min(hi, max(lo, value))
+
+        def dco_freq_from_vctrl(value: float) -> float:
+            return clamp(f_center + kvco * (value - vcm), f_min, f_max)
+
+        import heapq
+
+        seq = 0
+        event_heap: List[Tuple[float, int, int, str]] = []
+
+        def push_event(event_time: float, priority: int, kind: str) -> None:
+            nonlocal seq
+            if event_time > tstop + max(ref_tedge, pll_tedge) + 1.0e-18:
+                return
+            heapq.heappush(event_heap, (float(event_time), int(priority), seq, kind))
+            seq += 1
+
+        ref_transition_events: List[Tuple[float, float]] = [(0.0, vl)]
+        dco_transition_events: List[Tuple[float, float]] = [(0.0, vl)]
+        fb_transition_events: List[Tuple[float, float]] = [(0.0, vl)]
+        lock_transition_events: List[Tuple[float, float]] = [(0.0, vl)]
+        vctrl_events: List[Tuple[float, float]] = []
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+
+        ref_state = 0
+        dco_state = 0
+        fb_state = 0
+        div_cnt = 0
+        lock_state = 0
+        lock_streak = 0
+        t_ref_prev = -1.0
+        t_ref_last = -1.0
+        t_fb_last = -1.0
+        ref_period = period_pre
+        phase_err = 0.0
+        integ = 0.0
+        vctrl = clamp(vctrl_init, vl, vh)
+        vctrl_events.append((0.0, vctrl))
+        dco_freq = dco_freq_from_vctrl(vctrl)
+
+        push_event(0.5 * period_pre, 0, "ref_toggle")
+        push_event(0.5 / dco_freq, 1, "dco_toggle")
+        ref_toggles = 0
+        dco_toggles = 0
+        fb_rise_crosses = 0
+        ref_rise_crosses = 0
+
+        def add_transition_times(event_time: float, edge: float) -> None:
+            raw_times.append(event_time)
+            for frac in (0.25, 0.5, 0.75, 1.0):
+                raw_times.append(event_time + frac * edge)
+
+        while event_heap:
+            event_t, _priority, _seq, kind = heapq.heappop(event_heap)
+            if event_t > tstop + max(ref_tedge, pll_tedge) + 1.0e-18:
+                break
+            raw_times.append(event_t)
+            if kind == "ref_toggle":
+                ref_state = 1 - ref_state
+                ref_transition_events.append((event_t, vh if ref_state else vl))
+                add_transition_times(event_t, ref_tedge)
+                if ref_state == 1:
+                    push_event(event_t + 0.5 * ref_tedge, 2, "ref_rise_cross")
+                half_period = 0.5 * (period_post if event_t >= t_switch else period_pre)
+                push_event(event_t + half_period, 0, "ref_toggle")
+                ref_toggles += 1
+            elif kind == "dco_toggle":
+                dco_state = 1 - dco_state
+                dco_transition_events.append((event_t, vh if dco_state else vl))
+                add_transition_times(event_t, pll_tedge)
+                if dco_state == 1:
+                    div_cnt += 1
+                    if div_cnt >= div_ratio:
+                        div_cnt = 0
+                        fb_state = 1 - fb_state
+                        fb_transition_events.append((event_t, vh if fb_state else vl))
+                        add_transition_times(event_t, pll_tedge)
+                        if fb_state == 1:
+                            push_event(event_t + 0.5 * pll_tedge, 2, "fb_rise_cross")
+                dco_freq = dco_freq_from_vctrl(vctrl)
+                push_event(event_t + 0.5 / dco_freq, 1, "dco_toggle")
+                dco_toggles += 1
+            elif kind == "fb_rise_cross":
+                t_fb_last = event_t
+                fb_rise_crosses += 1
+            elif kind == "ref_rise_cross":
+                t_ref_prev = t_ref_last
+                t_ref_last = event_t
+                if t_fb_last >= 0.0:
+                    phase_err = t_ref_last - t_fb_last
+                    if t_ref_prev >= 0.0:
+                        ref_period = t_ref_last - t_ref_prev
+                        if ref_period > 1.0e-15:
+                            while phase_err > 0.5 * ref_period:
+                                phase_err -= ref_period
+                            while phase_err < -0.5 * ref_period:
+                                phase_err += ref_period
+                    integ = clamp(integ + ki * phase_err, integ_min, integ_max)
+                    vctrl = clamp(vcm + kp * phase_err + integ, vl, vh)
+                    vctrl_events.append((event_t, vctrl))
+                    if abs(phase_err) <= lock_tol:
+                        lock_streak += 1
+                    else:
+                        lock_streak = 0
+                    new_lock_state = 1 if lock_streak >= lock_count_target else 0
+                    if new_lock_state != lock_state:
+                        lock_state = new_lock_state
+                        lock_transition_events.append((event_t, vh if lock_state else vl))
+                        add_transition_times(event_t, pll_tedge)
+                ref_rise_crosses += 1
+
+        times = self._dedupe_times(raw_times, tstop)
+        transitions = {
+            ref_nodes[ref_clk_port]: TransitionState(),
+            pll_nodes[dco_port]: TransitionState(),
+            pll_nodes[fb_port]: TransitionState(),
+            pll_nodes[lock_port]: TransitionState(),
+        }
+        event_targets = sorted(
+            [
+                (t, ref_nodes[ref_clk_port], value, ref_tedge)
+                for t, value in ref_transition_events
+            ]
+            + [
+                (t, pll_nodes[dco_port], value, pll_tedge)
+                for t, value in dco_transition_events
+            ]
+            + [
+                (t, pll_nodes[fb_port], value, pll_tedge)
+                for t, value in fb_transition_events
+            ]
+            + [
+                (t, pll_nodes[lock_port], value, pll_tedge)
+                for t, value in lock_transition_events
+            ],
+            key=lambda item: item[0],
+        )
+        vctrl_events.sort(key=lambda item: item[0])
+        rust_cppll_trace_enabled = (
+            os.environ.get("EVAS_RUST_CPPLL_TRACE", "1").strip().lower()
+            not in {"0", "false", "no", "off", "disabled"}
+        )
+        self._perf_stats["rust_full_model_cppll_reacquire_rust_requested"] = int(
+            bool(rust_backend is not None and rust_cppll_trace_enabled)
+        )
+        if rust_backend is not None and rust_cppll_trace_enabled:
+            try:
+                def event_arrays(items: List[Tuple[float, float]]) -> Tuple[array, array]:
+                    return (
+                        array("d", (float(t) for t, _value in items)),
+                        array("d", (float(value) for _t, value in items)),
+                    )
+
+                flat_values = rust_backend.cppll_reacquire_trace(
+                    times,
+                    ref_events=event_arrays(ref_transition_events),
+                    dco_events=event_arrays(dco_transition_events),
+                    fb_events=event_arrays(fb_transition_events),
+                    lock_events=event_arrays(lock_transition_events),
+                    vctrl_events=event_arrays(vctrl_events),
+                    vh=vh,
+                    vl=vl,
+                    ref_tedge=ref_tedge,
+                    pll_tedge=pll_tedge,
+                )
+                matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(
+                    len(times),
+                    7,
+                )
+                column_by_node = {
+                    vdd_node: 0,
+                    vss_node: 1,
+                    ref_nodes[ref_clk_port]: 2,
+                    pll_nodes[dco_port]: 3,
+                    pll_nodes[fb_port]: 4,
+                    pll_nodes[vctrl_port]: 5,
+                    pll_nodes[lock_port]: 6,
+                }
+                columns = {
+                    name: np.array(matrix[:, column_by_node[name]], copy=True)
+                    for name in self.recorded_signals
+                }
+                self._perf_stats["rust_full_model_cppll_reacquire_ref_toggles"] = ref_toggles
+                self._perf_stats["rust_full_model_cppll_reacquire_dco_toggles"] = dco_toggles
+                self._perf_stats["rust_full_model_cppll_reacquire_ref_crosses"] = ref_rise_crosses
+                self._perf_stats["rust_full_model_cppll_reacquire_fb_crosses"] = fb_rise_crosses
+                self._perf_stats["rust_full_model_cppll_reacquire_rust_enabled"] = 1
+                self._perf_stats["rust_full_model_cppll_reacquire_rust_points"] = len(times)
+                return self._record_trace_result(
+                    times,
+                    columns,
+                    enabled_kind="cppll_reacquire",
+                )
+            except (KeyError, RustBackendError, ValueError):
+                self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+                self._perf_stats["rust_full_model_cppll_reacquire_rust_fallbacks"] += 1
+
+        target_idx = 0
+        vctrl_idx = 0
+        vctrl_current = vctrl_events[0][1] if vctrl_events else vctrl
+        columns = {name: [] for name in self.recorded_signals}
+
+        for raw_t in times:
+            t = float(raw_t)
+            while target_idx < len(event_targets) and event_targets[target_idx][0] <= t + 1.0e-18:
+                event_t, node, value, edge = event_targets[target_idx]
+                trans = transitions[node]
+                trans.evaluate(event_t)
+                trans.set_target(event_t, value, 0.0, edge, edge)
+                target_idx += 1
+            while vctrl_idx < len(vctrl_events) and vctrl_events[vctrl_idx][0] <= t + 1.0e-18:
+                vctrl_current = vctrl_events[vctrl_idx][1]
+                vctrl_idx += 1
+            values_by_node = {
+                vdd_node: vh,
+                vss_node: vl,
+                ref_nodes[ref_clk_port]: transitions[ref_nodes[ref_clk_port]].evaluate(t),
+                pll_nodes[dco_port]: transitions[pll_nodes[dco_port]].evaluate(t),
+                pll_nodes[fb_port]: transitions[pll_nodes[fb_port]].evaluate(t),
+                pll_nodes[lock_port]: transitions[pll_nodes[lock_port]].evaluate(t),
+                pll_nodes[vctrl_port]: vctrl_current,
+            }
+            for name in columns:
+                columns[name].append(float(values_by_node.get(name, 0.0)))
+
+        self._perf_stats["rust_full_model_cppll_reacquire_ref_toggles"] = ref_toggles
+        self._perf_stats["rust_full_model_cppll_reacquire_dco_toggles"] = dco_toggles
+        self._perf_stats["rust_full_model_cppll_reacquire_ref_crosses"] = ref_rise_crosses
+        self._perf_stats["rust_full_model_cppll_reacquire_fb_crosses"] = fb_rise_crosses
+        return self._record_trace_result(
+            times,
+            columns,
+            enabled_kind="cppll_reacquire",
+        )
+
+    def _try_rust_prbs7_full_model_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        if rust_backend is None or not self.models or len(self.models) != 1:
+            return None
+        model = self.models[0]
+        model_cls = getattr(model, "__class__", type(model))
+        if getattr(model, "_child_models", []):
+            return None
+        for raw_candidate in getattr(model_cls, "_whole_segment_candidates", ()) or ():
+            if not raw_candidate or raw_candidate[0] != "cross_scalar_lfsr_transition_bus_v1":
+                continue
+            result = self._try_rust_lfsr_transition_full_model_fastpath(
+                model=model,
+                candidate=raw_candidate,
+                rust_backend=rust_backend,
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+            )
+            if result is not None:
+                return result
+        return None
+
+    def _try_rust_lfsr_transition_full_model_fastpath(
+        self,
+        *,
+        model,
+        candidate: tuple,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        try:
+            (
+                _kind,
+                clock_port,
+                reset_port,
+                enable_port,
+                threshold_param,
+                seed_param,
+                vdd_param,
+                td_param,
+                trf_param,
+                state_names,
+                taps,
+                shift_sources,
+                output_ports,
+                output_bits,
+                zero_guard_index,
+            ) = candidate
+        except (TypeError, ValueError):
+            return None
+
+        required_ports = (clock_port, reset_port, enable_port, *tuple(output_ports))
+        node_map = getattr(model, "node_map", {}) or {}
+        external = {port: node_map.get(port, port) for port in required_ports}
+        canonical_nodes = tuple(external[port] for port in required_ports)
+        if any(node is None for node in canonical_nodes):
+            return None
+        recorded = tuple(self.recorded_signals.keys())
+        if any(name not in canonical_nodes for name in recorded):
+            return None
+
+        sources = {src.node: src for src in self.sources}
+        clk_src = sources.get(external[clock_port])
+        rst_src = sources.get(external[reset_port])
+        en_src = sources.get(external[enable_port])
+        if clk_src is None or rst_src is None or en_src is None:
+            return None
+        clk_meta = self._waveform_metadata(clk_src.waveform)
+        rst_meta = self._waveform_metadata(rst_src.waveform)
+        en_meta = self._waveform_metadata(en_src.waveform)
+        if (
+            not clk_meta
+            or not rst_meta
+            or not en_meta
+            or clk_meta.get("kind") != "pulse"
+            or rst_meta.get("kind") != "pulse"
+            or en_meta.get("kind") != "dc"
+        ):
+            return None
+
+        try:
+            vdd = float(model.params.get(str(vdd_param), 0.9))
+            vth = float(model.params.get(str(threshold_param), 0.45))
+            trf = float(model.params.get(str(trf_param), 1.0e-12))
+            td = float(model.params.get(str(td_param), 0.0))
+            seed = int(model.params.get(str(seed_param), 127))
+            en_voltage = float(en_meta.get("voltage", 0.0))
+            width = len(tuple(state_names))
+            tap_values = tuple(int(tap) for tap in taps)
+            shift_values = tuple(int(source) for source in shift_sources)
+            output_bit_values = tuple(int(bit) for bit in output_bits)
+        except Exception:
+            return None
+        if (
+            width <= 0
+            or len(shift_values) != width
+            or not tap_values
+            or len(tuple(output_ports)) != len(output_bit_values)
+        ):
+            return None
+
+        sample_step = float(record_step or tstep)
+        if sample_step <= 0.0:
+            return None
+        raw_times: List[float] = []
+        uniform_count = int(math.floor(tstop / sample_step + 1.0e-9)) + 1
+        for idx in range(max(1, uniform_count)):
+            raw_times.append(min(tstop, idx * sample_step))
+        if not raw_times or raw_times[-1] < tstop - 1.0e-18:
+            raw_times.append(tstop)
+
+        transition_offsets = tuple(
+            offset
+            for offset in (
+                0.25 * trf,
+                0.5 * trf,
+                0.75 * trf,
+                trf,
+            )
+            if offset > 0.0
+        )
+        cross_count = self._add_pulse_schedule_times(
+            raw_times,
+            clk_meta,
+            tstop,
+            vth=vth,
+            transition_offsets=transition_offsets,
+        )
+        self._add_pulse_schedule_times(raw_times, rst_meta, tstop)
+        times = self._dedupe_times(raw_times, tstop)
+        if not times:
+            return None
+
+        try:
+            flat_values, event_count = rust_backend.lfsr_transition_trace(
+                times,
+                clk=clk_meta,
+                rst_n=rst_meta,
+                en_voltage=en_voltage,
+                vdd=vdd,
+                vth=vth,
+                trf=trf,
+                td=td,
+                seed=seed,
+                width=width,
+                taps=tap_values,
+                shift_sources=shift_values,
+                output_bits=output_bit_values,
+                zero_guard_index=int(zero_guard_index),
+            )
+        except RustBackendError:
+            self._perf_stats["rust_full_model_fastpath_fallbacks_total"] += 1
+            return None
+
+        point_count = len(times)
+        signal_count = 3 + len(output_bit_values)
+        matrix = np.frombuffer(flat_values, dtype=np.float64).reshape(
+            point_count,
+            signal_count,
+        )
+        column_by_node = {
+            external[clock_port]: 0,
+            external[reset_port]: 1,
+            external[enable_port]: 2,
+        }
+        for idx, port in enumerate(tuple(output_ports)):
+            column_by_node[external[port]] = 3 + idx
+        signals = {
+            name: np.array(matrix[:, column_by_node[name]], copy=True)
+            for name in recorded
+        }
+        time_arr = np.frombuffer(times, dtype=np.float64).copy()
+        step_sizes = np.empty(point_count, dtype=np.float64)
+        if point_count:
+            step_sizes[0] = 0.0
+        if point_count > 1:
+            step_sizes[1:] = np.diff(time_arr)
+
+        self.time_points = time_arr.tolist()
+        for name, values in signals.items():
+            self.recorded_signals[name] = values.tolist()
+            self.node_voltages[name] = float(values[-1]) if len(values) else 0.0
+        self._step_sizes = step_sizes.tolist()
+        self._perf_stats["rust_full_model_fastpath_enabled"] = 1
+        self._perf_stats["rust_full_model_prbs7_points"] = point_count
+        self._perf_stats["rust_full_model_prbs7_cross_events"] = int(event_count)
+        self._perf_stats["rust_full_model_prbs7_scheduled_crosses"] = int(cross_count)
+        self._perf_stats["rust_full_model_lfsr_transition_points"] = point_count
+        self._perf_stats["rust_full_model_lfsr_transition_cross_events"] = int(event_count)
+        self._perf_stats["rust_full_model_lfsr_transition_outputs"] = len(output_bit_values)
+        self._perf_stats["cross_event_steps"] = int(event_count)
+        self._perf_stats["cross_refine_triggers"] = int(event_count)
+        self._perf_stats["steps_total"] = max(0, point_count - 1)
+        return SimResult(time=time_arr, signals=signals, step_sizes=step_sizes)
+
     def run(self, tstop: float, tstep: float = None,
             max_step: float = None,
             refine_factor: int = 16,
@@ -421,7 +2961,20 @@ class Simulator:
             static_branch_fastpath: bool = False,
             static_lifecycle_fastpath: bool = True,
             transition_unchanged_fastpath: bool = False,
-            rust_static_eval: bool = False) -> SimResult:
+            rust_static_eval: bool = False,
+            rust_static_fast_sync: bool = False,
+            rust_transition_shadow: bool = False,
+            rust_transition_production: bool = False,
+            rust_event_interpolation: bool = False,
+            rust_timer_event: bool = False,
+            rust_event_due_shadow: bool = False,
+            rust_cross_above_production: bool = False,
+            generic_executor: bool = False,
+            rust_event_write_shadow: bool = False,
+            rust_event_write_production: bool = False,
+            rust_full_model_fastpath: bool = False,
+            event_trace_audit: bool = False,
+            rust_required: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -429,7 +2982,55 @@ class Simulator:
             max_step = tstep
         if min_step is None:
             min_step = tstep / 4096.0
-        if rust_static_eval:
+        indexed_arrays_requested = bool(indexed_arrays)
+        indexed_state_storage_requested = bool(indexed_state_storage)
+        if not rust_static_eval:
+            rust_static_fast_sync = False
+
+        def _model_tree_has_event_write_ir() -> bool:
+            def _visit(model) -> bool:
+                if (
+                    getattr(model.__class__, "_event_lfsr_shift_ir_ops", ()) or ()
+                    or getattr(model.__class__, "_event_static_linear_ir_ops", ()) or ()
+                ):
+                    return True
+                return any(
+                    _visit(child)
+                    for child in getattr(model, "_child_models", []) or []
+                )
+
+            return any(_visit(model) for model in self.models)
+
+        def _model_tree_has_event_linear_ir() -> bool:
+            def _visit(model) -> bool:
+                if getattr(model.__class__, "_event_static_linear_ir_ops", ()) or ():
+                    return True
+                return any(
+                    _visit(child)
+                    for child in getattr(model, "_child_models", []) or []
+                )
+
+            return any(_visit(model) for model in self.models)
+
+        rust_event_write_has_candidate = (
+            (rust_event_write_shadow or rust_event_write_production)
+            and _model_tree_has_event_write_ir()
+        )
+        rust_event_write_has_linear_candidate = (
+            (rust_event_write_shadow or rust_event_write_production)
+            and _model_tree_has_event_linear_ir()
+        )
+        if not rust_event_write_has_candidate:
+            rust_event_write_shadow = False
+            rust_event_write_production = False
+        if rust_static_eval or rust_transition_shadow:
+            indexed_arrays = True
+            indexed_state_storage = True
+        if rust_event_write_shadow or rust_event_write_production:
+            indexed_state_storage = True
+        if rust_event_write_has_linear_candidate:
+            indexed_arrays = True
+        if rust_timer_event and rust_event_write_production:
             indexed_arrays = True
 
         time = 0.0
@@ -460,6 +3061,7 @@ class Simulator:
             "indexed_array_dynamic_nodes": 0,
             "indexed_array_err_ratio_reads": 0,
             "indexed_array_mismatches": 0,
+            "indexed_array_record_id_reads": 0,
             "indexed_array_record_reads": 0,
             "indexed_array_snapshots": 0,
             "indexed_array_source_updates": 0,
@@ -516,7 +3118,213 @@ class Simulator:
             "rust_static_eval_runtime_param_ops": 0,
             "rust_static_eval_coeff_eval_fallbacks": 0,
             "rust_static_eval_fallback_models": 0,
+            "rust_static_eval_mixed_small_fallbacks": 0,
+            "rust_static_eval_no_candidate_models": 0,
+            "rust_static_eval_gated_models": 0,
+            "rust_static_eval_gated_ops": 0,
+            "rust_static_eval_gated_segments": 0,
+            "rust_static_eval_terms": 0,
+            "rust_static_eval_state_read_terms": 0,
+            "rust_static_eval_state_write_ops": 0,
+            "rust_static_eval_integer_state_write_ops": 0,
             "rust_static_eval_errors": 0,
+            "rust_static_eval_no_segment_fallbacks": 0,
+            "rust_static_fast_sync_requested": int(bool(rust_static_fast_sync)),
+            "rust_static_fast_sync_enabled": 0,
+            "rust_static_fast_sync_node_voltage_sync_skips": 0,
+            "rust_static_fast_sync_validation_skips": 0,
+            "rust_transition_shadow_requested": int(bool(rust_transition_shadow)),
+            "rust_transition_shadow_available": 0,
+            "rust_transition_shadow_candidate_models": 0,
+            "rust_transition_shadow_models": 0,
+            "rust_transition_shadow_static_ops": 0,
+            "rust_transition_shadow_target_ops": 0,
+            "rust_transition_shadow_segments": 0,
+            "rust_transition_shadow_calls": 0,
+            "rust_transition_shadow_matches": 0,
+            "rust_transition_shadow_mismatches": 0,
+            "rust_transition_shadow_skips": 0,
+            "rust_transition_shadow_errors": 0,
+            "rust_transition_shadow_max_abs_diff": 0.0,
+            "rust_transition_shadow_state_matches": 0,
+            "rust_transition_shadow_state_mismatches": 0,
+            "rust_transition_shadow_state_max_abs_diff": 0.0,
+            "rust_transition_production_requested": int(bool(rust_transition_production)),
+            "rust_transition_production_available": 0,
+            "rust_transition_production_enabled": 0,
+            "rust_transition_state_production_calls_total": 0,
+            "rust_transition_state_production_outputs_total": 0,
+            "rust_transition_state_production_fallbacks_total": 0,
+            "rust_transition_state_buffer_reuse_calls_total": 0,
+            "rust_transition_state_buffer_alloc_grand_total": 0,
+            "rust_transition_batch_flushes_total": 0,
+            "rust_transition_batch_slot_total_total": 0,
+            "rust_transition_batch_fallbacks_total": 0,
+            "rust_transition_batch_max_slots_total": 0,
+            "rust_transition_lazy_enqueues_total": 0,
+            "rust_cross_above_production_requested": int(bool(rust_cross_above_production)),
+            "rust_cross_above_production_available": 0,
+            "rust_cross_above_production_enabled": 0,
+            # Audit 091c: generic executor dispatch gate inspection
+            "generic_executor_models_with_candidate": 0,
+            "generic_executor_dispatchable_runs": 0,
+            "generic_executor_blocked_runs": 0,
+            # Audit 091d: generic executor body counters
+            "generic_executor_runs": 0,
+            "generic_executor_runtime_fallbacks": 0,
+            "rust_cross_production_calls_total": 0,
+            "rust_cross_production_fires_total": 0,
+            "rust_cross_production_fallbacks_total": 0,
+            "rust_above_production_calls_total": 0,
+            "rust_above_production_fires_total": 0,
+            "rust_above_production_fallbacks_total": 0,
+            "rust_event_interpolation_requested": int(bool(rust_event_interpolation)),
+            "rust_event_interpolation_available": 0,
+            "rust_event_interpolation_enabled": 0,
+            "rust_event_interpolation_batches_total": 0,
+            "rust_event_interpolation_nodes_total": 0,
+            "rust_event_interpolation_cache_hits_total": 0,
+            "rust_event_interpolation_fallbacks_total": 0,
+            "rust_event_due_shadow_requested": int(bool(rust_event_due_shadow)),
+            "rust_event_due_shadow_available": 0,
+            "rust_event_due_shadow_enabled": 0,
+            "rust_event_due_shadow_cross_checks_total": 0,
+            "rust_event_due_shadow_above_checks_total": 0,
+            "rust_event_due_shadow_timer_periodic_checks_total": 0,
+            "rust_event_due_shadow_timer_absolute_checks_total": 0,
+            "rust_event_due_shadow_matches_total": 0,
+            "rust_event_due_shadow_mismatches_total": 0,
+            "rust_event_due_shadow_errors_total": 0,
+            "rust_event_due_shadow_max_time_diff_total": 0.0,
+            "rust_timer_event_requested": int(bool(rust_timer_event)),
+            "rust_timer_event_available": 0,
+            "rust_timer_event_enabled": 0,
+            "rust_timer_event_production_periodic_calls_total": 0,
+            "rust_timer_event_production_absolute_calls_total": 0,
+            "rust_timer_event_production_fires_total": 0,
+            "rust_timer_event_production_skips_total": 0,
+            "rust_timer_event_production_expirations_total": 0,
+            "rust_timer_event_production_fallbacks_total": 0,
+            "rust_event_write_shadow_requested": int(bool(rust_event_write_shadow)),
+            "rust_event_write_shadow_available": 0,
+            "rust_event_write_shadow_enabled": 0,
+            "rust_event_write_shadow_checks_total": 0,
+            "rust_event_write_shadow_matches_total": 0,
+            "rust_event_write_shadow_mismatches_total": 0,
+            "rust_event_write_shadow_errors_total": 0,
+            "rust_event_write_production_requested": int(bool(rust_event_write_production)),
+            "rust_event_write_production_available": 0,
+            "rust_event_write_production_enabled": 0,
+            "rust_event_write_production_calls_total": 0,
+            "rust_event_write_production_executed_total": 0,
+            "rust_event_write_production_fallbacks_total": 0,
+            "rust_event_linear_write_batches_total": 0,
+            "rust_event_linear_write_shadow_checks_total": 0,
+            "rust_event_linear_write_shadow_matches_total": 0,
+            "rust_event_linear_write_shadow_mismatches_total": 0,
+            "rust_event_linear_write_shadow_errors_total": 0,
+            "rust_event_linear_write_production_calls_total": 0,
+            "rust_event_linear_write_production_executed_total": 0,
+            "rust_event_linear_write_production_fallbacks_total": 0,
+            "rust_full_model_fastpath_requested": int(bool(rust_full_model_fastpath)),
+            "rust_full_model_fastpath_available": 0,
+            "rust_full_model_fastpath_enabled": 0,
+            "rust_full_model_fastpath_fallbacks_total": 0,
+            "rust_full_model_prbs7_points": 0,
+            "rust_full_model_prbs7_cross_events": 0,
+            "rust_full_model_prbs7_scheduled_crosses": 0,
+            "rust_full_model_lfsr_transition_points": 0,
+            "rust_full_model_lfsr_transition_cross_events": 0,
+            "rust_full_model_lfsr_transition_outputs": 0,
+            "rust_full_model_whole_segment_points": 0,
+            "rust_full_model_timer_static_linear_enabled": 0,
+            "rust_full_model_timer_static_linear_events": 0,
+            "rust_full_model_timer_static_linear_rust_requested": 0,
+            "rust_full_model_timer_static_linear_rust_enabled": 0,
+            "rust_full_model_timer_static_linear_rust_fallbacks": 0,
+            "rust_full_model_timer_static_linear_rust_points": 0,
+            "rust_full_model_timer_static_linear_default_trace_enabled": 0,
+            "rust_full_model_timer_static_linear_timer_count": 0,
+            "rust_full_model_gain_timer_reduction_enabled": 0,
+            "rust_full_model_gain_timer_reduction_samples": 0,
+            "rust_full_model_gain_timer_reduction_rust_requested": 0,
+            "rust_full_model_gain_timer_reduction_rust_enabled": 0,
+            "rust_full_model_gain_timer_reduction_rust_fallbacks": 0,
+            "rust_full_model_gain_timer_reduction_rust_points": 0,
+            "rust_full_model_gain_measurement_flow_enabled": 0,
+            "rust_full_model_gain_measurement_flow_vin_events": 0,
+            "rust_full_model_gain_measurement_flow_lfsr_events": 0,
+            "rust_full_model_gain_measurement_flow_rust_requested": 0,
+            "rust_full_model_gain_measurement_flow_rust_enabled": 0,
+            "rust_full_model_gain_measurement_flow_rust_fallbacks": 0,
+            "rust_full_model_gain_measurement_flow_rust_points": 0,
+            "rust_full_model_cmp_delay_enabled": 0,
+            "rust_full_model_cmp_delay_clock_events": 0,
+            "rust_full_model_cmp_delay_rust_requested": 0,
+            "rust_full_model_cmp_delay_rust_enabled": 0,
+            "rust_full_model_cmp_delay_rust_fallbacks": 0,
+            "rust_full_model_cmp_delay_rust_points": 0,
+            "rust_full_model_sar_loop_enabled": 0,
+            "rust_full_model_sar_loop_clock_events": 0,
+            "rust_full_model_sar_loop_rust_requested": 0,
+            "rust_full_model_sar_loop_rust_enabled": 0,
+            "rust_full_model_sar_loop_rust_fallbacks": 0,
+            "rust_full_model_sar_loop_rust_points": 0,
+            "rust_full_model_cppll_reacquire_enabled": 0,
+            "rust_full_model_cppll_reacquire_ref_toggles": 0,
+            "rust_full_model_cppll_reacquire_dco_toggles": 0,
+            "rust_full_model_cppll_reacquire_ref_crosses": 0,
+            "rust_full_model_cppll_reacquire_fb_crosses": 0,
+            "rust_full_model_cppll_reacquire_rust_requested": 0,
+            "rust_full_model_cppll_reacquire_rust_enabled": 0,
+            "rust_full_model_cppll_reacquire_rust_fallbacks": 0,
+            "rust_full_model_cppll_reacquire_rust_points": 0,
+            "rust_timer_lfsr_output_batches_total": 0,
+            "rust_timer_lfsr_output_calls_total": 0,
+            "rust_timer_lfsr_output_due_total": 0,
+            "rust_timer_lfsr_output_skips_total": 0,
+            "rust_timer_lfsr_output_executed_total": 0,
+            "rust_timer_lfsr_output_writes_total": 0,
+            "rust_timer_lfsr_output_fallbacks_total": 0,
+            "event_trace_audit_requested": int(bool(event_trace_audit)),
+            "event_trace_audit_enabled": 0,
+            "event_trace_audit_events_total": 0,
+            "event_trace_audit_body_entries_total": 0,
+            "event_trace_audit_cross_events_total": 0,
+            "event_trace_audit_above_events_total": 0,
+            "event_trace_audit_timer_events_total": 0,
+            "event_trace_audit_initial_step_events_total": 0,
+            "event_trace_audit_final_step_events_total": 0,
+            "event_trace_audit_combined_events_total": 0,
+            "event_trace_audit_state_writes_total": 0,
+            "event_trace_audit_array_writes_total": 0,
+            "event_trace_audit_output_writes_total": 0,
+            "event_trace_audit_timer_state_writes_total": 0,
+            "event_trace_audit_timer_last_fired_writes_total": 0,
+            "event_trace_audit_transition_writes_total": 0,
+            "event_trace_audit_transition_output_writes_total": 0,
+            "event_trace_audit_in_event_writes_total": 0,
+            "event_trace_audit_records_dropped_total": 0,
+            "rust_array_snapshot_copies": 0,
+            "rust_array_snapshot_fallbacks": 0,
+            "rust_array_err_ratio_scans": 0,
+            "rust_array_err_ratio_fallbacks": 0,
+            "rust_array_err_ratio_reads": 0,
+            "rust_array_record_scans": 0,
+            "rust_array_record_fallbacks": 0,
+            "rust_array_record_values": 0,
+            "rust_array_loop_enabled": 0,
+            "rust_transition_breakpoint_enabled": 0,
+            "rust_transition_breakpoint_scans_total": 0,
+            "rust_transition_breakpoint_state_scans_total": 0,
+            "rust_transition_breakpoint_fallbacks_total": 0,
+            "rust_timer_breakpoint_enabled": 0,
+            "rust_timer_breakpoint_scans_total": 0,
+            "rust_timer_breakpoint_state_scans_total": 0,
+            "rust_timer_breakpoint_fallbacks_total": 0,
+            "timer_array_sidecar_updates_total": 0,
+            "timer_array_sidecar_rebuilds_total": 0,
+            "timer_array_sidecar_scans_total": 0,
             "static_lifecycle_fastpath_enabled": int(bool(static_lifecycle_fastpath)),
             "transition_unchanged_fastpath_enabled": int(bool(transition_unchanged_fastpath)),
             "model_prepare_step_calls": 0,
@@ -539,7 +3347,23 @@ class Simulator:
             "timer_breakpoint_hits_total": 0,
             "timer_breakpoint_scans_total": 0,
             "timer_state_updates_total": 0,
+            "timer_batch_due_calls_total": 0,
+            "timer_batch_due_events_total": 0,
+            "timer_batch_due_fires_total": 0,
+            "timer_batch_due_fallbacks_total": 0,
+            "timer_state_owned_checks_total": 0,
+            "timer_state_owned_fast_skips_total": 0,
+            "timer_state_owned_target_reads_total": 0,
+            "timer_state_owned_fires_total": 0,
+            "timer_state_owned_fallbacks_total": 0,
             "transition_unchanged_target_fastpath_total": 0,
+            "transition_calls_total": 0,
+            "transition_output_fastpath_calls_total": 0,
+            "transition_set_target_calls_total": 0,
+            "transition_evaluate_calls_total": 0,
+            "transition_breakpoint_scans_total": 0,
+            "transition_breakpoint_active_scans_total": 0,
+            "transition_breakpoint_inactive_skips_total": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -669,6 +3493,73 @@ class Simulator:
                 if setter is not None:
                     setter(enabled)
 
+        def _set_model_rust_transition_breakpoint_scanner(scanner):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_transition_breakpoint_scanner", None)
+                if setter is not None:
+                    setter(scanner)
+
+        def _set_model_rust_transition_state_backend(backend, *, production: bool = False):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_transition_state_backend", None)
+                if setter is not None:
+                    setter(backend, production=production)
+
+        def _set_model_rust_event_interpolation_backend(backend):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_event_interpolation_backend", None)
+                if setter is not None:
+                    setter(backend)
+
+        def _set_model_rust_timer_breakpoint_scanner(scanner):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_timer_breakpoint_scanner", None)
+                if setter is not None:
+                    setter(scanner)
+
+        def _set_model_rust_timer_event_backend(backend, *, production: bool = False):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_timer_event_backend", None)
+                if setter is not None:
+                    setter(backend, production=production)
+
+        def _set_model_rust_event_due_shadow_backend(backend):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_event_due_shadow_backend", None)
+                if setter is not None:
+                    setter(backend)
+
+        def _set_model_rust_cross_above_production_backend(backend, *, production: bool = False):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_cross_above_production_backend", None)
+                if setter is not None:
+                    setter(backend, production=production)
+
+        def _set_model_rust_event_write_backend(
+            backend,
+            node_index=None,
+            node_values=None,
+            *,
+            shadow: bool = False,
+            production: bool = False,
+        ):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_event_write_backend", None)
+                if setter is not None:
+                    setter(
+                        backend,
+                        node_index,
+                        node_values,
+                        shadow=shadow,
+                        production=production,
+                    )
+
+        def _set_model_event_trace_audit_enabled(enabled: bool):
+            for model in self.models:
+                setter = getattr(model, "_set_event_trace_audit_enabled", None)
+                if setter is not None:
+                    setter(enabled)
+
         def _set_model_indexed_state_storage_empty():
             def _visit(model):
                 setter = getattr(model, "_set_indexed_state_storage", None)
@@ -706,7 +3597,17 @@ class Simulator:
                     )
                 )
                 if setter is not None:
-                    scalar_ids = {name: idx for idx, name in enumerate(scalar_names)}
+                    scalar_ids = {}
+                    for name in scalar_names:
+                        scalar_ids[name] = len(scalar_ids)
+                    slot_name_fn = getattr(model, "_state_array_slot_name", None)
+                    for array_name, lo, hi, _ in array_ranges:
+                        for idx in range(lo, hi + 1):
+                            if slot_name_fn is not None:
+                                slot_name = slot_name_fn(array_name, idx)
+                            else:
+                                slot_name = f"{array_name}[{idx}]"
+                            scalar_ids[slot_name] = len(scalar_ids)
                     integer_names = tuple(
                         str(name)
                         for name in getattr(model_cls, "_integer_state_names", ()) or ()
@@ -749,8 +3650,106 @@ class Simulator:
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
         _set_model_transition_unchanged_fastpath_enabled(transition_unchanged_fastpath)
+        _set_model_rust_transition_breakpoint_scanner(None)
+        _set_model_rust_transition_state_backend(None, production=False)
+        _set_model_rust_event_interpolation_backend(None)
+        _set_model_rust_timer_breakpoint_scanner(None)
+        _set_model_rust_timer_event_backend(None, production=False)
+        _set_model_rust_event_due_shadow_backend(None)
+        _set_model_rust_event_write_backend(None)
+        _set_model_event_trace_audit_enabled(False)
         _set_model_static_branch_indexed_io_empty()
         _set_model_node_resolution_cache_enabled(True)
+        rust_event_interpolation_for_event_write = bool(
+            rust_event_write_shadow or rust_event_write_production
+        )
+        if event_trace_audit:
+            self._perf_stats["event_trace_audit_enabled"] = 1
+            _set_model_event_trace_audit_enabled(True)
+        rust_backend = (
+            load_optional_rust_backend()
+            if (
+                rust_static_eval
+                or rust_transition_shadow
+                or rust_transition_production
+                or rust_event_interpolation
+                or rust_timer_event
+                or rust_event_due_shadow
+                or rust_cross_above_production
+                or rust_event_write_shadow
+                or rust_event_write_production
+                or rust_full_model_fastpath
+                or indexed_arrays
+            )
+            else None
+        )
+        if (
+            rust_required
+            and (
+                rust_static_eval
+                or rust_transition_shadow
+                or rust_transition_production
+                or rust_event_interpolation
+                or rust_timer_event
+                or rust_event_due_shadow
+                or rust_cross_above_production
+                or rust_event_write_shadow
+                or rust_event_write_production
+                or rust_full_model_fastpath
+                or indexed_arrays
+            )
+            and rust_backend is None
+        ):
+            raise RuntimeError(
+                "EVAS Rust backend was required but could not be loaded; "
+                "build EVAS/evas/rust_core target/release/libevas_rust_core.so "
+                "on this host or unset evas_rust_required."
+            )
+        if rust_backend is not None:
+            if rust_static_eval:
+                self._perf_stats["rust_static_eval_available"] = 1
+            if rust_transition_shadow:
+                self._perf_stats["rust_transition_shadow_available"] = 1
+            if rust_transition_production:
+                self._perf_stats["rust_transition_production_available"] = 1
+                self._perf_stats["rust_transition_production_enabled"] = 1
+                _set_model_rust_transition_state_backend(
+                    rust_backend,
+                    production=True,
+                )
+            if rust_timer_event:
+                self._perf_stats["rust_timer_event_available"] = 1
+                self._perf_stats["rust_timer_event_enabled"] = 1
+                self._perf_stats["rust_timer_breakpoint_enabled"] = 1
+                _set_model_rust_timer_breakpoint_scanner(
+                    rust_backend.next_timer_breakpoint
+                )
+                _set_model_rust_timer_event_backend(
+                    rust_backend,
+                    production=True,
+                )
+            if rust_event_interpolation or rust_event_interpolation_for_event_write:
+                self._perf_stats["rust_event_interpolation_available"] = 1
+                self._perf_stats["rust_event_interpolation_enabled"] = 1
+                _set_model_rust_event_interpolation_backend(rust_backend)
+            if rust_event_due_shadow:
+                self._perf_stats["rust_event_due_shadow_available"] = 1
+                self._perf_stats["rust_event_due_shadow_enabled"] = 1
+                _set_model_rust_event_due_shadow_backend(rust_backend)
+            if rust_cross_above_production:
+                self._perf_stats["rust_cross_above_production_available"] = 1
+                self._perf_stats["rust_cross_above_production_enabled"] = 1
+                _set_model_rust_cross_above_production_backend(
+                    rust_backend, production=True,
+                )
+            if rust_event_write_shadow:
+                self._perf_stats["rust_event_write_shadow_available"] = 1
+                self._perf_stats["rust_event_write_shadow_enabled"] = 1
+            if rust_event_write_production:
+                self._perf_stats["rust_event_write_production_available"] = 1
+                self._perf_stats["rust_event_write_production_enabled"] = 1
+            if rust_full_model_fastpath:
+                self._perf_stats["rust_full_model_fastpath_available"] = 1
         if indexed_state_storage:
             _install_indexed_state_storage()
         if static_branch_fastpath:
@@ -762,6 +3761,18 @@ class Simulator:
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
         source_breakpoint_sources = [src for src in self.sources if src.breakpoint_fn is not None]
+        self._generic_executor_enabled = bool(generic_executor)
+        if rust_full_model_fastpath:
+            full_model_result = self._try_compiler_whole_segment_fastpath(
+                rust_backend=rust_backend,
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+                max_step=max_step,
+                min_step=min_step,
+            )
+            if full_model_result is not None:
+                return full_model_result
         transition_breakpoint_min_ramp = 0.15 * max_step
 
         def _set_transition_breakpoint_threshold(model):
@@ -868,6 +3879,7 @@ class Simulator:
         model_output_versions: Optional[tuple[int, ...]] = None
         err_ratio_nodes: tuple[str, ...] = ()
         err_ratio_cache_key = None
+        err_ratio_node_id_batch = None
         err_ratio_skipped_outputs_per_step = 0
         err_ratio_skipped_sources_per_step = 0
 
@@ -900,6 +3912,8 @@ class Simulator:
             }
 
         indexed_array = None
+        indexed_record_node_ids = None
+        rust_record_node_batch = None
         indexed_model_io_versions = None
         indexed_model_io_plan = None
         indexed_output_nodes_seen: set[str] = set()
@@ -908,18 +3922,39 @@ class Simulator:
         indexed_dirty_nodes: set[str] = set()
         indexed_dirty_validation_nodes: Tuple[str, ...] = ()
         indexed_dirty_validation_enabled = False
-        rust_backend = load_optional_rust_backend() if rust_static_eval else None
-        rust_static_eval_segments_by_start: Dict[int, Tuple[Tuple[int, ...], object, Tuple[tuple, ...]]] = {}
+        rust_static_eval_segments_by_start: Dict[int, tuple] = {}
         rust_static_eval_segment_members: set[int] = set()
-        if rust_backend is not None:
-            self._perf_stats["rust_static_eval_available"] = 1
+        rust_transition_shadow_plans: Dict[int, tuple] = {}
+        rust_static_fast_sync_enabled = False
+        rust_array_loop_enabled = False
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
             )
             indexed_array.update_from_mapping(self.node_voltages)
-            if rust_static_eval:
+            indexed_record_node_ids = tuple(
+                indexed_array.node_index.id_of(name)
+                for name in self.recorded_signals
+            )
+            rust_array_loop_enabled = (
+                rust_backend is not None
+                and indexed_array.node_count >= 64
+            )
+            if rust_array_loop_enabled and not isinstance(indexed_array.values, array):
                 indexed_array.values = array("d", indexed_array.values)
+            if rust_array_loop_enabled:
+                rust_record_node_batch = rust_backend.make_node_id_batch(
+                    indexed_record_node_ids
+                )
+                self._perf_stats["rust_array_loop_enabled"] = 1
+                self._perf_stats["rust_transition_breakpoint_enabled"] = 1
+                self._perf_stats["rust_timer_breakpoint_enabled"] = 1
+                _set_model_rust_transition_breakpoint_scanner(
+                    rust_backend.next_transition_breakpoint
+                )
+                _set_model_rust_timer_breakpoint_scanner(
+                    rust_backend.next_timer_breakpoint
+                )
             self._indexed_array_stats = {
                 "node_count": indexed_array.node_count,
                 "snapshots": 0,
@@ -935,6 +3970,7 @@ class Simulator:
                 "output_write_throughs": 0,
                 "post_model_sync_repairs": 0,
             }
+        rust_array_prev_values = None
 
         def _model_tree_output_versions() -> tuple[int, ...]:
             versions: List[int] = []
@@ -1045,6 +4081,9 @@ class Simulator:
                 "indexed_array_source_updates"
             ]
             self._indexed_array_stats["record_reads"] = self._perf_stats["indexed_array_record_reads"]
+            self._indexed_array_stats["record_id_reads"] = self._perf_stats[
+                "indexed_array_record_id_reads"
+            ]
             self._indexed_array_stats["err_ratio_reads"] = self._perf_stats[
                 "indexed_array_err_ratio_reads"
             ]
@@ -1085,6 +4124,58 @@ class Simulator:
                 "fallbacks": self._perf_stats["indexed_voltage_read_fallbacks"],
             }
 
+        def _install_rust_event_write_batches():
+            if (
+                rust_backend is None
+                or not (rust_event_write_shadow or rust_event_write_production)
+            ):
+                return
+            if indexed_array is not None:
+                required_nodes: set[str] = set()
+
+                def _collect_required_nodes(model):
+                    getter = getattr(model, "_rust_timer_lfsr_required_external_nodes", None)
+                    if getter is not None:
+                        required_nodes.update(str(node) for node in getter())
+                    getter = getattr(model, "_rust_event_linear_required_external_nodes", None)
+                    if getter is not None:
+                        required_nodes.update(str(node) for node in getter())
+
+                for model in self.models:
+                    _collect_required_nodes(model)
+                if required_nodes:
+                    indexed_array.ensure_nodes(required_nodes)
+            _set_model_rust_event_write_backend(
+                rust_backend,
+                indexed_array.node_index if indexed_array is not None else None,
+                indexed_array.values if indexed_array is not None else None,
+                shadow=rust_event_write_shadow,
+                production=rust_event_write_production,
+            )
+            models = 0
+            batches = 0
+            linear_batches = 0
+
+            def _visit(model):
+                nonlocal models, batches, linear_batches
+                current = len(getattr(model, "_rust_event_write_batches", {}) or {})
+                current_linear = len(
+                    getattr(model, "_rust_event_linear_write_batches", {}) or {}
+                )
+                current += current_linear
+                if current:
+                    models += 1
+                    batches += current
+                    linear_batches += current_linear
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+            self._perf_stats["rust_event_write_models"] = models
+            self._perf_stats["rust_event_write_batches"] = batches
+            self._perf_stats["rust_event_linear_write_batches"] = linear_batches
+
         def _build_rust_static_eval_plans():
             nonlocal rust_static_eval_segments_by_start, rust_static_eval_segment_members
             rust_static_eval_segments_by_start = {}
@@ -1096,102 +4187,591 @@ class Simulator:
             planned_models = 0
             planned_ops = 0
             fallback_models = 0
-            per_model_ops: Dict[int, Tuple[List[StaticAffineOp], Tuple[tuple, ...]]] = {}
+            planned_terms = 0
+            state_read_terms = 0
+            state_write_ops = 0
+            integer_state_write_ops = 0
+            per_model_ops: Dict[int, Tuple[List[LinearOp], Tuple[tuple, ...], Optional[List[float]], Tuple[tuple, ...], bool]] = {}
+
+            def _count_static_fallback(reason: str) -> None:
+                key = f"rust_static_eval_fallback_{reason}"
+                self._perf_stats[key] = int(self._perf_stats.get(key, 0) or 0) + 1
+
+            def _count_static_no_candidate(reason: str, count: int = 1) -> None:
+                token = "".join(
+                    ch if ch.isalnum() else "_"
+                    for ch in str(reason).lower()
+                )
+                token = "_".join(part for part in token.split("_") if part) or "unknown"
+                key = f"rust_static_eval_no_candidate_{token}"
+                self._perf_stats[key] = int(self._perf_stats.get(key, 0) or 0) + int(
+                    count
+                )
 
             for model_index, model in enumerate(self.models):
-                metadata = tuple(
-                    getattr(model.__class__, "_rust_static_affine_ops", ()) or ()
+                raw_ir_metadata = tuple(
+                    getattr(model.__class__, "_evaluate_ir_static_linear_ops", ()) or ()
                 )
-                if not metadata:
+                if not raw_ir_metadata:
+                    self._perf_stats["rust_static_eval_no_candidate_models"] += 1
+                    rejections = tuple(
+                        getattr(
+                            model.__class__,
+                            "_evaluate_ir_static_linear_rejections",
+                            (),
+                        )
+                        or ()
+                    )
+                    if not rejections:
+                        _count_static_no_candidate("unknown")
+                    for reason, count in rejections:
+                        _count_static_no_candidate(reason, count)
                     continue
                 candidates += 1
-                if (
-                    rust_backend is None
-                    or model_has_post_update_events[model_index]
-                    or model_needs_future_node_voltages[model_index]
-                    or getattr(model, "_child_models", [])
-                ):
+                if rust_backend is None:
+                    _count_static_fallback("backend_unavailable")
+                    fallback_models += 1
+                    continue
+                if model_has_post_update_events[model_index]:
+                    _count_static_fallback("post_update_events")
+                    fallback_models += 1
+                    continue
+                if model_needs_future_node_voltages[model_index]:
+                    _count_static_fallback("future_node_voltages")
+                    fallback_models += 1
+                    continue
+                if getattr(model, "_child_models", []):
+                    _count_static_fallback("child_models")
                     fallback_models += 1
                     continue
 
-                ops: List[StaticAffineOp] = []
+                try:
+                    ir_ops = normalize_linear_ops(raw_ir_metadata)
+                except (TypeError, ValueError):
+                    _count_static_fallback("normalize_failed")
+                    fallback_models += 1
+                    continue
+
+                ops: List[LinearOp] = []
                 sync_entries = []
-                for read_local, write_local, gain, bias in metadata:
+                state_io_entries = []
+                model_fallback_reason = "ir_conversion_failed"
+                model_uses_state = False
+                model_integer_state_write_ops = 0
+                state_values = getattr(model, "_indexed_state_values", None)
+                state_ids = getattr(model, "_indexed_state_ids", {}) or {}
+
+                def _convert_linear_terms(ir_terms) -> Tuple[Optional[List[LinearTerm]], int]:
+                    nonlocal model_uses_state, model_fallback_reason
+                    converted_terms: List[LinearTerm] = []
+                    state_reads = 0
+                    for term in ir_terms:
+                        try:
+                            gain_value = model._evaluate_rust_static_affine_scalar(
+                                term.gain,
+                                model.params,
+                            )
+                        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                            self._perf_stats["rust_static_eval_coeff_eval_fallbacks"] += 1
+                            return None, 0
+
+                        if term.source_kind == SOURCE_NODE:
+                            external = model._resolve_external_node(term.source_name)
+                            indexed_array.ensure_nodes((external,))
+                            source_id = indexed_array.node_index.id_of(external)
+                            converted_terms.append(
+                                LinearTerm(
+                                    source_kind=SOURCE_NODE,
+                                    source_id=source_id,
+                                    gain=gain_value,
+                                )
+                            )
+                        elif term.source_kind == SOURCE_STATE:
+                            model_uses_state = True
+                            if state_values is None:
+                                model_fallback_reason = "state_storage_missing"
+                                return None, 0
+                            source_id = state_ids.get(term.source_name)
+                            if source_id is None:
+                                model_fallback_reason = "state_id_missing"
+                                return None, 0
+                            converted_terms.append(
+                                LinearTerm(
+                                    source_kind=SOURCE_STATE,
+                                    source_id=source_id,
+                                    gain=gain_value,
+                                )
+                            )
+                            state_reads += 1
+                        else:
+                            model_fallback_reason = "unsupported_source"
+                            return None, 0
+                    return converted_terms, state_reads
+
+                def _convert_condition(ir_condition) -> Tuple[Optional[LinearCondition], int]:
+                    nonlocal model_fallback_reason
+                    if ir_condition is None:
+                        return None, 0
                     try:
-                        gain_value = model._evaluate_rust_static_affine_scalar(
-                            gain,
+                        left_bias = model._evaluate_rust_static_affine_scalar(
+                            ir_condition.left_bias,
                             model.params,
                         )
-                        bias_value = model._evaluate_rust_static_affine_scalar(
-                            bias,
+                        right_bias = model._evaluate_rust_static_affine_scalar(
+                            ir_condition.right_bias,
                             model.params,
                         )
                     except (KeyError, TypeError, ValueError, ZeroDivisionError):
                         self._perf_stats["rust_static_eval_coeff_eval_fallbacks"] += 1
+                        model_fallback_reason = "coeff_eval_failed"
+                        return None, 0
+                    left_terms, left_reads = _convert_linear_terms(
+                        ir_condition.left_terms
+                    )
+                    right_terms, right_reads = _convert_linear_terms(
+                        ir_condition.right_terms
+                    )
+                    if left_terms is None or right_terms is None:
+                        return None, 0
+                    return (
+                        LinearCondition(
+                            op_kind=ir_condition.op_kind,
+                            left_bias=left_bias,
+                            left_terms=tuple(left_terms),
+                            right_bias=right_bias,
+                            right_terms=tuple(right_terms),
+                        ),
+                        left_reads + right_reads,
+                    )
+
+                for ir_op in ir_ops:
+                    try:
+                        bias_value = model._evaluate_rust_static_affine_scalar(
+                            ir_op.bias,
+                            model.params,
+                        )
+                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                        self._perf_stats["rust_static_eval_coeff_eval_fallbacks"] += 1
+                        model_fallback_reason = "coeff_eval_failed"
                         ops = []
                         sync_entries = []
+                        state_io_entries = []
                         break
-                    if (
-                        model._rust_static_affine_scalar_uses_params(gain)
-                        or model._rust_static_affine_scalar_uses_params(bias)
-                    ):
+
+                    if linear_op_uses_params(ir_op):
                         self._perf_stats["rust_static_eval_runtime_param_ops"] += 1
-                    read_external = model._resolve_external_node(read_local)
-                    write_external = model._resolve_external_node(write_local)
-                    indexed_array.ensure_nodes((read_external, write_external))
-                    read_id = indexed_array.node_index.id_of(read_external)
-                    write_id = indexed_array.node_index.id_of(write_external)
+
+                    terms, state_reads_for_op = _convert_linear_terms(ir_op.terms)
+                    if terms is None:
+                        ops = []
+                        sync_entries = []
+                        state_io_entries = []
+                        model_fallback_reason = "term_conversion_failed"
+                        break
+                    false_terms, false_reads = _convert_linear_terms(ir_op.false_terms)
+                    if false_terms is None:
+                        ops = []
+                        sync_entries = []
+                        state_io_entries = []
+                        model_fallback_reason = "term_conversion_failed"
+                        break
+                    condition, condition_reads = _convert_condition(ir_op.condition)
+                    if ir_op.condition is not None and condition is None:
+                        ops = []
+                        sync_entries = []
+                        state_io_entries = []
+                        model_fallback_reason = "condition_conversion_failed"
+                        break
+                    state_reads_for_op += false_reads + condition_reads
+                    try:
+                        false_bias_value = model._evaluate_rust_static_affine_scalar(
+                            ir_op.false_bias,
+                            model.params,
+                        )
+                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                        self._perf_stats["rust_static_eval_coeff_eval_fallbacks"] += 1
+                        model_fallback_reason = "coeff_eval_failed"
+                        ops = []
+                        sync_entries = []
+                        state_io_entries = []
+                        break
+
+                    if ir_op.target_kind == TARGET_NODE:
+                        write_external = model._resolve_external_node(ir_op.target_name)
+                        indexed_array.ensure_nodes((write_external,))
+                        target_id = indexed_array.node_index.id_of(write_external)
+                        sync_entries.append(
+                            (model, ir_op.target_name, write_external, target_id)
+                        )
+                    elif ir_op.target_kind == TARGET_STATE:
+                        model_uses_state = True
+                        if state_values is None:
+                            ops = []
+                            sync_entries = []
+                            state_io_entries = []
+                            model_fallback_reason = "state_storage_missing"
+                            break
+                        target_id = state_ids.get(ir_op.target_name)
+                        if target_id is None:
+                            ops = []
+                            sync_entries = []
+                            state_io_entries = []
+                            model_fallback_reason = "state_id_missing"
+                            break
+                        state_io_entries.append((model, state_reads_for_op, 1))
+                        if getattr(ir_op, "target_integer", False):
+                            model_integer_state_write_ops += 1
+                    else:
+                        ops = []
+                        sync_entries = []
+                        state_io_entries = []
+                        model_fallback_reason = "unsupported_target"
+                        break
+
+                    if ir_op.target_kind != TARGET_STATE and state_reads_for_op:
+                        state_io_entries.append((model, state_reads_for_op, 0))
+
                     ops.append(
-                        StaticAffineOp(
-                            read_node_id=read_id,
-                            write_node_id=write_id,
-                            gain=gain_value,
+                        LinearOp(
+                            target_kind=ir_op.target_kind,
+                            target_id=target_id,
                             bias=bias_value,
+                            terms=tuple(terms),
+                            condition=condition,
+                            false_bias=false_bias_value,
+                            false_terms=tuple(false_terms),
+                            target_integer=bool(
+                                getattr(ir_op, "target_integer", False)
+                            ),
                         )
                     )
-                    sync_entries.append((model, write_local, write_external, write_id))
 
                 if not ops:
+                    _count_static_fallback(model_fallback_reason)
                     fallback_models += 1
                     continue
-                per_model_ops[model_index] = (ops, tuple(sync_entries))
+                per_model_ops[model_index] = (
+                    ops,
+                    tuple(sync_entries),
+                    state_values if model_uses_state else None,
+                    tuple(state_io_entries),
+                    bool(model_uses_state),
+                )
                 planned_models += 1
                 planned_ops += len(ops)
+                planned_terms += sum(
+                    len(op.terms)
+                    + len(op.false_terms)
+                    + (
+                        0
+                        if op.condition is None
+                        else len(op.condition.left_terms)
+                        + len(op.condition.right_terms)
+                    )
+                    for op in ops
+                )
+                state_read_terms += sum(
+                    reads for _, reads, _ in state_io_entries
+                )
+                state_write_ops += sum(
+                    writes for _, _, writes in state_io_entries
+                )
+                integer_state_write_ops += model_integer_state_write_ops
 
             def _flush_segment(model_indices: List[int]) -> None:
                 if not model_indices or rust_backend is None:
                     return
-                combined_ops: List[StaticAffineOp] = []
+                combined_ops: List[LinearOp] = []
                 combined_sync_entries = []
+                combined_state_io_entries = []
+                state_values = None
                 for idx in model_indices:
-                    ops, sync_entries = per_model_ops[idx]
+                    ops, sync_entries, model_state_values, state_io_entries, _ = per_model_ops[idx]
                     combined_ops.extend(ops)
                     combined_sync_entries.extend(sync_entries)
+                    combined_state_io_entries.extend(state_io_entries)
+                    if model_state_values is not None:
+                        state_values = model_state_values
                 rust_static_eval_segments_by_start[model_indices[0]] = (
                     tuple(model_indices),
-                    rust_backend.make_static_affine_batch(combined_ops),
+                    rust_backend.make_static_linear_batch(combined_ops),
                     tuple(combined_sync_entries),
+                    state_values,
+                    tuple(combined_state_io_entries),
                 )
                 rust_static_eval_segment_members.update(model_indices)
 
             current_segment: List[int] = []
             for idx in sorted(per_model_ops):
+                model_uses_state = per_model_ops[idx][4]
+                if model_uses_state:
+                    _flush_segment(current_segment)
+                    current_segment = []
+                    _flush_segment([idx])
+                    continue
                 if current_segment and idx != current_segment[-1] + 1:
                     _flush_segment(current_segment)
                     current_segment = []
                 current_segment.append(idx)
             _flush_segment(current_segment)
 
+            full_static_coverage = bool(self.models) and len(
+                rust_static_eval_segment_members
+            ) == len(self.models)
+            mixed_small_gate = (
+                bool(rust_static_fast_sync)
+                and not rust_required
+                and planned_models > 0
+                and not full_static_coverage
+                and planned_ops < 64
+            )
+            if mixed_small_gate:
+                self._perf_stats["rust_static_eval_mixed_small_fallbacks"] = 1
+                self._perf_stats["rust_static_eval_gated_models"] = planned_models
+                self._perf_stats["rust_static_eval_gated_ops"] = planned_ops
+                self._perf_stats["rust_static_eval_gated_segments"] = len(
+                    rust_static_eval_segments_by_start
+                )
+                fallback_models += planned_models
+                planned_models = 0
+                planned_ops = 0
+                planned_terms = 0
+                state_read_terms = 0
+                state_write_ops = 0
+                integer_state_write_ops = 0
+                rust_static_eval_segments_by_start = {}
+                rust_static_eval_segment_members = set()
+
             self._perf_stats["rust_static_eval_candidate_models"] = candidates
             self._perf_stats["rust_static_eval_models"] = planned_models
             self._perf_stats["rust_static_eval_ops"] = planned_ops
             self._perf_stats["rust_static_eval_fallback_models"] = fallback_models
+            self._perf_stats["rust_static_eval_terms"] = planned_terms
+            self._perf_stats["rust_static_eval_state_read_terms"] = state_read_terms
+            self._perf_stats["rust_static_eval_state_write_ops"] = state_write_ops
+            self._perf_stats["rust_static_eval_integer_state_write_ops"] = (
+                integer_state_write_ops
+            )
             self._perf_stats["rust_static_eval_segments"] = len(
                 rust_static_eval_segments_by_start
             )
             self._perf_stats["rust_static_eval_max_segment_models"] = max(
                 (len(segment[0]) for segment in rust_static_eval_segments_by_start.values()),
                 default=0,
+            )
+
+        def _build_rust_transition_shadow_plans():
+            nonlocal rust_transition_shadow_plans
+            rust_transition_shadow_plans = {}
+            if not rust_transition_shadow or indexed_array is None:
+                return
+
+            candidates = 0
+            planned_models = 0
+            planned_static_ops = 0
+            planned_target_ops = 0
+
+            for model_index, model in enumerate(self.models):
+                raw_segment = getattr(
+                    model.__class__,
+                    "_ordered_transition_segment_ir_ops",
+                    ((), ()),
+                ) or ((), ())
+                try:
+                    raw_linear, raw_transition = raw_segment
+                except (TypeError, ValueError):
+                    continue
+                raw_linear = tuple(raw_linear or ())
+                raw_transition = tuple(raw_transition or ())
+                if not raw_transition:
+                    continue
+                candidates += 1
+                if rust_backend is None or getattr(model, "_child_models", []):
+                    continue
+
+                try:
+                    linear_ir_ops = normalize_linear_ops(raw_linear)
+                    transition_ir_ops = normalize_transition_target_ops(raw_transition)
+                except (TypeError, ValueError):
+                    continue
+
+                state_values = getattr(model, "_indexed_state_values", None)
+                state_ids = getattr(model, "_indexed_state_ids", {}) or {}
+
+                def _eval_scalar(value):
+                    try:
+                        return model._evaluate_rust_static_affine_scalar(
+                            value,
+                            model.params,
+                        )
+                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                        return None
+
+                def _convert_terms(ir_terms):
+                    converted_terms: List[LinearTerm] = []
+                    for term in ir_terms:
+                        gain_value = _eval_scalar(term.gain)
+                        if gain_value is None:
+                            return None
+                        if term.source_kind == SOURCE_NODE:
+                            external = model._resolve_external_node(term.source_name)
+                            indexed_array.ensure_nodes((external,))
+                            source_id = indexed_array.node_index.id_of(external)
+                            converted_terms.append(
+                                LinearTerm(
+                                    source_kind=SOURCE_NODE,
+                                    source_id=source_id,
+                                    gain=float(gain_value),
+                                )
+                            )
+                        elif term.source_kind == SOURCE_STATE:
+                            if state_values is None:
+                                return None
+                            source_id = state_ids.get(term.source_name)
+                            if source_id is None:
+                                return None
+                            converted_terms.append(
+                                LinearTerm(
+                                    source_kind=SOURCE_STATE,
+                                    source_id=source_id,
+                                    gain=float(gain_value),
+                                )
+                            )
+                        else:
+                            return None
+                    return tuple(converted_terms)
+
+                def _convert_condition(ir_condition):
+                    if ir_condition is None:
+                        return None
+                    left_bias = _eval_scalar(ir_condition.left_bias)
+                    right_bias = _eval_scalar(ir_condition.right_bias)
+                    if left_bias is None or right_bias is None:
+                        return False
+                    left_terms = _convert_terms(ir_condition.left_terms)
+                    right_terms = _convert_terms(ir_condition.right_terms)
+                    if left_terms is None or right_terms is None:
+                        return False
+                    return LinearCondition(
+                        op_kind=ir_condition.op_kind,
+                        left_bias=float(left_bias),
+                        left_terms=left_terms,
+                        right_bias=float(right_bias),
+                        right_terms=right_terms,
+                    )
+
+                linear_ops: List[LinearOp] = []
+                transition_ops: List[TransitionTargetOp] = []
+                transition_keys: List[Optional[str]] = []
+                failed = False
+
+                for ir_op in linear_ir_ops:
+                    bias_value = _eval_scalar(ir_op.bias)
+                    false_bias_value = _eval_scalar(ir_op.false_bias)
+                    if bias_value is None or false_bias_value is None:
+                        failed = True
+                        break
+                    terms = _convert_terms(ir_op.terms)
+                    false_terms = _convert_terms(ir_op.false_terms)
+                    if terms is None or false_terms is None:
+                        failed = True
+                        break
+                    condition = _convert_condition(ir_op.condition)
+                    if condition is False:
+                        failed = True
+                        break
+                    if ir_op.target_kind == TARGET_NODE:
+                        external = model._resolve_external_node(ir_op.target_name)
+                        indexed_array.ensure_nodes((external,))
+                        target_id = indexed_array.node_index.id_of(external)
+                    elif ir_op.target_kind == TARGET_STATE:
+                        if state_values is None:
+                            failed = True
+                            break
+                        target_id = state_ids.get(ir_op.target_name)
+                        if target_id is None:
+                            failed = True
+                            break
+                    else:
+                        failed = True
+                        break
+                    linear_ops.append(
+                        LinearOp(
+                            target_kind=ir_op.target_kind,
+                            target_id=target_id,
+                            bias=float(bias_value),
+                            terms=terms,
+                            condition=condition,
+                            false_bias=float(false_bias_value),
+                            false_terms=false_terms,
+                            target_integer=bool(
+                                getattr(ir_op, "target_integer", False)
+                            ),
+                        )
+                    )
+
+                if failed:
+                    continue
+
+                for target_id, ir_op in enumerate(transition_ir_ops):
+                    bias_value = _eval_scalar(ir_op.bias)
+                    false_bias_value = _eval_scalar(ir_op.false_bias)
+                    delay_value = _eval_scalar(ir_op.delay)
+                    rise_value = _eval_scalar(ir_op.rise)
+                    fall_value = _eval_scalar(ir_op.fall)
+                    if (
+                        bias_value is None
+                        or false_bias_value is None
+                        or delay_value is None
+                        or rise_value is None
+                        or fall_value is None
+                    ):
+                        failed = True
+                        break
+                    terms = _convert_terms(ir_op.terms)
+                    false_terms = _convert_terms(ir_op.false_terms)
+                    if terms is None or false_terms is None:
+                        failed = True
+                        break
+                    condition = _convert_condition(ir_op.condition)
+                    if condition is False:
+                        failed = True
+                        break
+                    transition_ops.append(
+                        TransitionTargetOp(
+                            target_id=target_id,
+                            bias=float(bias_value),
+                            terms=terms,
+                            condition=condition,
+                            false_bias=float(false_bias_value),
+                            false_terms=false_terms,
+                            delay=float(delay_value),
+                            rise=float(rise_value),
+                            fall=float(fall_value),
+                        )
+                    )
+                    transition_keys.append(ir_op.transition_key)
+
+                if failed or not transition_ops:
+                    continue
+
+                rust_transition_shadow_plans[model_index] = (
+                    model,
+                    rust_backend.make_static_linear_batch(linear_ops),
+                    rust_backend.make_transition_target_batch(transition_ops),
+                    state_values,
+                    tuple(transition_keys),
+                )
+                planned_models += 1
+                planned_static_ops += len(linear_ops)
+                planned_target_ops += len(transition_ops)
+
+            self._perf_stats["rust_transition_shadow_candidate_models"] = candidates
+            self._perf_stats["rust_transition_shadow_models"] = planned_models
+            self._perf_stats["rust_transition_shadow_static_ops"] = planned_static_ops
+            self._perf_stats["rust_transition_shadow_target_ops"] = planned_target_ops
+            self._perf_stats["rust_transition_shadow_segments"] = len(
+                rust_transition_shadow_plans
             )
 
         def _sync_rust_static_outputs(
@@ -1208,6 +4788,9 @@ class Simulator:
                     if local_node not in model.output_nodes:
                         model._output_nodes_version += 1
                     model.output_nodes[local_node] = value
+                    audit_write = getattr(model, "_event_trace_audit_note_write", None)
+                    if audit_write is not None:
+                        audit_write("output", local_node)
                     self._perf_stats["rust_static_eval_output_syncs"] += 1
                 else:
                     self._perf_stats["rust_static_eval_deferred_output_syncs"] += 1
@@ -1215,6 +4798,216 @@ class Simulator:
                     self.node_voltages[external_node] = value
                     _mark_indexed_dirty_node(external_node)
                     self._perf_stats["rust_static_eval_node_voltage_syncs"] += 1
+
+        def _snapshot_rust_transition_states(model_index: int):
+            plan = rust_transition_shadow_plans.get(model_index)
+            if plan is None:
+                return None
+            model = plan[0]
+            transition_keys = plan[4]
+            snapshot = []
+            for key in transition_keys:
+                if not key:
+                    snapshot.append(None)
+                    continue
+                transition_state = model.transitions.get(key)
+                if transition_state is None:
+                    snapshot.append(None)
+                    continue
+                snapshot.append(
+                    (
+                        float(transition_state.current_val),
+                        float(transition_state.target_val),
+                        float(transition_state.start_time),
+                        float(transition_state.start_val),
+                        float(transition_state.delay),
+                        float(transition_state.rise_time),
+                        float(transition_state.fall_time),
+                        1 if transition_state.active else 0,
+                    )
+                )
+            return tuple(snapshot)
+
+        def _run_rust_transition_shadow(
+            model_index: int,
+            pre_transition_snapshot=None,
+        ) -> None:
+            if indexed_array is None or rust_backend is None:
+                return
+            plan = rust_transition_shadow_plans.get(model_index)
+            if plan is None:
+                return
+            (
+                model,
+                linear_batch,
+                transition_batch,
+                state_values,
+                transition_keys,
+            ) = plan
+            target_count = len(transition_keys)
+            if target_count == 0:
+                return
+
+            node_snapshot = array(
+                "d",
+                (float(value) for value in indexed_array.values),
+            )
+            state_snapshot = array(
+                "d",
+                (float(value) for value in (state_values or ())),
+            )
+            target_values = array("d", [0.0] * target_count)
+            delay_values = array("d", [0.0] * target_count)
+            rise_values = array("d", [0.0] * target_count)
+            fall_values = array("d", [0.0] * target_count)
+            try:
+                rust_backend.evaluate_ordered_transition_segment(
+                    linear_batch,
+                    transition_batch,
+                    node_snapshot,
+                    state_snapshot,
+                    target_values,
+                    delay_values,
+                    rise_values,
+                    fall_values,
+                )
+            except RustBackendError:
+                self._perf_stats["rust_transition_shadow_errors"] += 1
+                return
+
+            self._perf_stats["rust_transition_shadow_calls"] += 1
+            default_transition = float(
+                getattr(model, "default_transition", 1e-12) or 1e-12
+            )
+            for idx, key in enumerate(transition_keys):
+                if not key:
+                    self._perf_stats["rust_transition_shadow_skips"] += 1
+                    continue
+                transition_state = model.transitions.get(key)
+                if transition_state is None:
+                    self._perf_stats["rust_transition_shadow_skips"] += 1
+                    continue
+                rise = float(rise_values[idx])
+                fall = float(fall_values[idx])
+                effective_rise = rise if rise > 0.0 else default_transition
+                effective_fall = fall if fall > 0.0 else default_transition
+                max_diff = max(
+                    abs(float(target_values[idx]) - float(transition_state.target_val)),
+                    abs(float(delay_values[idx]) - float(transition_state.delay)),
+                    abs(effective_rise - float(transition_state.rise_time)),
+                    abs(effective_fall - float(transition_state.fall_time)),
+                )
+                if max_diff > self._perf_stats["rust_transition_shadow_max_abs_diff"]:
+                    self._perf_stats["rust_transition_shadow_max_abs_diff"] = max_diff
+                if max_diff <= 1e-12:
+                    self._perf_stats["rust_transition_shadow_matches"] += 1
+                else:
+                    self._perf_stats["rust_transition_shadow_mismatches"] += 1
+
+            if pre_transition_snapshot is None:
+                return
+
+            current_values = array("d")
+            target_state_values = array("d")
+            start_times = array("d")
+            start_values = array("d")
+            state_delays = array("d")
+            state_rise_times = array("d")
+            state_fall_times = array("d")
+            active_flags: List[int] = []
+            initialized_flags: List[int] = []
+            comparable_indices: List[int] = []
+            for idx, snapshot in enumerate(pre_transition_snapshot):
+                if idx >= target_count:
+                    break
+                key = transition_keys[idx]
+                if not key:
+                    continue
+                comparable_indices.append(idx)
+                if snapshot is None:
+                    current_values.append(0.0)
+                    target_state_values.append(0.0)
+                    start_times.append(0.0)
+                    start_values.append(0.0)
+                    state_delays.append(0.0)
+                    state_rise_times.append(default_transition)
+                    state_fall_times.append(default_transition)
+                    active_flags.append(0)
+                    initialized_flags.append(0)
+                else:
+                    (
+                        current_value,
+                        target_state_value,
+                        start_time,
+                        start_value,
+                        state_delay,
+                        state_rise,
+                        state_fall,
+                        active_flag,
+                    ) = snapshot
+                    current_values.append(current_value)
+                    target_state_values.append(target_state_value)
+                    start_times.append(start_time)
+                    start_values.append(start_value)
+                    state_delays.append(state_delay)
+                    state_rise_times.append(state_rise)
+                    state_fall_times.append(state_fall)
+                    active_flags.append(active_flag)
+                    initialized_flags.append(1)
+            if not comparable_indices:
+                return
+
+            shadow_targets = array("d", (float(target_values[idx]) for idx in comparable_indices))
+            shadow_delays = array("d", (float(delay_values[idx]) for idx in comparable_indices))
+            shadow_rises = array("d", (float(rise_values[idx]) for idx in comparable_indices))
+            shadow_falls = array("d", (float(fall_values[idx]) for idx in comparable_indices))
+            output_values = array("d", [0.0] * len(comparable_indices))
+            try:
+                rust_backend.transition_state_step(
+                    current_values,
+                    target_state_values,
+                    start_times,
+                    start_values,
+                    state_delays,
+                    state_rise_times,
+                    state_fall_times,
+                    active_flags,
+                    initialized_flags,
+                    shadow_targets,
+                    shadow_delays,
+                    shadow_rises,
+                    shadow_falls,
+                    output_values,
+                    time,
+                    default_transition,
+                    bool(getattr(model, "_initial_condition_mode", False)),
+                )
+            except RustBackendError:
+                self._perf_stats["rust_transition_shadow_errors"] += 1
+                return
+
+            for local_idx, transition_idx in enumerate(comparable_indices):
+                key = transition_keys[transition_idx]
+                transition_state = model.transitions.get(key)
+                if transition_state is None:
+                    self._perf_stats["rust_transition_shadow_state_mismatches"] += 1
+                    continue
+                state_diff = max(
+                    abs(float(current_values[local_idx]) - float(transition_state.current_val)),
+                    abs(float(target_state_values[local_idx]) - float(transition_state.target_val)),
+                    abs(float(start_times[local_idx]) - float(transition_state.start_time)),
+                    abs(float(start_values[local_idx]) - float(transition_state.start_val)),
+                    abs(float(state_delays[local_idx]) - float(transition_state.delay)),
+                    abs(float(state_rise_times[local_idx]) - float(transition_state.rise_time)),
+                    abs(float(state_fall_times[local_idx]) - float(transition_state.fall_time)),
+                    abs(int(active_flags[local_idx]) - int(bool(transition_state.active))),
+                )
+                if state_diff > self._perf_stats["rust_transition_shadow_state_max_abs_diff"]:
+                    self._perf_stats["rust_transition_shadow_state_max_abs_diff"] = state_diff
+                if state_diff <= 1e-12:
+                    self._perf_stats["rust_transition_shadow_state_matches"] += 1
+                else:
+                    self._perf_stats["rust_transition_shadow_state_mismatches"] += 1
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
             if indexed_array is None:
@@ -1263,22 +5056,76 @@ class Simulator:
                 indexed_dirty_nodes.clear()
             return max_diff
 
+        _install_rust_event_write_batches()
+
         if indexed_array is not None:
             _refresh_indexed_model_io_plan(force=True)
             _build_rust_static_eval_plans()
+            _build_rust_transition_shadow_plans()
+            if (
+                rust_static_eval
+                and not indexed_arrays_requested
+                and not rust_static_eval_segments_by_start
+            ):
+                indexed_array = None
+                indexed_model_io_plan = None
+                indexed_model_io_versions = None
+                indexed_dirty_validation_nodes = ()
+                indexed_dirty_validation_enabled = False
+                self._indexed_array_stats = {}
+                self._indexed_model_io_stats = {}
+                self._indexed_voltage_probe_stats = {}
+                self._indexed_voltage_read_stats = {}
+                self._perf_stats["rust_static_eval_no_segment_fallbacks"] = 1
+                if not (
+                    profile_sections
+                    or profile_model_eval
+                    or indexed_snapshot_profile
+                    or indexed_arrays_requested
+                ):
+                    profile_clock = None
+                    model_profile_enabled = False
+                _set_model_indexed_output_writer(
+                    _record_model_io_output_write if model_io_profile_enabled else None
+                )
+                _set_model_indexed_voltage_probe(
+                    _record_model_io_voltage_read if model_io_profile_enabled else None
+                )
+                _set_model_indexed_voltage_reader(None)
+                _set_model_static_branch_indexed_io_empty()
+                if not indexed_state_storage_requested:
+                    _set_model_indexed_state_storage_empty()
+                    self._perf_stats["indexed_state_storage_enabled"] = 0
+                    self._perf_stats["indexed_state_storage_models"] = 0
+                    self._perf_stats["indexed_state_storage_scalar_slots"] = 0
+                    self._perf_stats["indexed_state_storage_integer_slots"] = 0
+                    self._perf_stats["indexed_state_storage_array_slots"] = 0
+
+        if indexed_array is not None:
+            rust_static_fast_sync_enabled = bool(
+                rust_static_fast_sync
+                and rust_static_eval
+                and self.models
+                and len(rust_static_eval_segment_members) == len(self.models)
+            )
             indexed_dirty_validation_enabled = bool(
                 rust_static_eval
+                and not rust_static_fast_sync_enabled
                 and self.models
                 and len(rust_static_eval_segment_members) == len(self.models)
             )
             if indexed_dirty_validation_enabled:
                 dirty_names = set(source_nodes)
-                for _, _, sync_entries in rust_static_eval_segments_by_start.values():
+                for segment in rust_static_eval_segments_by_start.values():
+                    sync_entries = segment[2]
                     for _, _, external_node, _ in sync_entries:
                         dirty_names.add(external_node)
                 indexed_dirty_validation_nodes = tuple(sorted(dirty_names))
             self._perf_stats["indexed_array_dirty_validation_enabled"] = int(
                 indexed_dirty_validation_enabled
+            )
+            self._perf_stats["rust_static_fast_sync_enabled"] = int(
+                rust_static_fast_sync_enabled
             )
 
             def _indexed_output_write_through(node: str, value: float):
@@ -1341,9 +5188,17 @@ class Simulator:
             _validate_indexed_array_mapping(self.node_voltages, force_full=True)
 
         # Record initial state
-        initial_record_reads = self._record_point(0.0, indexed_array)
+        initial_record_reads = self._record_point(
+            0.0,
+            indexed_array,
+            indexed_record_node_ids,
+            rust_backend=rust_backend if rust_array_loop_enabled else None,
+            rust_record_node_batch=rust_record_node_batch,
+        )
         if indexed_array is not None:
             self._perf_stats["indexed_array_record_reads"] += initial_record_reads
+            if indexed_record_node_ids is not None:
+                self._perf_stats["indexed_array_record_id_reads"] += initial_record_reads
             _refresh_indexed_array_stats()
         self._step_sizes.append(0.0)
 
@@ -1414,7 +5269,31 @@ class Simulator:
             prev_indexed_values = None
             if indexed_array is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                prev_indexed_values = indexed_array.snapshot()
+                if (
+                    rust_array_loop_enabled
+                    and rust_backend is not None
+                    and isinstance(indexed_array.values, array)
+                ):
+                    if (
+                        rust_array_prev_values is None
+                        or len(rust_array_prev_values) != len(indexed_array.values)
+                    ):
+                        rust_array_prev_values = array(
+                            "d",
+                            [0.0] * len(indexed_array.values),
+                        )
+                    try:
+                        rust_backend.copy_f64(
+                            indexed_array.values,
+                            rust_array_prev_values,
+                        )
+                        prev_indexed_values = rust_array_prev_values
+                        self._perf_stats["rust_array_snapshot_copies"] += 1
+                    except RustBackendError:
+                        prev_indexed_values = indexed_array.snapshot()
+                        self._perf_stats["rust_array_snapshot_fallbacks"] += 1
+                else:
+                    prev_indexed_values = indexed_array.snapshot()
                 self._perf_stats["indexed_array_snapshots"] += 1
                 if indexed_dirty_validation_enabled:
                     self._perf_stats["indexed_array_prev_snapshot_dirty_skips"] += 1
@@ -1483,17 +5362,38 @@ class Simulator:
                     continue
                 rust_segment = rust_static_eval_segments_by_start.get(model_index)
                 if rust_segment is not None and indexed_array is not None and rust_backend is not None:
-                    segment_model_indices, batch, sync_entries = rust_segment
+                    (
+                        segment_model_indices,
+                        batch,
+                        sync_entries,
+                        state_values,
+                        state_io_entries,
+                    ) = rust_segment
                     segment_models = [self.models[idx] for idx in segment_model_indices]
                     _section_start = profile_clock() if profile_clock is not None else 0.0
                     rust_segment_succeeded = False
                     try:
-                        rust_backend.evaluate_static_affine(batch, indexed_array.values)
-                        _sync_rust_static_outputs(
-                            sync_entries,
-                            sync_node_voltages=True,
-                            sync_output_nodes=False,
+                        rust_backend.evaluate_static_linear(
+                            batch,
+                            indexed_array.values,
+                            state_values,
                         )
+                        if rust_static_fast_sync_enabled:
+                            self._perf_stats[
+                                "rust_static_fast_sync_node_voltage_sync_skips"
+                            ] += len(sync_entries)
+                            self._perf_stats[
+                                "rust_static_eval_deferred_output_syncs"
+                            ] += len(sync_entries)
+                        else:
+                            _sync_rust_static_outputs(
+                                sync_entries,
+                                sync_node_voltages=True,
+                                sync_output_nodes=False,
+                            )
+                        for state_model, reads, writes in state_io_entries:
+                            state_model._perf_stats["indexed_state_scalar_reads"] += int(reads)
+                            state_model._perf_stats["indexed_state_scalar_writes"] += int(writes)
                         self._perf_stats["rust_static_eval_calls"] += 1
                         rust_segment_succeeded = True
                     except RustBackendError:
@@ -1566,7 +5466,14 @@ class Simulator:
                             segment_model._event_time = time
                             segment_model._bound_step = 0.0
                             _section_start = profile_clock() if profile_clock is not None else 0.0
+                            transition_snapshot = _snapshot_rust_transition_states(
+                                segment_model_index
+                            )
                             segment_model.evaluate(self.node_voltages, time)
+                            _run_rust_transition_shadow(
+                                segment_model_index,
+                                transition_snapshot,
+                            )
                             if profile_clock is not None:
                                 elapsed = _add_profile_time(
                                     "model_evaluate_s",
@@ -1638,7 +5545,9 @@ class Simulator:
                 else:
                     self._perf_stats["model_prepare_step_skips"] += 1
                 _section_start = profile_clock() if profile_clock is not None else 0.0
+                transition_snapshot = _snapshot_rust_transition_states(model_index)
                 model.evaluate(self.node_voltages, time)
+                _run_rust_transition_shadow(model_index, transition_snapshot)
                 if profile_clock is not None:
                     elapsed = _add_profile_time("model_evaluate_s", _section_start)
                     _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
@@ -1663,13 +5572,17 @@ class Simulator:
 
             if indexed_array is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                _refresh_indexed_model_io_plan()
-                self._perf_stats["indexed_array_syncs"] += 1
-                max_diff = _validate_indexed_array_mapping(self.node_voltages)
-                if max_diff != 0.0:
-                    indexed_array.update_from_mapping(self.node_voltages)
-                    self._perf_stats["indexed_post_model_sync_repairs"] += 1
+                if rust_static_fast_sync_enabled:
+                    self._perf_stats["rust_static_fast_sync_validation_skips"] += 1
                     _refresh_indexed_array_stats()
+                else:
+                    _refresh_indexed_model_io_plan()
+                    self._perf_stats["indexed_array_syncs"] += 1
+                    max_diff = _validate_indexed_array_mapping(self.node_voltages)
+                    if max_diff != 0.0:
+                        indexed_array.update_from_mapping(self.node_voltages)
+                        self._perf_stats["indexed_post_model_sync_repairs"] += 1
+                        _refresh_indexed_array_stats()
                 if profile_clock is not None:
                     _add_profile_time("indexed_array_sync_s", _section_start)
 
@@ -1711,25 +5624,69 @@ class Simulator:
                 err_ratio_skipped_outputs_per_step = skipped_outputs
                 err_ratio_skipped_sources_per_step = skipped_sources
                 err_ratio_cache_key = cache_key
+                err_ratio_node_id_batch = None
+                if (
+                    rust_array_loop_enabled
+                    and indexed_array is not None
+                    and rust_backend is not None
+                ):
+                    node_ids = []
+                    for node in err_ratio_nodes:
+                        if not indexed_array.node_index.has(node):
+                            node_ids = []
+                            break
+                        node_ids.append(indexed_array.node_index.id_of(node))
+                    if len(node_ids) == len(err_ratio_nodes):
+                        err_ratio_node_id_batch = rust_backend.make_node_id_batch(
+                            node_ids
+                        )
             if err_ratio_skipped_outputs_per_step:
                 self._perf_stats["err_ratio_skipped_outputs"] += err_ratio_skipped_outputs_per_step
             if err_ratio_skipped_sources_per_step:
                 self._perf_stats["err_ratio_skipped_sources"] += err_ratio_skipped_sources_per_step
-            for node in err_ratio_nodes:
-                if indexed_array is not None:
-                    vnew = indexed_array.get(node, self.node_voltages.get(node, 0.0))
-                    vold = indexed_array.get_from_snapshot(prev_indexed_values, node, vnew)
-                    self._perf_stats["indexed_array_err_ratio_reads"] += 1
-                else:
-                    vnew = self.node_voltages[node]
-                    vold = prev_nv.get(node, vnew)
-                dv = abs(vnew - vold)
-                vref = max(abs(vnew), abs(vold))
-                tol = reltol * vref + vabstol
-                if tol > 0.0:
-                    er = dv / tol
-                    if er > err_ratio:
-                        err_ratio = er
+            used_rust_err_ratio = False
+            if (
+                indexed_array is not None
+                and rust_array_loop_enabled
+                and rust_backend is not None
+                and err_ratio_node_id_batch is not None
+                and prev_indexed_values is not None
+                and len(prev_indexed_values) == len(indexed_array.values)
+            ):
+                try:
+                    err_ratio = rust_backend.max_err_ratio(
+                        indexed_array.values,
+                        prev_indexed_values,
+                        err_ratio_node_id_batch,
+                        reltol,
+                        vabstol,
+                    )
+                    self._perf_stats["rust_array_err_ratio_scans"] += 1
+                    self._perf_stats["rust_array_err_ratio_reads"] += len(
+                        err_ratio_node_id_batch
+                    )
+                    self._perf_stats["indexed_array_err_ratio_reads"] += len(
+                        err_ratio_node_id_batch
+                    )
+                    used_rust_err_ratio = True
+                except RustBackendError:
+                    self._perf_stats["rust_array_err_ratio_fallbacks"] += 1
+            if not used_rust_err_ratio:
+                for node in err_ratio_nodes:
+                    if indexed_array is not None:
+                        vnew = indexed_array.get(node, self.node_voltages.get(node, 0.0))
+                        vold = indexed_array.get_from_snapshot(prev_indexed_values, node, vnew)
+                        self._perf_stats["indexed_array_err_ratio_reads"] += 1
+                    else:
+                        vnew = self.node_voltages[node]
+                        vold = prev_nv.get(node, vnew)
+                    dv = abs(vnew - vold)
+                    vref = max(abs(vnew), abs(vold))
+                    tol = reltol * vref + vabstol
+                    if tol > 0.0:
+                        er = dv / tol
+                        if er > err_ratio:
+                            err_ratio = er
             if indexed_array is not None:
                 _refresh_indexed_array_stats()
             if profile_clock is not None:
@@ -1753,9 +5710,17 @@ class Simulator:
 
             if should_record:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                record_reads = self._record_point(time, indexed_array)
+                record_reads = self._record_point(
+                    time,
+                    indexed_array,
+                    indexed_record_node_ids,
+                    rust_backend=rust_backend if rust_array_loop_enabled else None,
+                    rust_record_node_batch=rust_record_node_batch,
+                )
                 if indexed_array is not None:
                     self._perf_stats["indexed_array_record_reads"] += record_reads
+                    if indexed_record_node_ids is not None:
+                        self._perf_stats["indexed_array_record_id_reads"] += record_reads
                     _refresh_indexed_array_stats()
                 self._step_sizes.append(dt)
                 if next_record_time is not None:
@@ -1766,10 +5731,11 @@ class Simulator:
             self._perf_stats["steps_total"] += 1
 
         if rust_static_eval_segments_by_start and indexed_array is not None:
-            for _, _, sync_entries in rust_static_eval_segments_by_start.values():
+            for segment in rust_static_eval_segments_by_start.values():
+                sync_entries = segment[2]
                 _sync_rust_static_outputs(
                     sync_entries,
-                    sync_node_voltages=False,
+                    sync_node_voltages=rust_static_fast_sync_enabled,
                     sync_output_nodes=True,
                 )
 
@@ -1802,7 +5768,104 @@ class Simulator:
                 "timer_breakpoint_hits": "timer_breakpoint_hits_total",
                 "timer_breakpoint_scans": "timer_breakpoint_scans_total",
                 "timer_state_updates": "timer_state_updates_total",
+                "timer_batch_due_calls": "timer_batch_due_calls_total",
+                "timer_batch_due_events": "timer_batch_due_events_total",
+                "timer_batch_due_fires": "timer_batch_due_fires_total",
+                "timer_batch_due_fallbacks": "timer_batch_due_fallbacks_total",
+                "timer_state_owned_checks": "timer_state_owned_checks_total",
+                "timer_state_owned_fast_skips": "timer_state_owned_fast_skips_total",
+                "timer_state_owned_target_reads": "timer_state_owned_target_reads_total",
+                "timer_state_owned_fires": "timer_state_owned_fires_total",
+                "timer_state_owned_fallbacks": "timer_state_owned_fallbacks_total",
                 "transition_unchanged_target_fastpath": "transition_unchanged_target_fastpath_total",
+                "transition_calls": "transition_calls_total",
+                "transition_output_fastpath_calls": "transition_output_fastpath_calls_total",
+                "transition_set_target_calls": "transition_set_target_calls_total",
+                "transition_evaluate_calls": "transition_evaluate_calls_total",
+                "rust_transition_state_production_calls": "rust_transition_state_production_calls_total",
+                "rust_transition_state_production_outputs": "rust_transition_state_production_outputs_total",
+                "rust_transition_state_production_fallbacks": "rust_transition_state_production_fallbacks_total",
+                "rust_transition_state_buffer_reuse_calls": "rust_transition_state_buffer_reuse_calls_total",
+                "rust_transition_state_buffer_alloc_total": "rust_transition_state_buffer_alloc_grand_total",
+                "rust_transition_batch_flushes": "rust_transition_batch_flushes_total",
+                "rust_transition_batch_slot_total": "rust_transition_batch_slot_total_total",
+                "rust_transition_batch_fallbacks": "rust_transition_batch_fallbacks_total",
+                "rust_transition_batch_max_slots": "rust_transition_batch_max_slots_total",
+                "rust_transition_lazy_enqueues": "rust_transition_lazy_enqueues_total",
+                "rust_cross_production_calls": "rust_cross_production_calls_total",
+                "rust_cross_production_fires": "rust_cross_production_fires_total",
+                "rust_cross_production_fallbacks": "rust_cross_production_fallbacks_total",
+                "rust_above_production_calls": "rust_above_production_calls_total",
+                "rust_above_production_fires": "rust_above_production_fires_total",
+                "rust_above_production_fallbacks": "rust_above_production_fallbacks_total",
+                "rust_event_interpolation_batches": "rust_event_interpolation_batches_total",
+                "rust_event_interpolation_nodes": "rust_event_interpolation_nodes_total",
+                "rust_event_interpolation_cache_hits": "rust_event_interpolation_cache_hits_total",
+                "rust_event_interpolation_fallbacks": "rust_event_interpolation_fallbacks_total",
+                "transition_breakpoint_scans": "transition_breakpoint_scans_total",
+                "transition_breakpoint_active_scans": "transition_breakpoint_active_scans_total",
+                "transition_breakpoint_inactive_skips": "transition_breakpoint_inactive_skips_total",
+                "rust_transition_breakpoint_scans": "rust_transition_breakpoint_scans_total",
+                "rust_transition_breakpoint_state_scans": "rust_transition_breakpoint_state_scans_total",
+                "rust_transition_breakpoint_fallbacks": "rust_transition_breakpoint_fallbacks_total",
+                "rust_timer_breakpoint_scans": "rust_timer_breakpoint_scans_total",
+                "rust_timer_breakpoint_state_scans": "rust_timer_breakpoint_state_scans_total",
+                "rust_timer_breakpoint_fallbacks": "rust_timer_breakpoint_fallbacks_total",
+                "rust_timer_event_production_periodic_calls": "rust_timer_event_production_periodic_calls_total",
+                "rust_timer_event_production_absolute_calls": "rust_timer_event_production_absolute_calls_total",
+                "rust_timer_event_production_fires": "rust_timer_event_production_fires_total",
+                "rust_timer_event_production_skips": "rust_timer_event_production_skips_total",
+                "rust_timer_event_production_expirations": "rust_timer_event_production_expirations_total",
+                "rust_timer_event_production_fallbacks": "rust_timer_event_production_fallbacks_total",
+                "rust_event_due_shadow_cross_checks": "rust_event_due_shadow_cross_checks_total",
+                "rust_event_due_shadow_above_checks": "rust_event_due_shadow_above_checks_total",
+                "rust_event_due_shadow_timer_periodic_checks": "rust_event_due_shadow_timer_periodic_checks_total",
+                "rust_event_due_shadow_timer_absolute_checks": "rust_event_due_shadow_timer_absolute_checks_total",
+                "rust_event_due_shadow_matches": "rust_event_due_shadow_matches_total",
+                "rust_event_due_shadow_mismatches": "rust_event_due_shadow_mismatches_total",
+                "rust_event_due_shadow_errors": "rust_event_due_shadow_errors_total",
+                "rust_event_write_shadow_checks": "rust_event_write_shadow_checks_total",
+                "rust_event_write_shadow_matches": "rust_event_write_shadow_matches_total",
+                "rust_event_write_shadow_mismatches": "rust_event_write_shadow_mismatches_total",
+                "rust_event_write_shadow_errors": "rust_event_write_shadow_errors_total",
+                "rust_event_write_production_calls": "rust_event_write_production_calls_total",
+                "rust_event_write_production_executed": "rust_event_write_production_executed_total",
+                "rust_event_write_production_fallbacks": "rust_event_write_production_fallbacks_total",
+                "rust_event_linear_write_batches": "rust_event_linear_write_batches_total",
+                "rust_event_linear_write_shadow_checks": "rust_event_linear_write_shadow_checks_total",
+                "rust_event_linear_write_shadow_matches": "rust_event_linear_write_shadow_matches_total",
+                "rust_event_linear_write_shadow_mismatches": "rust_event_linear_write_shadow_mismatches_total",
+                "rust_event_linear_write_shadow_errors": "rust_event_linear_write_shadow_errors_total",
+                "rust_event_linear_write_production_calls": "rust_event_linear_write_production_calls_total",
+                "rust_event_linear_write_production_executed": "rust_event_linear_write_production_executed_total",
+                "rust_event_linear_write_production_fallbacks": "rust_event_linear_write_production_fallbacks_total",
+                "rust_timer_lfsr_output_batches": "rust_timer_lfsr_output_batches_total",
+                "rust_timer_lfsr_output_calls": "rust_timer_lfsr_output_calls_total",
+                "rust_timer_lfsr_output_due": "rust_timer_lfsr_output_due_total",
+                "rust_timer_lfsr_output_skips": "rust_timer_lfsr_output_skips_total",
+                "rust_timer_lfsr_output_executed": "rust_timer_lfsr_output_executed_total",
+                "rust_timer_lfsr_output_writes": "rust_timer_lfsr_output_writes_total",
+                "rust_timer_lfsr_output_fallbacks": "rust_timer_lfsr_output_fallbacks_total",
+                "event_trace_audit_events": "event_trace_audit_events_total",
+                "event_trace_audit_body_entries": "event_trace_audit_body_entries_total",
+                "event_trace_audit_cross_events": "event_trace_audit_cross_events_total",
+                "event_trace_audit_above_events": "event_trace_audit_above_events_total",
+                "event_trace_audit_timer_events": "event_trace_audit_timer_events_total",
+                "event_trace_audit_initial_step_events": "event_trace_audit_initial_step_events_total",
+                "event_trace_audit_final_step_events": "event_trace_audit_final_step_events_total",
+                "event_trace_audit_combined_events": "event_trace_audit_combined_events_total",
+                "event_trace_audit_state_writes": "event_trace_audit_state_writes_total",
+                "event_trace_audit_array_writes": "event_trace_audit_array_writes_total",
+                "event_trace_audit_output_writes": "event_trace_audit_output_writes_total",
+                "event_trace_audit_timer_state_writes": "event_trace_audit_timer_state_writes_total",
+                "event_trace_audit_timer_last_fired_writes": "event_trace_audit_timer_last_fired_writes_total",
+                "event_trace_audit_transition_writes": "event_trace_audit_transition_writes_total",
+                "event_trace_audit_transition_output_writes": "event_trace_audit_transition_output_writes_total",
+                "event_trace_audit_in_event_writes": "event_trace_audit_in_event_writes_total",
+                "event_trace_audit_records_dropped": "event_trace_audit_records_dropped_total",
+                "timer_array_sidecar_updates": "timer_array_sidecar_updates_total",
+                "timer_array_sidecar_rebuilds": "timer_array_sidecar_rebuilds_total",
+                "timer_array_sidecar_scans": "timer_array_sidecar_scans_total",
                 "static_branch_fastpath_fallbacks": "static_branch_fastpath_fallbacks_total",
                 "dynamic_node_cache_hits": "dynamic_node_cache_hits_total",
                 "dynamic_node_cache_misses": "dynamic_node_cache_misses_total",
@@ -1818,6 +5881,19 @@ class Simulator:
                 perf = getattr(model, "_perf_stats", {}) or {}
                 for source_key, dest_key in keys.items():
                     self._perf_stats[dest_key] += int(perf.get(source_key, 0) or 0)
+                for source_key, value in perf.items():
+                    if not (
+                        source_key.startswith("event_trace_audit_body::")
+                        or source_key.startswith("event_trace_audit_target::")
+                    ):
+                        continue
+                    self._perf_stats[source_key] = int(
+                        self._perf_stats.get(source_key, 0) or 0
+                    ) + int(value or 0)
+                self._perf_stats["rust_event_due_shadow_max_time_diff_total"] = max(
+                    self._perf_stats["rust_event_due_shadow_max_time_diff_total"],
+                    float(perf.get("rust_event_due_shadow_max_time_diff", 0.0) or 0.0),
+                )
                 for child in getattr(model, "_child_models", []) or []:
                     _visit(child)
 
@@ -1909,14 +5985,51 @@ class Simulator:
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
         _set_model_transition_unchanged_fastpath_enabled(False)
+        _set_model_rust_transition_breakpoint_scanner(None)
+        _set_model_rust_transition_state_backend(None, production=False)
+        _set_model_rust_event_interpolation_backend(None)
+        _set_model_rust_timer_breakpoint_scanner(None)
+        _set_model_rust_timer_event_backend(None, production=False)
+        _set_model_rust_event_due_shadow_backend(None)
+        _set_model_rust_event_write_backend(None)
+        _set_model_event_trace_audit_enabled(False)
         _set_model_static_branch_indexed_io_empty()
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))
 
-    def _record_point(self, time: float, indexed_voltages: Optional[IndexedVoltageArray] = None) -> int:
+    def _record_point(
+        self,
+        time: float,
+        indexed_voltages: Optional[IndexedVoltageArray] = None,
+        indexed_record_node_ids: Optional[Tuple[int, ...]] = None,
+        *,
+        rust_backend=None,
+        rust_record_node_batch=None,
+    ) -> int:
         self.time_points.append(time)
         reads = 0
+        if indexed_voltages is not None and indexed_record_node_ids is not None:
+            values = None
+            if rust_backend is not None and rust_record_node_batch is not None:
+                try:
+                    values = rust_backend.record_values_for_ids(
+                        indexed_voltages.values,
+                        rust_record_node_batch,
+                        default=0.0,
+                    )
+                    self._perf_stats["rust_array_record_scans"] += 1
+                    self._perf_stats["rust_array_record_values"] += len(
+                        indexed_record_node_ids
+                    )
+                except RustBackendError:
+                    self._perf_stats["rust_array_record_fallbacks"] += 1
+            if values is None:
+                values = indexed_voltages.values_for_ids(indexed_record_node_ids, 0.0)
+            for name, val in zip(self.recorded_signals, values):
+                self.recorded_signals[name].append(val)
+            return len(indexed_record_node_ids)
+
         for name in self.recorded_signals:
             if indexed_voltages is not None:
                 val = indexed_voltages.get(name, 0.0)
@@ -2002,17 +6115,54 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0,
         return None
 
     wfn._next_breakpoint = _bpfn
+    wfn._evas_waveform = {
+        "kind": "pulse",
+        "v_lo": float(v_lo),
+        "v_hi": float(v_hi),
+        "period": float(period),
+        "duty": float(duty),
+        "rise": float(rise),
+        "fall": float(fall),
+        "delay": float(delay),
+        "width": float(width) if width is not None else 0.0,
+        "has_width": width is not None,
+        "one_shot": bool(one_shot),
+    }
     return wfn
 
 
 def dc(voltage):
     """Create a DC voltage waveform."""
-    return lambda t: voltage
+    voltage = float(voltage)
+
+    def wfn(_t):
+        return voltage
+
+    wfn._evas_waveform = {
+        "kind": "dc",
+        "voltage": voltage,
+    }
+    return wfn
 
 
 def sine(offset, amplitude, freq, phase=0.0):
     """Create a sine waveform."""
-    return lambda t: offset + amplitude * math.sin(2 * math.pi * freq * t + phase)
+    offset = float(offset)
+    amplitude = float(amplitude)
+    freq = float(freq)
+    phase = float(phase)
+
+    def wfn(t):
+        return offset + amplitude * math.sin(2 * math.pi * freq * t + phase)
+
+    wfn._evas_waveform = {
+        "kind": "sine",
+        "offset": offset,
+        "amplitude": amplitude,
+        "freq": freq,
+        "phase": phase,
+    }
+    return wfn
 
 
 def pwl(times, values):
@@ -2048,6 +6198,11 @@ def pwl(times, values):
         return None
 
     wfn._next_breakpoint = _bpfn
+    wfn._evas_waveform = {
+        "kind": "pwl",
+        "times": tuple(float(t) for t in times),
+        "values": tuple(float(v) for v in values),
+    }
     return wfn
 
 

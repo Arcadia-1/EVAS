@@ -28,7 +28,7 @@ from evas.simulator.engine import Simulator
 from evas.simulator.backend import _ModuleCompiler
 
 
-REPEATS = 5
+REPEATS = 15
 HERE = Path(__file__).resolve().parent
 SCS_PATH = HERE.parent / "evas" / "examples" / "comparator" / "tb_cmp_delay.scs"
 
@@ -92,12 +92,22 @@ def run_once(force_immediate: bool):
     }
 
 
+def _trimmed_mean(values, trim=2):
+    """Drop the highest `trim` and lowest `trim` samples, average the rest."""
+    if len(values) <= 2 * trim:
+        return statistics.mean(values)
+    cut = sorted(values)[trim:-trim]
+    return statistics.mean(cut)
+
+
 def summarize(label, samples):
     walls = [s["wall_s"] for s in samples]
     s = samples[-1]
     print(f"=== {label} ===")
     print(f"  repeats                 = {len(samples)}")
     print(f"  wall median_s           = {statistics.median(walls):.6f}")
+    print(f"  wall trimmed_mean_s     = {_trimmed_mean(walls):.6f}  (drop top/bottom 2)")
+    print(f"  wall stdev_s            = {statistics.stdev(walls):.6f}")
     print(f"  wall min_s              = {min(walls):.6f}")
     print(f"  wall max_s              = {max(walls):.6f}")
     print(f"  transition_calls        = {s['transition_calls']}")
@@ -130,9 +140,14 @@ def main():
     bat_med, bat_last = summarize("088 batch (default; one flush per evaluate)", bat)
     print()
 
-    speedup = imm_med / bat_med if bat_med > 0 else float("nan")
-    delta_pct = (imm_med - bat_med) / imm_med * 100 if imm_med > 0 else 0.0
-    print(f"speedup (086 / 088)       = {speedup:.3f}x  ({delta_pct:+.2f}% faster)")
+    speedup_med = imm_med / bat_med if bat_med > 0 else float("nan")
+    delta_pct_med = (imm_med - bat_med) / imm_med * 100 if imm_med > 0 else 0.0
+    imm_trim = _trimmed_mean([s["wall_s"] for s in imm])
+    bat_trim = _trimmed_mean([s["wall_s"] for s in bat])
+    speedup_trim = imm_trim / bat_trim if bat_trim > 0 else float("nan")
+    delta_pct_trim = (imm_trim - bat_trim) / imm_trim * 100 if imm_trim > 0 else 0.0
+    print(f"speedup median (086/088)  = {speedup_med:.3f}x  ({delta_pct_med:+.2f}% faster)")
+    print(f"speedup trimmed (086/088) = {speedup_trim:.3f}x  ({delta_pct_trim:+.2f}% faster)")
     if bat_last["batch_flushes"] > 0:
         ffi_drop = imm_last["ffi_calls"] / bat_last["batch_flushes"]
         avg_slots = bat_last["batch_slots"] / bat_last["batch_flushes"]

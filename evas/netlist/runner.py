@@ -611,6 +611,80 @@ def _derive_bus_signals(result: SimResult) -> Dict[str, np.ndarray]:
     return derived
 
 
+def _dedupe_signal_names(names: List[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
+def _normalize_trace_signal_name(name: str) -> str:
+    text = name.strip()
+    vm = _re.match(r"(?i)^v\(\s*([^)]+)\s*\)$", text)
+    if vm:
+        text = vm.group(1).strip()
+    return text
+
+
+def _parse_required_trace_signals(simopt: Dict[str, object]) -> List[str]:
+    """Return an optional harness-provided sparse trace contract.
+
+    EVAS normally follows Spectre `save` statements, or records every node when
+    no save list exists.  The benchmark harness can set this contract when the
+    checker only needs a small observable subset; this keeps CLI/default EVAS
+    behavior unchanged while allowing paper speed runs to avoid unnecessary
+    trace arrays and CSV columns.
+    """
+    value = simopt.get("evas_required_trace_signals")
+    if value is None:
+        value = os.environ.get("EVAS_REQUIRED_TRACE_SIGNALS", "")
+    if isinstance(value, (list, tuple, set)):
+        raw_names = [str(item) for item in value]
+    else:
+        raw_names = [part for part in _re.split(r"[\s,;]+", str(value)) if part]
+    normalized = [
+        _normalize_trace_signal_name(name)
+        for name in raw_names
+    ]
+    return _dedupe_signal_names([
+        name
+        for name in normalized
+        if name and name.lower() != "time"
+    ])
+
+
+def _trace_nodes_for_signals(required_signals: List[str], all_nodes: set) -> List[str]:
+    if not required_signals:
+        return []
+    lower_to_node = {str(node).lower(): node for node in all_nodes}
+    nodes: List[str] = []
+    for signal in required_signals:
+        if signal in all_nodes:
+            nodes.append(signal)
+            continue
+        node = lower_to_node.get(signal.lower())
+        if node is not None:
+            nodes.append(node)
+    return _dedupe_signal_names(nodes)
+
+
+def _trace_output_signals_for_request(required_signals: List[str], available_signals: set) -> List[str]:
+    lower_to_signal = {str(signal).lower(): signal for signal in available_signals}
+    selected: List[str] = []
+    for signal in required_signals:
+        if signal in available_signals:
+            selected.append(signal)
+            continue
+        actual = lower_to_signal.get(signal.lower())
+        if actual is not None:
+            selected.append(actual)
+    return _dedupe_signal_names(selected)
+
+
 # ---------------------------------------------------------------------------
 # CSV output
 # ---------------------------------------------------------------------------
@@ -925,9 +999,26 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write(f"{'vsource':>20s} {len(netlist.sources)}")
 
     # 5. Record signals
-    record_nodes = set(netlist.save_signals) if netlist.save_signals else all_nodes
+    required_trace_signals = _parse_required_trace_signals(simopt)
+    required_trace_nodes = _trace_nodes_for_signals(required_trace_signals, all_nodes)
+    if required_trace_nodes:
+        record_nodes = set(required_trace_nodes)
+    else:
+        record_nodes = set(netlist.save_signals) if netlist.save_signals else all_nodes
     if record_nodes:
         sim.record(*sorted(record_nodes))
+    if required_trace_signals:
+        record_node_lower = {node.lower() for node in required_trace_nodes}
+        missing_trace = [
+            signal
+            for signal in required_trace_signals
+            if signal not in required_trace_nodes
+            and signal.lower() not in record_node_lower
+        ]
+        log.write("Trace counters:")
+        log.write(f"    required_trace_signal_count = {len(required_trace_signals)}")
+        log.write(f"    required_trace_record_node_count = {len(required_trace_nodes)}")
+        log.write(f"    required_trace_missing_node_count = {len(missing_trace)}")
 
     # 6. Run simulation
     if netlist.tran is None:
@@ -1041,8 +1132,76 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_STATIC_EVAL", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    if rust_static_eval:
-        indexed_arrays = True
+    rust_static_fast_sync = _simopt_bool(
+        simopt,
+        'evas_rust_static_fast_sync',
+        False,
+    ) or os.environ.get("EVAS_RUST_STATIC_FAST_SYNC", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    if rust_static_fast_sync:
+        rust_static_eval = True
+    rust_transition_shadow = _simopt_bool(
+        simopt,
+        'evas_rust_transition_shadow',
+        False,
+    ) or os.environ.get("EVAS_RUST_TRANSITION_SHADOW", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_event_due_shadow = _simopt_bool(
+        simopt,
+        'evas_rust_event_due_shadow',
+        False,
+    ) or os.environ.get("EVAS_RUST_EVENT_DUE_SHADOW", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_event_write_shadow = _simopt_bool(
+        simopt,
+        'evas_rust_event_write_shadow',
+        False,
+    ) or os.environ.get("EVAS_RUST_EVENT_WRITE_SHADOW", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_event_write_production = _simopt_bool(
+        simopt,
+        'evas_rust_event_write_production',
+        False,
+    ) or os.environ.get("EVAS_RUST_EVENT_WRITE_PRODUCTION", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_timer_event = _simopt_bool(
+        simopt,
+        'evas_rust_timer_event',
+        False,
+    ) or os.environ.get("EVAS_RUST_TIMER_EVENT", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_full_model_fastpath = _simopt_bool(
+        simopt,
+        'evas_rust_full_model_fastpath',
+        False,
+    ) or os.environ.get("EVAS_RUST_FULL_MODEL_FASTPATH", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    event_trace_audit = _simopt_bool(
+        simopt,
+        'evas_event_trace_audit',
+        False,
+    ) or os.environ.get("EVAS_EVENT_TRACE_AUDIT", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    rust_required = _simopt_bool(
+        simopt,
+        'evas_rust_required',
+        False,
+    ) or os.environ.get("EVAS_RUST_REQUIRED", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    indexed_arrays_effective = (
+        indexed_arrays
+        or rust_static_eval
+        or rust_transition_shadow
+    )
     indexed_plan = None
     if indexed_parity:
         indexed_plan = build_indexed_run_plan(
@@ -1079,7 +1238,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write(f"    indexed_node_count = {indexed_plan.node_count}")
     if indexed_snapshot_profile:
         log.write("    evas_indexed_snapshot_profile = true")
-    if indexed_arrays:
+    if indexed_arrays_effective:
         log.write("    evas_indexed_arrays = true")
     if indexed_state_storage:
         log.write("    evas_indexed_state_storage = true")
@@ -1093,6 +1252,24 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_transition_unchanged_fastpath = true")
     if rust_static_eval:
         log.write("    evas_rust_static_eval = true")
+    if rust_static_fast_sync:
+        log.write("    evas_rust_static_fast_sync = true")
+    if rust_transition_shadow:
+        log.write("    evas_rust_transition_shadow = true")
+    if rust_event_due_shadow:
+        log.write("    evas_rust_event_due_shadow = true")
+    if rust_event_write_shadow:
+        log.write("    evas_rust_event_write_shadow = true")
+    if rust_event_write_production:
+        log.write("    evas_rust_event_write_production = true")
+    if rust_timer_event:
+        log.write("    evas_rust_timer_event = true")
+    if rust_full_model_fastpath:
+        log.write("    evas_rust_full_model_fastpath = true")
+    if event_trace_audit:
+        log.write("    evas_event_trace_audit = true")
+    if rust_required:
+        log.write("    evas_rust_required = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -1107,12 +1284,21 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      profile_model_eval=profile_model_eval,
                      profile_model_io=profile_model_io,
                      indexed_snapshot_profile=indexed_snapshot_profile,
-                     indexed_arrays=indexed_arrays,
+                     indexed_arrays=indexed_arrays_effective,
                      indexed_state_storage=indexed_state_storage,
                      static_branch_fastpath=static_branch_fastpath,
                      static_lifecycle_fastpath=static_lifecycle_fastpath,
                      transition_unchanged_fastpath=transition_unchanged_fastpath,
-                     rust_static_eval=rust_static_eval)
+                     rust_static_eval=rust_static_eval,
+                     rust_static_fast_sync=rust_static_fast_sync,
+                     rust_transition_shadow=rust_transition_shadow,
+                     rust_event_due_shadow=rust_event_due_shadow,
+                     rust_timer_event=rust_timer_event,
+                     rust_event_write_shadow=rust_event_write_shadow,
+                     rust_event_write_production=rust_event_write_production,
+                     rust_full_model_fastpath=rust_full_model_fastpath,
+                     event_trace_audit=event_trace_audit,
+                     rust_required=rust_required)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
@@ -1198,7 +1384,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     derived = _derive_bus_signals(result)
     derive_elapsed = time.time() - t_derive_start
     result.signals.update(derived)
-    save_with_derived = list(netlist.save_signals) + list(derived.keys())
+    if required_trace_signals:
+        save_with_derived = _trace_output_signals_for_request(
+            required_trace_signals,
+            set(result.signals.keys()),
+        )
+    else:
+        save_with_derived = list(netlist.save_signals) + list(derived.keys())
 
     if indexed_parity:
         report = check_indexed_trace_round_trip(
@@ -1229,12 +1421,16 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     csv_elapsed = time.time() - t_csv_start
 
     signal_names = save_with_derived if save_with_derived else sorted(result.signals.keys())
+    valid_signal_names = [name for name in signal_names if name in result.signals]
     log.write("Runner timing counters:")
     log.write(f"    derive_bus_signals_s = {derive_elapsed:.6f} s")
     log.write(f"    csv_write_s = {csv_elapsed:.6f} s")
+    if required_trace_signals:
+        log.write("Trace counters:")
+        log.write(f"    required_trace_csv_signal_count = {len(valid_signal_names)}")
     log.write("")
     log.write(f"Writing CSV: {csv_path} "
-              f"(signals: {', '.join(signal_names)})")
+              f"(signals: {', '.join(valid_signal_names)})")
 
     # 8. Collect $strobe / $display output (sorted by simulation time)
     strobe_entries = []

@@ -27,6 +27,9 @@ from evas.netlist.spectre_parser import (
 from evas.netlist.runner import (
     _add_spectre_source,
     _apply_evas_profile,
+    _parse_required_trace_signals,
+    _trace_nodes_for_signals,
+    _trace_output_signals_for_request,
     _write_csv,
     evas_simulate,
     SpectreSource,
@@ -65,6 +68,24 @@ class TestNormalizeNodeName:
 
     def test_no_brackets(self):
         assert _normalize_node_name("clk_i") == "clk_i"
+
+
+class TestRequiredTraceHelpers:
+
+    def test_required_trace_parses_env_style_signal_list(self, monkeypatch):
+        monkeypatch.setenv("EVAS_REQUIRED_TRACE_SIGNALS", "time,V(OUT_P), vinp;vinn OUT_P")
+
+        assert _parse_required_trace_signals({}) == ["OUT_P", "vinp", "vinn"]
+
+    def test_required_trace_selects_actual_nodes_case_insensitively(self):
+        nodes = _trace_nodes_for_signals(["out_p", "vinp"], {"OUT_P", "vinp", "extra"})
+
+        assert nodes == ["OUT_P", "vinp"]
+
+    def test_required_trace_output_uses_actual_signal_names(self):
+        selected = _trace_output_signals_for_request(["out_p", "vinp"], {"OUT_P", "vinp", "extra"})
+
+        assert selected == ["OUT_P", "vinp"]
 
 
 # ===========================================================================
@@ -1011,6 +1032,215 @@ class TestIndexedMigrationHarness:
         assert "rust_static_eval_coeff_eval_fallbacks = 0" in log
         assert "indexed_array_dirty_validation_enabled = 1" in log
         assert "indexed_array_dirty_syncs =" in log
+        assert "rust_static_eval_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_transition_shadow_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "trans_target_shadow.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module trans_target_shadow(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                integer q = 0;
+
+                analog begin
+                    q = V(inp) > 0.45 ? 1 : 0;
+                    V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 2n);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_trans_target_shadow.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) trans_target_shadow
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "trans_target_shadow.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_TRANSITION_SHADOW", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_transition_shadow = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "rust_transition_shadow_requested = 1" in log
+        assert "rust_transition_shadow_available = 1" in log
+        assert "rust_transition_shadow_candidate_models = 1" in log
+        assert "rust_transition_shadow_models = 1" in log
+        assert "rust_transition_shadow_static_ops = 1" in log
+        assert "rust_transition_shadow_target_ops = 1" in log
+        assert "rust_transition_shadow_segments = 1" in log
+        assert "rust_transition_shadow_mismatches = 0" in log
+        assert "rust_transition_shadow_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_event_due_shadow_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "event_due_shadow.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module event_due_shadow(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                integer count = 0;
+
+                analog begin
+                    @(cross(V(inp) - 0.5, +1)) count = count + 1;
+                    @(above(V(inp) - 0.5)) count = count + 1;
+                    @(timer(0, 1n)) count = count + 1;
+                    @(timer(2n)) count = count + 1;
+                    V(out) <+ count;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_due_shadow.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) event_due_shadow
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "event_due_shadow.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_EVENT_DUE_SHADOW", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_event_due_shadow = true" in log
+        assert "evas_indexed_arrays = true" not in log
+        assert "rust_event_due_shadow_requested = 1" in log
+        assert "rust_event_due_shadow_available = 1" in log
+        assert "rust_event_due_shadow_enabled = 1" in log
+        assert "rust_event_due_shadow_cross_checks_total =" in log
+        assert "rust_event_due_shadow_above_checks_total =" in log
+        assert "rust_event_due_shadow_timer_periodic_checks_total =" in log
+        assert "rust_event_due_shadow_timer_absolute_checks_total =" in log
+        assert "rust_event_due_shadow_mismatches_total = 0" in log
+        assert "rust_event_due_shadow_errors_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_event_trace_audit_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        va = tmp_path / "event_trace_audit.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module event_trace_audit(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                real x = 0.0;
+                real acc[0:1];
+
+                analog begin
+                    @(initial_step) begin
+                        x = 1.0;
+                        acc[0] = x;
+                    end
+                    @(cross(V(inp) - 0.5, +1)) begin
+                        x = x + 1.0;
+                        acc[1] = x;
+                    end
+                    @(timer(2n)) x = x + 1.0;
+                    @(final_step) x = x + 1.0;
+                    V(out) <+ x;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_trace_audit.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) event_trace_audit
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "event_trace_audit.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_EVENT_TRACE_AUDIT", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_event_trace_audit = true" in log
+        assert "event_trace_audit_requested = 1" in log
+        assert "event_trace_audit_enabled = 1" in log
+        assert "event_trace_audit_events_total =" in log
+        assert "event_trace_audit_state_writes_total =" in log
+        assert "event_trace_audit_array_writes_total =" in log
+        assert "event_trace_audit_output_writes_total =" in log
+        assert "event_trace_audit_records_dropped_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_static_fast_sync_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ 2.0 * V(vin) + 0.125;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_FAST_SYNC", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_static_eval = true" in log
+        assert "evas_rust_static_fast_sync = true" in log
+        assert "rust_static_fast_sync_requested = 1" in log
+        assert "rust_static_fast_sync_enabled = 1" in log
+        assert "rust_static_fast_sync_node_voltage_sync_skips =" in log
+        assert "rust_static_fast_sync_validation_skips =" in log
+        assert "indexed_array_dirty_validation_enabled = 0" in log
+        assert "indexed_array_syncs = 0" in log
         assert "rust_static_eval_errors = 0" in log
         assert (out_dir / "tran.csv").exists()
 

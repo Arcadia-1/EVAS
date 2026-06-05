@@ -265,6 +265,14 @@ class IndexedVoltageArray:
             return float(default)
         return self.values[self.node_index.id_of(name)]
 
+    def values_for_ids(self, node_ids: Sequence[int], default: float = 0.0) -> List[float]:
+        values = self.values
+        fallback = float(default)
+        return [
+            float(values[node_id]) if 0 <= int(node_id) < len(values) else fallback
+            for node_id in node_ids
+        ]
+
     def get_from_snapshot(
         self,
         snapshot: Optional[Sequence[float]],

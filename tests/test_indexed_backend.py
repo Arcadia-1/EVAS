@@ -17,6 +17,20 @@ from evas.simulator.indexed import (
     check_indexed_trace_round_trip,
     copy_values_into,
 )
+from evas.simulator.evaluate_ir import (
+    COND_GE,
+    COND_GT,
+    COND_LE,
+    COND_NE,
+    SOURCE_NODE,
+    SOURCE_STATE,
+    TARGET_NODE,
+    TARGET_STATE,
+    evaluate_linear_python,
+    evaluate_transition_targets_python,
+    normalize_linear_ops,
+    normalize_transition_target_ops,
+)
 from evas.compiler.parser import parse
 from evas.simulator.backend import CompiledModel, compile_module
 from evas.simulator.engine import SimResult, Simulator, dc
@@ -135,6 +149,17 @@ def test_indexed_voltage_array_grows_and_reads_previous_snapshots():
     assert node == ""
     assert checked == 3
     assert array.to_mapping() == pytest.approx({"vin": 0.25, "vout": 0.9, "clk": 1.0})
+
+
+def test_indexed_voltage_array_reads_batch_by_node_ids_without_name_lookup():
+    values = IndexedVoltageArray.from_names(["vin", "vout"])
+    values.set("vin", 0.25)
+    values.set("vout", 0.75)
+
+    assert values.values_for_ids(
+        [values.node_index.id_of("vout"), values.node_index.id_of("vin"), 99],
+        default=-1.0,
+    ) == pytest.approx([0.75, 0.25, -1.0])
 
 
 def test_indexed_voltage_array_checks_named_dirty_subset():
@@ -312,6 +337,526 @@ endmodule
     assert ModelCls._rust_static_affine_ops[0][0:2] == ("vin", "vout")
     assert model._evaluate_rust_static_affine_scalar(gain, model.params) == pytest.approx(3.0)
     assert model._evaluate_rust_static_affine_scalar(bias, model.params) == pytest.approx(0.25)
+
+
+def test_compiled_model_records_static_linear_evaluate_ir_for_differential_model():
+    src = """\
+`include "disciplines.vams"
+module diff_gain(vip, vin, vout);
+    input voltage vip;
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    parameter real offset = 0.125;
+    analog begin
+        V(vout) <+ gain * V(vip, vin) + offset;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert len(ops) == 1
+    assert ops[0].target_kind == TARGET_NODE
+    assert ops[0].target_name == "vout"
+    assert len(ops[0].terms) == 2
+    assert [(term.source_kind, term.source_name) for term in ops[0].terms] == [
+        (SOURCE_NODE, "vip"),
+        (SOURCE_NODE, "vin"),
+    ]
+
+    model = ModelCls()
+    node_values = [0.75, 0.25, 0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=[],
+        node_ids={"vip": 0, "vin": 1, "vout": 2},
+        state_ids={},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+
+    assert node_values[2] == pytest.approx(1.125)
+
+
+def test_static_linear_evaluate_ir_executes_state_assignment_then_output():
+    src = """\
+`include "disciplines.vams"
+module state_linear(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    real sample = 0.0;
+    analog begin
+        sample = 2.0 * V(vin) + 0.1;
+        V(vout) <+ sample + 0.2;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert [(op.target_kind, op.target_name) for op in ops] == [
+        (TARGET_STATE, "sample"),
+        (TARGET_NODE, "vout"),
+    ]
+    assert ops[1].terms[0].source_kind == SOURCE_STATE
+
+    model = ModelCls()
+    node_values = [0.75, 0.0]
+    state_values = [0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids={"vin": 0, "vout": 1},
+        state_ids={"sample": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+
+    assert state_values[0] == pytest.approx(1.6)
+    assert node_values[1] == pytest.approx(1.8)
+
+
+def test_static_linear_evaluate_ir_coerces_integer_state_before_output():
+    src = """\
+`include "disciplines.vams"
+module integer_state_linear(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    integer code = 0;
+    analog begin
+        code = 1.6 + V(vin);
+        V(vout) <+ code;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert [(op.target_kind, op.target_name, op.target_integer) for op in ops] == [
+        (TARGET_STATE, "code", True),
+        (TARGET_NODE, "vout", False),
+    ]
+    assert ops[1].terms[0].source_kind == SOURCE_STATE
+
+    model = ModelCls()
+    node_values = [0.2, 0.0]
+    state_values = [0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids={"vin": 0, "vout": 1},
+        state_ids={"code": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+
+    assert state_values[0] == pytest.approx(2.0)
+    assert node_values[1] == pytest.approx(2.0)
+
+
+def test_transition_target_ir_records_integer_truthy_target():
+    src = """\
+`include "disciplines.vams"
+module transition_target_meta(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    integer q = 0;
+    analog begin
+        q = V(vin) > 0.5 ? 1 : 0;
+        V(vout) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = ModelCls._transition_target_ir_ops
+
+    assert len(ops) == 1
+    (
+        node,
+        node2,
+        transition_key,
+        bias,
+        terms,
+        condition,
+        false_bias,
+        false_terms,
+        delay,
+        rise,
+        fall,
+    ) = ops[0]
+
+    assert node == "vout"
+    assert node2 is None
+    assert transition_key == "trans_0"
+    assert bias == pytest.approx(1.0)
+    assert terms == ()
+    assert condition == (
+        COND_NE,
+        0.0,
+        ((SOURCE_STATE, "q", 1.0),),
+        0.0,
+        (),
+    )
+    assert false_bias == pytest.approx(0.0)
+    assert false_terms == ()
+    assert delay == pytest.approx(0.0)
+    assert rise == pytest.approx(1.0e-9)
+    assert fall == pytest.approx(1.0e-9)
+
+
+def test_ordered_transition_segment_ir_records_state_write_before_target():
+    src = """\
+`include "disciplines.vams"
+module ordered_transition_segment_meta(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    integer q = 0;
+    analog begin
+        q = V(vin) > 0.5 ? 1 : 0;
+        V(vout) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 2n);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    raw_linear, raw_transition = ModelCls._ordered_transition_segment_ir_ops
+
+    assert len(raw_linear) == 1
+    assert len(raw_transition) == 1
+    linear_ops = normalize_linear_ops(raw_linear)
+    transition_ops = normalize_transition_target_ops(raw_transition)
+
+    assert linear_ops[0].target_kind == TARGET_STATE
+    assert linear_ops[0].target_name == "q"
+    assert linear_ops[0].target_integer is True
+    assert transition_ops[0].transition_key == "trans_0"
+    assert transition_ops[0].condition is not None
+    assert transition_ops[0].rise == pytest.approx(1.0e-9)
+    assert transition_ops[0].fall == pytest.approx(2.0e-9)
+
+
+def test_transition_target_ir_python_array_executor_matches_truthy_state():
+    src = """\
+`include "disciplines.vams"
+module transition_target_meta(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    integer q = 0;
+    analog begin
+        q = V(vin) > 0.5 ? 1 : 0;
+        V(vout) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 2n);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_transition_target_ops(ModelCls._transition_target_ir_ops)
+    model = ModelCls()
+    target_values = [0.0]
+    delay_values = [0.0]
+    rise_values = [0.0]
+    fall_values = [0.0]
+
+    evaluate_transition_targets_python(
+        ops,
+        node_values=[0.0],
+        state_values=[1.0],
+        target_values=target_values,
+        delay_values=delay_values,
+        rise_values=rise_values,
+        fall_values=fall_values,
+        node_ids={"vin": 0},
+        state_ids={"q": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert target_values[0] == pytest.approx(1.0)
+    assert delay_values[0] == pytest.approx(0.0)
+    assert rise_values[0] == pytest.approx(1.0e-9)
+    assert fall_values[0] == pytest.approx(2.0e-9)
+
+    evaluate_transition_targets_python(
+        ops,
+        node_values=[0.0],
+        state_values=[0.0],
+        target_values=target_values,
+        delay_values=delay_values,
+        rise_values=rise_values,
+        fall_values=fall_values,
+        node_ids={"vin": 0},
+        state_ids={"q": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert target_values[0] == pytest.approx(0.0)
+
+
+def test_static_linear_evaluate_ir_ignores_initial_step_event_body():
+    src = """\
+`include "disciplines.vams"
+module init_plus_linear(vip, vin, voutp, voutn);
+    input voltage vip;
+    input voltage vin;
+    output voltage voutp;
+    output voltage voutn;
+    parameter real gain = 8.64;
+    real diff;
+    analog begin
+        @(initial_step)
+            $strobe("init only");
+        diff = gain * V(vip, vin);
+        V(voutp) <+ 0.45 + diff * 0.5;
+        V(voutn) <+ 0.45 - diff * 0.5;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert [(op.target_kind, op.target_name) for op in ops] == [
+        (TARGET_STATE, "diff"),
+        (TARGET_NODE, "voutp"),
+        (TARGET_NODE, "voutn"),
+    ]
+
+    model = ModelCls()
+    node_values = [0.6, 0.4, 0.0, 0.0]
+    state_values = [0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids={"vip": 0, "vin": 1, "voutp": 2, "voutn": 3},
+        state_ids={"diff": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+
+    assert state_values[0] == pytest.approx(1.728)
+    assert node_values[2] == pytest.approx(1.314)
+    assert node_values[3] == pytest.approx(-0.414)
+
+
+def test_static_linear_evaluate_ir_lowers_top_level_ternary_state_assignment():
+    src = """\
+`include "disciplines.vams"
+module conditional_state(dpn, vout);
+    input voltage dpn;
+    output voltage vout;
+    parameter real vth = 0.45;
+    parameter real amp = 0.014;
+    real dither;
+    analog begin
+        dither = (V(dpn) > vth) ? amp : -amp;
+        V(vout) <+ 0.5 + dither;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert len(ops) == 2
+    assert ops[0].target_kind == TARGET_STATE
+    assert ops[0].condition is not None
+    assert ops[0].condition.op_kind == COND_GT
+    assert ops[0].condition.left_terms[0].source_name == "dpn"
+    assert ops[1].terms[0].source_kind == SOURCE_STATE
+
+    model = ModelCls()
+    node_values = [0.8, 0.0]
+    state_values = [0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids={"dpn": 0, "vout": 1},
+        state_ids={"dither": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert state_values[0] == pytest.approx(0.014)
+    assert node_values[1] == pytest.approx(0.514)
+
+    node_values = [0.2, 0.0]
+    state_values = [0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids={"dpn": 0, "vout": 1},
+        state_ids={"dither": 0},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert state_values[0] == pytest.approx(-0.014)
+    assert node_values[1] == pytest.approx(0.486)
+
+
+def test_static_linear_evaluate_ir_lowers_ternary_differential_contribution():
+    src = """\
+`include "disciplines.vams"
+module conditional_diff(sel, outp, outn);
+    input voltage sel;
+    output voltage outp, outn;
+    parameter real vth = 0.45;
+    parameter real amp = 0.5;
+    analog begin
+        V(outp, outn) <+ (V(sel) > vth) ? amp : -amp;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert len(ops) == 1
+    assert ops[0].condition is not None
+    assert [term.source_name for term in ops[0].terms] == ["outn"]
+    assert [term.source_name for term in ops[0].false_terms] == ["outn"]
+
+    model = ModelCls()
+    node_ids = {"sel": 0, "outp": 1, "outn": 2}
+    node_values = [0.8, 0.0, 0.3]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=[],
+        node_ids=node_ids,
+        state_ids={},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(0.8)
+
+    node_values = [0.2, 0.0, 0.3]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=[],
+        node_ids=node_ids,
+        state_ids={},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(-0.2)
+
+
+def test_static_linear_evaluate_ir_lowers_abs_as_conditional_select():
+    src = """\
+`include "disciplines.vams"
+module rectifier(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real vcm = 0.45;
+    analog begin
+        V(vout) <+ vcm + abs(V(vin) - vcm);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert len(ops) == 1
+    assert ops[0].condition is not None
+    assert ops[0].condition.op_kind == COND_GE
+
+    model = ModelCls()
+    node_ids = {"vin": 0, "vout": 1}
+    node_values = [0.25, 0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=[],
+        node_ids=node_ids,
+        state_ids={},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(0.65)
+
+    node_values = [0.8, 0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=[],
+        node_ids=node_ids,
+        state_ids={},
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(0.8)
+
+
+def test_static_linear_evaluate_ir_lowers_min_max_state_pipeline():
+    src = """\
+`include "disciplines.vams"
+module limiter(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    real hi;
+    real clip;
+    analog begin
+        hi = min(V(vin), 0.8);
+        clip = max(hi, 0.2);
+        V(vout) <+ clip;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    ops = normalize_linear_ops(ModelCls._evaluate_ir_static_linear_ops)
+
+    assert len(ops) == 3
+    assert ops[0].condition is not None
+    assert ops[0].condition.op_kind == COND_LE
+    assert ops[1].condition is not None
+    assert ops[1].condition.op_kind == COND_GE
+
+    model = ModelCls()
+    node_ids = {"vin": 0, "vout": 1}
+    state_ids = {"hi": 0, "clip": 1}
+    node_values = [0.1, 0.0]
+    state_values = [0.0, 0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids=node_ids,
+        state_ids=state_ids,
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(0.2)
+
+    node_values = [0.9, 0.0]
+    state_values = [0.0, 0.0]
+    evaluate_linear_python(
+        ops,
+        node_values=node_values,
+        state_values=state_values,
+        node_ids=node_ids,
+        state_ids=state_ids,
+        params=model.params,
+        scalar_eval=model._evaluate_rust_static_affine_scalar,
+    )
+    assert node_values[1] == pytest.approx(0.8)
+
+
+def test_static_linear_evaluate_ir_rejects_self_referential_state_update():
+    src = """\
+`include "disciplines.vams"
+module accum(vout);
+    output voltage vout;
+    real sample = 0.0;
+    analog begin
+        sample = sample + 0.1;
+        V(vout) <+ sample;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._evaluate_ir_static_linear_ops == ()
 
 
 def test_compiled_model_rejects_rust_static_affine_ops_for_stateful_model():
