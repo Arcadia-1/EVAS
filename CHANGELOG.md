@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.4.4] — 2026-06-08
+
 ### Fixed — Engine Selection
 - Restored the packaged default to the Python compatibility engine so `evas run`
   and `evas simulate` work from PyPI or a fresh source checkout without a
