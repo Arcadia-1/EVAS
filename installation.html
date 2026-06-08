@@ -289,14 +289,15 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 <h2>Engine Selection<a class="headerlink" href="#engine-selection" title="Link to this heading">¶</a></h2>
 <p>The packaged default is the Python compatibility engine. It works from PyPI or
 a fresh source checkout without compiling native code.</p>
-<p>EVAS2 is the optional Rust-backed execution path for supported event-driven
+<p>evas-rust is the optional Rust-backed execution path for supported event-driven
 designs. To use it from source, build the Rust core first:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cargo<span class="w"> </span>build<span class="w"> </span>--manifest-path<span class="w"> </span>evas/rust_core/Cargo.toml<span class="w"> </span>--release
-evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>--engine<span class="w"> </span>evas2
+evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>--engine<span class="w"> </span>evas-rust
 </pre></div>
 </div>
-<p>You can also select the engine with <code class="docutils literal notranslate"><span class="pre">EVAS_ENGINE=evas2</span></code> or
-<code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">evas_engine=evas2</span></code>.</p>
+<p>You can also select the engine with <code class="docutils literal notranslate"><span class="pre">EVAS_ENGINE=evas-rust</span></code> or
+<code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">evas_engine=evas-rust</span></code>. The legacy <code class="docutils literal notranslate"><span class="pre">evas2</span></code> and
+<code class="docutils literal notranslate"><span class="pre">rust2</span></code> selectors remain accepted as compatibility aliases.</p>
 </section>
 </section>
 

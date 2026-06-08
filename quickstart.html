@@ -261,7 +261,7 @@
 <h2>Run a Bundled Example<a class="headerlink" href="#run-a-bundled-example" title="Link to this heading">¶</a></h2>
 <p>The fastest way to try EVAS is to run one of the included examples:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>run<span class="w"> </span>clk_div
-evas<span class="w"> </span>run<span class="w"> </span>clk_div<span class="w"> </span>--engine<span class="w"> </span>evas2<span class="w">   </span><span class="c1"># requires a built Rust backend</span>
+evas<span class="w"> </span>run<span class="w"> </span>clk_div<span class="w"> </span>--engine<span class="w"> </span>evas-rust<span class="w">   </span><span class="c1"># requires a built Rust backend</span>
 </pre></div>
 </div>
 <p>This will:</p>
@@ -274,7 +274,7 @@ evas<span class="w"> </span>run<span class="w"> </span>clk_div<span class="w"> <
 <section id="simulate-your-own-netlist">
 <h2>Simulate Your Own Netlist<a class="headerlink" href="#simulate-your-own-netlist" title="Link to this heading">¶</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign
-evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign<span class="w"> </span>--engine<span class="w"> </span>evas2
+evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign<span class="w"> </span>--engine<span class="w"> </span>evas-rust
 </pre></div>
 </div>
 <p>Each simulation run produces:</p>
