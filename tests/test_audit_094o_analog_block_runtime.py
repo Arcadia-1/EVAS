@@ -16,8 +16,10 @@ from evas.simulator.analog_block_runtime import (
     try_build_event_then_transition_shadow_runtime,
 )
 from evas.simulator.expr_ir import build_state_binding_ir
-from evas.simulator.rust_backend import default_rust_core_library_path, load_rust_backend
-
+from evas.simulator.rust_backend import (
+    default_rust_core_library_path,
+    load_rust_backend,
+)
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 PIPELINE_STAGE_VA = (
@@ -34,6 +36,15 @@ PIPELINE_STAGE_VA = (
 )
 
 
+def _pipeline_stage_va() -> Path:
+    if not PIPELINE_STAGE_VA.exists():
+        pytest.skip(
+            "pipeline_stage fixture lives in the behavioral-veriloga-eval "
+            f"sibling checkout: {PIPELINE_STAGE_VA}"
+        )
+    return PIPELINE_STAGE_VA
+
+
 def _build_rust_core():
     if shutil.which("cargo") is None:
         pytest.skip("cargo is not available")
@@ -46,10 +57,11 @@ def _build_rust_core():
 
 def test_pipeline_stage_event_then_transition_runtime_updates_state_and_outputs():
     _build_rust_core()
-    source = PIPELINE_STAGE_VA.read_text(encoding="utf-8")
+    pipeline_stage_va = _pipeline_stage_va()
+    source = pipeline_stage_va.read_text(encoding="utf-8")
     preprocessed_source, _defines, default_transition = preprocess(
         source,
-        source_dir=str(PIPELINE_STAGE_VA.parent),
+        source_dir=str(pipeline_stage_va.parent),
     )
     module = parse(preprocessed_source)
     node_slots = {name: idx for idx, name in enumerate(module.ports)}

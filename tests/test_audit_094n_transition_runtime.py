@@ -12,13 +12,15 @@ import pytest
 from evas.compiler.parser import parse
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.expr_ir import build_state_binding_ir
-from evas.simulator.rust_backend import default_rust_core_library_path, load_rust_backend
+from evas.simulator.rust_backend import (
+    default_rust_core_library_path,
+    load_rust_backend,
+)
 from evas.simulator.stmt_ir import lower_stmt
 from evas.simulator.transition_runtime import (
     RustTransitionContributionRuntime,
     try_build_rust_transition_contribution_runtime,
 )
-
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 PIPELINE_STAGE_VA = (
@@ -33,6 +35,15 @@ PIPELINE_STAGE_VA = (
     / "gold"
     / "pipeline_stage.va"
 )
+
+
+def _pipeline_stage_va() -> Path:
+    if not PIPELINE_STAGE_VA.exists():
+        pytest.skip(
+            "pipeline_stage fixture lives in the behavioral-veriloga-eval "
+            f"sibling checkout: {PIPELINE_STAGE_VA}"
+        )
+    return PIPELINE_STAGE_VA
 
 
 def _build_rust_core():
@@ -129,10 +140,11 @@ def test_pipeline_stage_transition_runtime_exposes_next_breakpoint():
 
 def _build_pipeline_stage_transition_runtime():
     _build_rust_core()
-    source = PIPELINE_STAGE_VA.read_text(encoding="utf-8")
+    pipeline_stage_va = _pipeline_stage_va()
+    source = pipeline_stage_va.read_text(encoding="utf-8")
     preprocessed_source, _defines, default_transition = preprocess(
         source,
-        source_dir=str(PIPELINE_STAGE_VA.parent),
+        source_dir=str(pipeline_stage_va.parent),
     )
     module = parse(preprocessed_source)
     stmt_ir = lower_stmt(module.analog_block.body)
