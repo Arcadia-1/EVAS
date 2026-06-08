@@ -21,6 +21,7 @@ from evas.simulator.expr_ir import (
     lower_expr,
 )
 from evas.simulator.rust_backend import (
+    BODY_STMT_WHILE,
     BODY_TARGET_STATE,
     BodyStmtOp,
     default_rust_core_library_path,
@@ -266,6 +267,48 @@ endmodule
     state_values = array("d", [0.0])
     backend.evaluate_body_ir(batch, node_values, state_values, param_values)
     assert state_values.tolist() == pytest.approx([1.0])
+
+
+def test_body_ir_while_loop_executes_with_guarded_rust_opcode():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module body_while_sample;
+    real phase_err = 0.0;
+    real ref_period = 1.0;
+    analog begin
+        while (phase_err > 0.5 * ref_period) phase_err = phase_err - ref_period;
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body)
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    program = encode_body_stmt_ops(stmt_ir, bindings, {})
+    assert isinstance(program, BodyStmtProgram)
+    assert any(op.target_kind == BODY_STMT_WHILE for op in program.stmt_ops)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    batch = backend.make_body_ir_batch(
+        stmt_ops=program.stmt_ops,
+        expr_ops=program.expr_ops,
+    )
+    node_values = array("d")
+    param_values = array("d")
+    phase_slot = bindings.resolve("phase_err").slot
+    period_slot = bindings.resolve("ref_period").slot
+
+    state_values = array("d", [0.0, 0.0])
+    state_values[phase_slot] = 3.2
+    state_values[period_slot] = 1.0
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+    assert state_values[phase_slot] == pytest.approx(0.2)
+
+    state_values[phase_slot] = 0.3
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+    assert state_values[phase_slot] == pytest.approx(0.3)
 
 
 def test_pipeline_stage_phi2_if_else_and_clamp_event_body_executes_in_rust_batch():

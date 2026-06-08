@@ -1245,6 +1245,32 @@ pub(crate) fn threshold_crossed(prev: f64, cur: f64, direction: i32, eps: f64) -
     (prev < -eps && cur >= -eps) || (prev > eps && cur <= eps)
 }
 
+#[inline]
+fn threshold_cross_time(
+    prev_time: f64,
+    time: f64,
+    prev: f64,
+    cur: f64,
+    direction: i32,
+    eps: f64,
+) -> Option<f64> {
+    if threshold_crossed(prev, cur, direction, eps) {
+        Some(interpolate_cross_time(prev_time, prev, time, cur))
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn interpolate_sample_value(prev_time: f64, time: f64, prev: f64, cur: f64, at: f64) -> f64 {
+    let dt = time - prev_time;
+    if dt.abs() <= 1.0e-30 {
+        return cur;
+    }
+    let frac = ((at - prev_time) / dt).clamp(0.0, 1.0);
+    prev + frac * (cur - prev)
+}
+
 pub(crate) fn sar_current_code(bits: &[u8], width: usize) -> u64 {
     let mut code = 0_u64;
     for idx in 0..width {
@@ -1733,18 +1759,46 @@ pub fn cmp_delay_trace_for_arrays(
     let mut clock_events = 0_usize;
 
     for (row_idx, &time) in times.iter().enumerate() {
+        let prev_time = if row_idx > 0 {
+            times[row_idx - 1]
+        } else {
+            time
+        };
         let clk_val = point_clk[row_idx];
         let vinn_val = point_vinn[row_idx];
         let vinp_val = point_vinp[row_idx];
         let vdd_val = point_vdd[row_idx];
         let clk_expr = clk_val - edge_vth;
 
-        if threshold_crossed(prev_clk_expr, clk_expr, 1, 1.0e-12) {
-            t_start = time;
+        if let Some(clk_cross_time) =
+            threshold_cross_time(prev_time, time, prev_clk_expr, clk_expr, 1, 1.0e-12)
+        {
+            t_start = clk_cross_time;
             armed = true;
-            let vdiff = vinp_val - vinn_val - voffset;
+            let prev_vinp = if row_idx > 0 {
+                point_vinp[row_idx - 1]
+            } else {
+                vinp_val
+            };
+            let prev_vinn = if row_idx > 0 {
+                point_vinn[row_idx - 1]
+            } else {
+                vinn_val
+            };
+            let prev_vdd = if row_idx > 0 {
+                point_vdd[row_idx - 1]
+            } else {
+                vdd_val
+            };
+            let vinp_at_cross =
+                interpolate_sample_value(prev_time, time, prev_vinp, vinp_val, clk_cross_time);
+            let vinn_at_cross =
+                interpolate_sample_value(prev_time, time, prev_vinn, vinn_val, clk_cross_time);
+            let vdd_at_cross =
+                interpolate_sample_value(prev_time, time, prev_vdd, vdd_val, clk_cross_time);
+            let vdiff = vinp_at_cross - vinn_at_cross - voffset;
             let vdiff_eff = vdiff.abs().max(1.0e-9);
-            let mut td = td0 + tau * (vdd_val / vdiff_eff).ln();
+            let mut td = td0 + tau * (vdd_at_cross / vdiff_eff).ln();
             td = td.min(td_max).max(td_min);
             for idx in 0..2 {
                 transition_evaluate_one(
@@ -1756,13 +1810,13 @@ pub fn cmp_delay_trace_for_arrays(
                     rises[idx],
                     falls[idx],
                     &mut active[idx],
-                    time,
+                    clk_cross_time,
                 );
             }
             let (outp_target, outn_target) = if vdiff > 0.0 {
-                (vdd_val, 0.0)
+                (vdd_at_cross, 0.0)
             } else {
-                (0.0, vdd_val)
+                (0.0, vdd_at_cross)
             };
             transition_set_target_one(
                 &mut current[0],
@@ -1773,7 +1827,7 @@ pub fn cmp_delay_trace_for_arrays(
                 &mut rises[0],
                 &mut falls[0],
                 &mut active[0],
-                time,
+                clk_cross_time,
                 outp_target,
                 td,
                 tedge,
@@ -1788,14 +1842,16 @@ pub fn cmp_delay_trace_for_arrays(
                 &mut rises[1],
                 &mut falls[1],
                 &mut active[1],
-                time,
+                clk_cross_time,
                 outn_target,
                 td,
                 tedge,
                 tedge,
             );
             clock_events += 1;
-        } else if threshold_crossed(prev_clk_expr, clk_expr, -1, 1.0e-12) {
+        } else if let Some(clk_cross_time) =
+            threshold_cross_time(prev_time, time, prev_clk_expr, clk_expr, -1, 1.0e-12)
+        {
             for idx in 0..2 {
                 transition_evaluate_one(
                     &mut current[idx],
@@ -1806,7 +1862,7 @@ pub fn cmp_delay_trace_for_arrays(
                     rises[idx],
                     falls[idx],
                     &mut active[idx],
-                    time,
+                    clk_cross_time,
                 );
                 transition_set_target_one(
                     &mut current[idx],
@@ -1817,7 +1873,7 @@ pub fn cmp_delay_trace_for_arrays(
                     &mut rises[idx],
                     &mut falls[idx],
                     &mut active[idx],
-                    time,
+                    clk_cross_time,
                     0.0,
                     0.0,
                     tedge,
@@ -1850,35 +1906,39 @@ pub fn cmp_delay_trace_for_arrays(
             time,
         );
         let outp_expr = outp_val - edge_vth;
-        if armed && threshold_crossed(prev_outp_expr, outp_expr, 1, 1.0e-12) {
-            let delay_ps = (time - t_start) * 1.0e12;
-            transition_evaluate_one(
-                &mut current[2],
-                target_values[2],
-                start_times[2],
-                start_values[2],
-                delays[2],
-                rises[2],
-                falls[2],
-                &mut active[2],
-                time,
-            );
-            transition_set_target_one(
-                &mut current[2],
-                &mut target_values[2],
-                &mut start_times[2],
-                &mut start_values[2],
-                &mut delays[2],
-                &mut rises[2],
-                &mut falls[2],
-                &mut active[2],
-                time,
-                delay_ps,
-                0.0,
-                10.0e-12,
-                10.0e-12,
-            );
-            armed = false;
+        if armed {
+            if let Some(outp_cross_time) =
+                threshold_cross_time(prev_time, time, prev_outp_expr, outp_expr, 1, 1.0e-12)
+            {
+                let delay_ps = (outp_cross_time - t_start) * 1.0e12;
+                transition_evaluate_one(
+                    &mut current[2],
+                    target_values[2],
+                    start_times[2],
+                    start_values[2],
+                    delays[2],
+                    rises[2],
+                    falls[2],
+                    &mut active[2],
+                    outp_cross_time,
+                );
+                transition_set_target_one(
+                    &mut current[2],
+                    &mut target_values[2],
+                    &mut start_times[2],
+                    &mut start_values[2],
+                    &mut delays[2],
+                    &mut rises[2],
+                    &mut falls[2],
+                    &mut active[2],
+                    outp_cross_time,
+                    delay_ps,
+                    0.0,
+                    10.0e-12,
+                    10.0e-12,
+                );
+                armed = false;
+            }
         }
         let delay_val = transition_evaluate_one(
             &mut current[2],

@@ -613,16 +613,21 @@ class Simulator:
         tstep: float,
         max_step: float,
     ) -> Optional[SimResult]:
+        fastpath_t0 = _wall_time.perf_counter()
         self._perf_stats["rust_sim_program_requested"] = 1
         if rust_backend is None:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = "rust_backend_unavailable"
             return None
 
+        lower_t0 = _wall_time.perf_counter()
         report = build_source_record_rust_program(
             sources=self.sources,
             recorded_signals=self.recorded_signals.keys(),
             models=self.models,
+        )
+        self._perf_stats["rust_sim_program_lower_elapsed_s"] = (
+            _wall_time.perf_counter() - lower_t0
         )
         if not report.supported or report.program is None:
             self._perf_stats["rust_sim_program_rejections"] += 1
@@ -647,13 +652,18 @@ class Simulator:
         self._perf_stats["rust_sim_program_transition_count"] = len(
             program.transitions
         )
+        abi_t0 = _wall_time.perf_counter()
         try:
             rust_program = rust_backend.make_source_record_program(program)
         except RustBackendError as exc:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = f"abi_program_build_failed:{exc}"
             return None
+        self._perf_stats["rust_sim_program_abi_build_elapsed_s"] = (
+            _wall_time.perf_counter() - abi_t0
+        )
 
+        grid_t0 = _wall_time.perf_counter()
         raw_times = list(
             self._whole_segment_uniform_times(
                 tstop=tstop,
@@ -672,10 +682,16 @@ class Simulator:
                 capacity,
                 128 + 8 * max(base_steps, len(raw_times), len(program.events) + 1),
             )
+        self._perf_stats["rust_sim_program_time_grid_elapsed_s"] = (
+            _wall_time.perf_counter() - grid_t0
+        )
 
         last_runtime_error: RustBackendError | None = None
         runtime_succeeded = False
+        runtime_t0 = _wall_time.perf_counter()
+        attempts = 0
         for _attempt in range(6):
+            attempts += 1
             try:
                 (
                     times,
@@ -700,6 +716,11 @@ class Simulator:
                 if "code -841" not in message and "capacity" not in message:
                     break
                 capacity *= 2
+        self._perf_stats["rust_sim_program_runtime_elapsed_s"] = (
+            _wall_time.perf_counter() - runtime_t0
+        )
+        self._perf_stats["rust_sim_program_runtime_attempts"] = attempts
+        self._perf_stats["rust_sim_program_final_capacity"] = capacity
         if not runtime_succeeded:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = f"runtime_failed:{last_runtime_error}"
@@ -723,6 +744,7 @@ class Simulator:
         self._perf_stats["rust_sim_program_side_effects"] = int(
             stats.get("side_effects", 0)
         )
+        record_t0 = _wall_time.perf_counter()
         result = self._record_trace_result(
             times,
             columns,
@@ -733,6 +755,10 @@ class Simulator:
             ),
             step_count=max(0, len(times) - 1),
         )
+        self._perf_stats["rust_sim_program_record_replay_elapsed_s"] = (
+            _wall_time.perf_counter() - record_t0
+        )
+        sync_t0 = _wall_time.perf_counter()
         for name, value in zip(program.node_names, node_values):
             self.node_voltages[name] = float(value)
         for state, value in zip(program.states, state_values):
@@ -753,6 +779,12 @@ class Simulator:
                 model.arrays[array_name][int(idx)] = state_value
             else:
                 model.state[state_name] = state_value
+        self._perf_stats["rust_sim_program_state_sync_elapsed_s"] = (
+            _wall_time.perf_counter() - sync_t0
+        )
+        self._perf_stats["rust_sim_program_fastpath_total_elapsed_s"] = (
+            _wall_time.perf_counter() - fastpath_t0
+        )
         return result
 
     def _whole_segment_uniform_times(
@@ -3698,6 +3730,8 @@ class Simulator:
         self._perf_stats = {
             "source_breakpoint_clamps": 0,
             "model_breakpoint_clamps": 0,
+            "transition_target_breakpoint_scan_calls": 0,
+            "transition_target_breakpoint_clamps": 0,
             "bound_step_clamps": 0,
             "min_step_clamps": 0,
             "cross_refine_triggers": 0,
@@ -3963,6 +3997,15 @@ class Simulator:
             "rust_sim_program_event_fires": 0,
             "rust_sim_program_transition_breakpoints": 0,
             "rust_sim_program_rejections": 0,
+            "rust_sim_program_lower_elapsed_s": 0.0,
+            "rust_sim_program_abi_build_elapsed_s": 0.0,
+            "rust_sim_program_time_grid_elapsed_s": 0.0,
+            "rust_sim_program_runtime_elapsed_s": 0.0,
+            "rust_sim_program_runtime_attempts": 0,
+            "rust_sim_program_final_capacity": 0,
+            "rust_sim_program_record_replay_elapsed_s": 0.0,
+            "rust_sim_program_state_sync_elapsed_s": 0.0,
+            "rust_sim_program_fastpath_total_elapsed_s": 0.0,
             "rust_full_model_prbs7_points": 0,
             "rust_full_model_prbs7_cross_events": 0,
             "rust_full_model_prbs7_scheduled_crosses": 0,
@@ -5008,6 +5051,13 @@ class Simulator:
                 model_has_dynamic_breakpoints,
             )
             if has_dynamic_breakpoints
+        ]
+        transition_target_breakpoint_models = [
+            model
+            for model in self.models
+            if bool(
+                getattr(model, "_has_transition_target_probes_tree", lambda: False)()
+            )
         ]
         model_uses_bound_step = tuple(
             bool(getattr(model, "_uses_bound_step_tree", lambda: True)())
@@ -6488,6 +6538,21 @@ class Simulator:
                     dt = 1e-18
             if profile_clock is not None:
                 _add_profile_time("model_breakpoint_scan_s", _section_start)
+
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            self._perf_stats["transition_target_breakpoint_scan_calls"] += len(
+                transition_target_breakpoint_models
+            )
+            for model in transition_target_breakpoint_models:
+                bp = model.transition_target_breakpoint(self.node_voltages, time, dt)
+                if bp is not None and bp > time and bp < time + dt:
+                    dt = bp - time
+                    force_record_point = True
+                    self._perf_stats["transition_target_breakpoint_clamps"] += 1
+                    if dt < 1e-18:
+                        dt = 1e-18
+            if profile_clock is not None:
+                _add_profile_time("transition_target_breakpoint_scan_s", _section_start)
 
             # Respect $bound_step from models
             _section_start = profile_clock() if profile_clock is not None else 0.0

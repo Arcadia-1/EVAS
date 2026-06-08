@@ -29,6 +29,7 @@ from .spectre_parser import (
 )
 
 VERSION = '0.1.0'
+DEFAULT_EVAS_ENGINE = "evas2"
 
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
@@ -72,6 +73,24 @@ def _simopt_bool(simopt: Dict[str, object], key: str, default: bool = False) -> 
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
+
+
+def _configured_evas_engine(simopt: Dict[str, object]) -> str:
+    """Resolve EVAS engine selection.
+
+    EVAS2 is now the default production engine.  Keep explicit simulatorOptions
+    and EVAS_ENGINE environment overrides so targeted compatibility/debug runs
+    can still request the legacy Python engine with ``evas_engine=python`` or
+    ``EVAS_ENGINE=python``.
+    """
+
+    explicit = str(simopt.get("evas_engine", "")).strip().lower()
+    if explicit:
+        return explicit
+    env_engine = os.environ.get("EVAS_ENGINE", "").strip().lower()
+    if env_engine:
+        return env_engine
+    return DEFAULT_EVAS_ENGINE
 
 
 def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
@@ -1183,11 +1202,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_FULL_MODEL_FASTPATH", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    evas_engine = str(simopt.get("evas_engine", "")).strip().lower()
+    evas_engine = _configured_evas_engine(simopt)
     evas2_engine = (
         evas_engine in {"evas2", "rust2"}
         or _simopt_bool(simopt, "evas2", False)
-        or os.environ.get("EVAS_ENGINE", "").strip().lower() in {"evas2", "rust2"}
     )
     rust_full_model_required = _simopt_bool(
         simopt,

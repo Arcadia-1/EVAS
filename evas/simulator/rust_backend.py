@@ -151,6 +151,7 @@ class RustSimTransitionSpec(ctypes.Structure):
         ("output_bias_expr_count", ctypes.c_size_t),
         ("output_scale_expr_start", ctypes.c_size_t),
         ("output_scale_expr_count", ctypes.c_size_t),
+        ("default_transition", ctypes.c_double),
     ]
 
 
@@ -199,6 +200,8 @@ BODY_EXPR_RDIST_NORMAL = 80
 
 BODY_TARGET_NODE = 0
 BODY_TARGET_STATE = 1
+BODY_STMT_WHILE = 245
+BODY_STMT_ENDWHILE = 246
 BODY_STMT_FILE_OPEN = 247
 BODY_STMT_FILE_WRITE = 248
 BODY_STMT_FILE_CLOSE = 249
@@ -347,6 +350,7 @@ class RustSimSourceRecordProgram:
                     int(getattr(transition, "output_bias_expr_count", 0)),
                     int(getattr(transition, "output_scale_expr_start", 0)),
                     int(getattr(transition, "output_scale_expr_count", 0)),
+                    float(getattr(transition, "default_transition", 1.0e-12) or 1.0e-12),
                 )
             )
         event_array_type = RustSimEventSpec * len(event_specs)

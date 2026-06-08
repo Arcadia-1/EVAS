@@ -177,10 +177,69 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
 ) -> Result<(), i32> {
     let mut stack: Vec<f64> = Vec::with_capacity(32);
     let mut branch_active_stack: Vec<u8> = Vec::with_capacity(8);
+    let mut loop_stack: Vec<(usize, usize)> = Vec::with_capacity(4);
     let mut pc = 0_usize;
     while pc < stmt_ops.len() {
         let stmt = stmt_ops[pc];
         match stmt.target_kind {
+            BODY_STMT_WHILE => {
+                let parent_active = branch_active_stack.iter().all(|flag| *flag != 0);
+                if !parent_active {
+                    let end_pc = find_matching_endwhile(stmt_ops, pc)?;
+                    pc = end_pc.checked_add(1).ok_or(-2231)?;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let cond_value = stack.pop().ok_or(-2208)?;
+                if !stack.is_empty() {
+                    return Err(-2209);
+                }
+                if cond_value == 0.0 {
+                    if matches!(loop_stack.last(), Some((while_pc, _)) if *while_pc == pc) {
+                        loop_stack.pop();
+                    }
+                    let end_pc = find_matching_endwhile(stmt_ops, pc)?;
+                    pc = end_pc.checked_add(1).ok_or(-2231)?;
+                    continue;
+                }
+                if !matches!(loop_stack.last(), Some((while_pc, _)) if *while_pc == pc) {
+                    loop_stack.push((pc, 0));
+                }
+                branch_active_stack.push(1);
+            }
+            BODY_STMT_ENDWHILE => {
+                let (while_pc, iterations) = *loop_stack.last().ok_or(-2232)?;
+                let while_stmt = stmt_ops.get(while_pc).ok_or(-2233)?;
+                let max_iters = if while_stmt.target_id == 0 {
+                    4096
+                } else {
+                    while_stmt.target_id
+                };
+                let next_iterations = iterations.checked_add(1).ok_or(-2234)?;
+                if next_iterations > max_iters {
+                    return Err(-2235);
+                }
+                if let Some(frame) = loop_stack.last_mut() {
+                    frame.1 = next_iterations;
+                }
+                if branch_active_stack.pop().is_none() {
+                    return Err(-2236);
+                }
+                pc = while_pc;
+                continue;
+            }
             BODY_STMT_IF => {
                 let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
                 if expr_end > expr_ops.len() {
@@ -353,7 +412,31 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
     if !branch_active_stack.is_empty() {
         return Err(-2215);
     }
+    if !loop_stack.is_empty() {
+        return Err(-2237);
+    }
     Ok(())
+}
+
+fn find_matching_endwhile(stmt_ops: &[EvasRustBodyStmtOp], while_pc: usize) -> Result<usize, i32> {
+    let mut depth = 0_usize;
+    let mut pc = while_pc.checked_add(1).ok_or(-2231)?;
+    while pc < stmt_ops.len() {
+        match stmt_ops[pc].target_kind {
+            BODY_STMT_WHILE => {
+                depth = depth.checked_add(1).ok_or(-2238)?;
+            }
+            BODY_STMT_ENDWHILE => {
+                if depth == 0 {
+                    return Ok(pc);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        pc += 1;
+    }
+    Err(-2239)
 }
 
 pub fn evaluate_body_expr_ops(

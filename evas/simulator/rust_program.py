@@ -211,6 +211,7 @@ class RustSimTransition:
     output_bias_expr_count: int = 0
     output_scale_expr_start: int = 0
     output_scale_expr_count: int = 0
+    default_transition: float = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -587,7 +588,13 @@ class _RustSimSideEffectBuilder:
 
 def _external_node(model: Any, local_name: str) -> str:
     node_map = getattr(model, "node_map", {}) or {}
-    return str(node_map.get(local_name, local_name))
+    if local_name in node_map:
+        return str(node_map[local_name])
+    local_folded = str(local_name).casefold()
+    for key, value in node_map.items():
+        if str(key).casefold() == local_folded:
+            return str(value)
+    return str(local_name)
 
 
 def _scalar(model: Any, value: Any) -> tuple[Optional[float], Optional[str]]:
@@ -965,9 +972,19 @@ def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
 
     if isinstance(stmt_ir, ContributionIR):
         if stmt_ir.branch.access_type == "V":
-            nodes.add(str(stmt_ir.branch.node1))
+            node1_name = static_node_ref_name(
+                stmt_ir.branch.node1,
+                stmt_ir.branch.node1_index,
+                stmt_ir.branch.node1_index2,
+            )
+            nodes.add(str(node1_name or stmt_ir.branch.node1))
             if stmt_ir.branch.node2 is not None:
-                nodes.add(str(stmt_ir.branch.node2))
+                node2_name = static_node_ref_name(
+                    stmt_ir.branch.node2,
+                    stmt_ir.branch.node2_index,
+                    stmt_ir.branch.node2_index2,
+                )
+                nodes.add(str(node2_name or stmt_ir.branch.node2))
         return frozenset(nodes)
 
     if isinstance(stmt_ir, EventStatementIR):
@@ -988,6 +1005,26 @@ def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
         return frozenset(nodes)
 
     return frozenset()
+
+
+def _collect_global_contributed_nodes(models: Iterable[Any]) -> frozenset[str]:
+    nodes: set[str] = set()
+    for model in models:
+        model_cls = getattr(model, "__class__", type(model))
+        module = getattr(model_cls, "_module_ast", None)
+        analog_block = (
+            getattr(module, "analog_block", None) if module is not None else None
+        )
+        body_ast = getattr(analog_block, "body", None)
+        if body_ast is None:
+            continue
+        try:
+            body_ir = lower_stmt(body_ast)
+        except Exception:
+            continue
+        for local_name in _collect_contributed_nodes(body_ir):
+            nodes.add(_external_node(model, local_name))
+    return frozenset(nodes)
 
 
 def _expr_references_nodes(expr_ir: ExprIR, nodes: frozenset[str]) -> bool:
@@ -1309,6 +1346,7 @@ def _convert_event_transition_ops(
     *,
     model: Any,
     model_index: int,
+    global_contributed_nodes: frozenset[str],
     node_ids: dict[str, int],
     nodes: list[RustSimNode],
     state_ids: dict[tuple[int, str], int],
@@ -1375,6 +1413,12 @@ def _convert_event_transition_ops(
     seen_transition = False
     contributed_nodes = _collect_contributed_nodes(body_ir)
     side_effect_builder = _RustSimSideEffectBuilder(model)
+    phase_contributed_nodes = set(contributed_nodes)
+    if global_contributed_nodes:
+        for local_name in local_node_slots:
+            if _external_node(model, local_name) in global_contributed_nodes:
+                phase_contributed_nodes.add(local_name)
+    phase_contributed_nodes = frozenset(phase_contributed_nodes)
 
     def flush_continuous_body(phase: int = EVENT_PHASE_PRE) -> None:
         nonlocal converted_always_bodies, pending_continuous
@@ -1441,7 +1485,7 @@ def _convert_event_transition_ops(
                 ):
                     reasons.append(f"{prefix}:event_body:{tag}")
                 continue
-            trigger_phases = _event_trigger_phases(stmt.event, contributed_nodes)
+            trigger_phases = _event_trigger_phases(stmt.event, phase_contributed_nodes)
             if len(trigger_phases) != len(due_program.triggers):
                 reasons.append(f"{prefix}:event_phase_trigger_mismatch")
                 continue
@@ -1618,6 +1662,10 @@ def _convert_event_transition_ops(
                         output_bias_expr_count=output_bias_count,
                         output_scale_expr_start=output_scale_start,
                         output_scale_expr_count=output_scale_count,
+                        default_transition=float(
+                            getattr(model, "default_transition", 1.0e-12)
+                            or 1.0e-12
+                        ),
                     )
                 )
                 converted_transitions += 1
@@ -1728,6 +1776,7 @@ def build_source_record_rust_program(
     source_list = tuple(sources)
     record_names = tuple(str(name) for name in recorded_signals)
     model_list = tuple(models)
+    global_contributed_nodes = _collect_global_contributed_nodes(model_list)
     reasons: list[str] = []
     if not record_names:
         reasons.append("no_recorded_signals")
@@ -1781,6 +1830,7 @@ def build_source_record_rust_program(
             event_reasons = _convert_event_transition_ops(
                 model=model,
                 model_index=model_index,
+                global_contributed_nodes=global_contributed_nodes,
                 node_ids=node_ids,
                 nodes=nodes,
                 state_ids=state_ids,

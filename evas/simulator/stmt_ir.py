@@ -49,11 +49,13 @@ from evas.simulator.expr_ir import (
 from evas.simulator.rust_backend import (
     BODY_STMT_BOUND_STEP,
     BODY_STMT_ELSE,
+    BODY_STMT_ENDWHILE,
     BODY_STMT_ENDIF,
     BODY_STMT_FILE_CLOSE,
     BODY_STMT_FILE_OPEN,
     BODY_STMT_FILE_WRITE,
     BODY_STMT_IF,
+    BODY_STMT_WHILE,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
     BodyExprOp,
@@ -409,7 +411,6 @@ def _iter_body_rejection_tags(
         return
 
     if isinstance(stmt_ir, WhileStatementIR):
-        yield "while_loop"
         if encode_body_expr_ops(stmt_ir.cond, bindings, node_slots) is None:
             yield from _iter_expr_rejection_tags(stmt_ir.cond, bindings, node_slots)
         yield from _iter_body_rejection_tags(stmt_ir.body, bindings, node_slots)
@@ -801,6 +802,41 @@ def _append_body_stmt_ops(
             expr_ops,
             side_effects=side_effects,
         )
+
+    if isinstance(stmt_ir, WhileStatementIR):
+        encoded_cond = encode_body_expr_ops(stmt_ir.cond, bindings, node_slots)
+        if encoded_cond is None:
+            return False
+        expr_start = len(expr_ops)
+        expr_ops.extend(encoded_cond)
+        stmt_ops.append(
+            BodyStmtOp(
+                target_kind=BODY_STMT_WHILE,
+                target_id=4096,
+                expr_start=expr_start,
+                expr_count=len(encoded_cond),
+                target_integer=False,
+            )
+        )
+        if not _append_body_stmt_ops(
+            stmt_ir.body,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+            side_effects=side_effects,
+        ):
+            return False
+        stmt_ops.append(
+            BodyStmtOp(
+                target_kind=BODY_STMT_ENDWHILE,
+                target_id=0,
+                expr_start=0,
+                expr_count=0,
+                target_integer=False,
+            )
+        )
+        return True
 
     if isinstance(stmt_ir, CaseStatementIR):
         lowered = _case_statement_to_if_chain(stmt_ir)

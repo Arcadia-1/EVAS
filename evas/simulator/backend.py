@@ -106,6 +106,7 @@ class CompiledModel:
     _has_dynamic_breakpoints: bool = True
     _has_post_update_events: bool = True
     _uses_bound_step: bool = True
+    _transition_target_probe_count: int = 0
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
@@ -1932,6 +1933,92 @@ class CompiledModel:
             bp = child.next_breakpoint(time)
             if bp is not None and (best is None or bp < best):
                 best = bp
+        return best
+
+    def _has_transition_target_probes_tree(self) -> bool:
+        own = int(getattr(self.__class__, "_transition_target_probe_count", 0)) > 0
+        return own or any(
+            child._has_transition_target_probes_tree()
+            for child in self._child_models
+        )
+
+    def _transition_target_probe_values(
+        self,
+        nv: Dict[str, float],
+        time: float,
+    ) -> Tuple[float, ...]:
+        return ()
+
+    def transition_target_breakpoint(
+        self,
+        nv: Dict[str, float],
+        time: float,
+        dt: float,
+    ) -> Optional[float]:
+        """Predict a step-local breakpoint for discontinuous transition targets.
+
+        The normal transition state scanner only sees breakpoints after
+        transition() has been called with a new target.  For targets such as
+        ``transition(phase <= tw ? 1 : 0, ...)``, the target may flip inside the
+        proposed step.  Spectre-style transient engines shrink the step to that
+        discontinuity before updating the transition state; this probe mirrors
+        the side-effect-free continuous assignments and detects that flip.
+        """
+        if dt <= 0.0:
+            return None
+
+        best = self._transition_target_breakpoint_local(nv, time, dt)
+        for child in self._child_models:
+            bp = child.transition_target_breakpoint(nv, time, dt)
+            if bp is not None and bp > time and bp < time + dt:
+                if best is None or bp < best:
+                    best = bp
+        return best
+
+    def _transition_target_breakpoint_local(
+        self,
+        nv: Dict[str, float],
+        time: float,
+        dt: float,
+    ) -> Optional[float]:
+        if int(getattr(self.__class__, "_transition_target_probe_count", 0)) <= 0:
+            return None
+        try:
+            start_values = tuple(float(v) for v in self._transition_target_probe_values(nv, time))
+            end_values = tuple(float(v) for v in self._transition_target_probe_values(nv, time + dt))
+        except Exception:
+            return None
+        if len(start_values) != len(end_values) or not start_values:
+            return None
+
+        eps = 1.0e-15
+        best: Optional[float] = None
+        for idx, (start, end) in enumerate(zip(start_values, end_values)):
+            if not (math.isfinite(start) and math.isfinite(end)):
+                continue
+            if abs(start - end) <= eps:
+                continue
+            lo = time
+            hi = time + dt
+            start_ref = start
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                if mid <= lo or mid >= hi:
+                    break
+                try:
+                    mid_values = self._transition_target_probe_values(nv, mid)
+                    mid_val = float(mid_values[idx])
+                except Exception:
+                    break
+                if math.isfinite(mid_val) and abs(mid_val - start_ref) <= eps:
+                    lo = mid
+                else:
+                    hi = mid
+            min_sep = max(1.0e-18, abs(dt) * 1.0e-12)
+            candidate = max(hi, time + min_sep)
+            if candidate > time and candidate < time + dt:
+                if best is None or candidate < best:
+                    best = candidate
         return best
 
     def _invalidate_timer_breakpoint_cache(self):
@@ -4810,6 +4897,13 @@ class _ModuleCompiler:
         lines.append("            self._flush_transitions(nv, time)")
         lines.append("        pass")
 
+        transition_target_probe_lines, transition_target_probe_count = (
+            self._compile_transition_target_probe_method(mod.analog_block.body)
+            if mod.analog_block
+            else self._compile_transition_target_probe_method(None)
+        )
+        lines.extend(transition_target_probe_lines)
+
         # Generate final_step method
         lines.append("")
         lines.append("    def final_step(self, nv, time):")
@@ -4889,6 +4983,7 @@ class _ModuleCompiler:
             evaluate_ir_static_linear_rejections
         )
         cls._transition_target_ir_ops = tuple(transition_target_ir_ops)
+        cls._transition_target_probe_count = int(transition_target_probe_count)
         cls._ordered_transition_segment_ir_ops = ordered_transition_segment_ir_ops
         cls._event_lfsr_shift_ir_ops = tuple(self._event_lfsr_shift_ir_ops.values())
         cls._event_static_linear_ir_ops = tuple(
@@ -12179,6 +12274,484 @@ class _ModuleCompiler:
                 if not default_lines:
                     lines.append(f"{prefix}    pass")
         return lines
+
+    def _compile_transition_target_probe_method(self, stmt) -> Tuple[List[str], int]:
+        """Generate a read-only probe for discontinuous transition() targets.
+
+        The generated method mirrors side-effect-free continuous assignments
+        into a private ``_probe_state`` and records target values for transition
+        calls whose targets are driven by discrete conditions.  It intentionally
+        skips event bodies and system/file side effects.
+        """
+        assignment_exprs: Dict[str, Expr] = {}
+        conditionally_assigned: set[str] = set()
+        self._collect_transition_probe_assignments(
+            stmt,
+            assignment_exprs,
+            conditionally_assigned,
+            under_condition=False,
+        )
+
+        lines = [
+            "",
+            "    def _transition_target_probe_values(self, nv, time):",
+            "        _probe_state = dict(self.state)",
+            "        _probe_time = time",
+            "        _probe_values = []",
+            "        try:",
+        ]
+        body_lines: List[str] = []
+        probe_count = self._compile_transition_probe_stmt(
+            stmt,
+            3,
+            body_lines,
+            assignment_exprs,
+            conditionally_assigned,
+        )
+        if body_lines:
+            lines.extend(body_lines)
+        else:
+            lines.append("            pass")
+        lines.extend(
+            [
+                "        except Exception:",
+                "            return ()",
+                "        return tuple(_probe_values)",
+            ]
+        )
+        return lines, probe_count
+
+    def _collect_transition_probe_assignments(
+        self,
+        stmt,
+        assignment_exprs: Dict[str, Expr],
+        conditionally_assigned: set[str],
+        *,
+        under_condition: bool,
+    ) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_transition_probe_assignments(
+                    child,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    under_condition=under_condition,
+                )
+            return
+        if isinstance(stmt, EventStatement):
+            return
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, Identifier):
+                name = stmt.target.name
+                assignment_exprs[name] = stmt.value
+                if under_condition:
+                    conditionally_assigned.add(name)
+            return
+        if isinstance(stmt, IfStatement):
+            self._collect_transition_probe_assignments(
+                stmt.then_body,
+                assignment_exprs,
+                conditionally_assigned,
+                under_condition=True,
+            )
+            if stmt.else_body is not None:
+                self._collect_transition_probe_assignments(
+                    stmt.else_body,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    under_condition=True,
+                )
+            return
+        if isinstance(stmt, ForStatement):
+            self._collect_transition_probe_assignments(
+                stmt.body,
+                assignment_exprs,
+                conditionally_assigned,
+                under_condition=True,
+            )
+            return
+        if isinstance(stmt, WhileStatement):
+            self._collect_transition_probe_assignments(
+                stmt.body,
+                assignment_exprs,
+                conditionally_assigned,
+                under_condition=True,
+            )
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._collect_transition_probe_assignments(
+                    item.body,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    under_condition=True,
+                )
+
+    def _compile_transition_probe_stmt(
+        self,
+        stmt,
+        indent: int,
+        lines: List[str],
+        assignment_exprs: Dict[str, Expr],
+        conditionally_assigned: set[str],
+    ) -> int:
+        if stmt is None:
+            return 0
+        prefix = "    " * indent
+        probe_count = 0
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                probe_count += self._compile_transition_probe_stmt(
+                    child,
+                    indent,
+                    lines,
+                    assignment_exprs,
+                    conditionally_assigned,
+                )
+            return probe_count
+        if isinstance(stmt, EventStatement):
+            return 0
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, Identifier):
+                name = stmt.target.name
+                value = self._compile_transition_probe_expr(stmt.value)
+                if self._is_integer_variable(name):
+                    value = f"self._to_integer({value})"
+                lines.append(f"{prefix}_probe_state[{name!r}] = {value}")
+            return 0
+        if isinstance(stmt, IfStatement):
+            cond = self._compile_transition_probe_expr(stmt.cond)
+            then_lines: List[str] = []
+            then_count = self._compile_transition_probe_stmt(
+                stmt.then_body,
+                indent + 1,
+                then_lines,
+                assignment_exprs,
+                conditionally_assigned,
+            )
+            else_lines: List[str] = []
+            else_count = 0
+            if stmt.else_body is not None:
+                else_count = self._compile_transition_probe_stmt(
+                    stmt.else_body,
+                    indent + 1,
+                    else_lines,
+                    assignment_exprs,
+                    conditionally_assigned,
+                )
+            lines.append(f"{prefix}if {cond}:")
+            lines.extend(then_lines or [f"{prefix}    pass"])
+            if stmt.else_body is not None:
+                lines.append(f"{prefix}else:")
+                lines.extend(else_lines or [f"{prefix}    pass"])
+            return then_count + else_count
+        if isinstance(stmt, Contribution):
+            for target in self._iter_transition_targets_in_expr(stmt.expr):
+                if not self._transition_probe_target_is_discrete(
+                    target,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=set(),
+                ):
+                    continue
+                target_code = self._compile_transition_probe_expr(target)
+                lines.append(f"{prefix}_probe_values.append(float({target_code}))")
+                probe_count += 1
+            return probe_count
+        if isinstance(stmt, SystemTask):
+            return 0
+        # Loops/case statements can carry complex stateful semantics.  The
+        # conservative probe skips them instead of guessing and perturbing the
+        # transient schedule.
+        return 0
+
+    def _iter_transition_targets_in_expr(self, expr: Expr):
+        if isinstance(expr, FunctionCall):
+            if expr.name == "transition" and expr.args:
+                yield expr.args[0]
+            for arg in expr.args:
+                yield from self._iter_transition_targets_in_expr(arg)
+            return
+        if isinstance(expr, BinaryExpr):
+            yield from self._iter_transition_targets_in_expr(expr.left)
+            yield from self._iter_transition_targets_in_expr(expr.right)
+            return
+        if isinstance(expr, UnaryExpr):
+            yield from self._iter_transition_targets_in_expr(expr.operand)
+            return
+        if isinstance(expr, TernaryExpr):
+            yield from self._iter_transition_targets_in_expr(expr.cond)
+            yield from self._iter_transition_targets_in_expr(expr.true_expr)
+            yield from self._iter_transition_targets_in_expr(expr.false_expr)
+            return
+        if isinstance(expr, ArrayAccess):
+            yield from self._iter_transition_targets_in_expr(expr.index)
+            return
+        if isinstance(expr, BranchAccess):
+            for sub in (
+                expr.node1_index,
+                expr.node2_index,
+                expr.node1_index2,
+                expr.node2_index2,
+            ):
+                if sub is not None:
+                    yield from self._iter_transition_targets_in_expr(sub)
+            return
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                yield from self._iter_transition_targets_in_expr(arg)
+
+    def _transition_probe_target_is_discrete(
+        self,
+        expr: Expr,
+        assignment_exprs: Dict[str, Expr],
+        conditionally_assigned: set[str],
+        *,
+        seen: set[str],
+    ) -> bool:
+        if isinstance(expr, TernaryExpr):
+            return True
+        if isinstance(expr, BinaryExpr):
+            if expr.op in {">", "<", ">=", "<=", "==", "!=", "&&", "||"}:
+                return True
+            return (
+                self._transition_probe_target_is_discrete(
+                    expr.left,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+                or self._transition_probe_target_is_discrete(
+                    expr.right,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+            )
+        if isinstance(expr, UnaryExpr):
+            if expr.op in {"!", "~"}:
+                return True
+            return self._transition_probe_target_is_discrete(
+                expr.operand,
+                assignment_exprs,
+                conditionally_assigned,
+                seen=seen,
+            )
+        if isinstance(expr, Identifier):
+            name = expr.name
+            if name in conditionally_assigned:
+                return True
+            if name in seen:
+                return False
+            assigned = assignment_exprs.get(name)
+            if assigned is None:
+                return False
+            return self._transition_probe_target_is_discrete(
+                assigned,
+                assignment_exprs,
+                conditionally_assigned,
+                seen=seen | {name},
+            )
+        if isinstance(expr, ArrayAccess):
+            return self._transition_probe_target_is_discrete(
+                expr.index,
+                assignment_exprs,
+                conditionally_assigned,
+                seen=seen,
+            )
+        if isinstance(expr, FunctionCall):
+            return any(
+                self._transition_probe_target_is_discrete(
+                    arg,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+                for arg in expr.args
+            )
+        if isinstance(expr, BranchAccess):
+            return any(
+                sub is not None
+                and self._transition_probe_target_is_discrete(
+                    sub,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+                for sub in (
+                    expr.node1_index,
+                    expr.node2_index,
+                    expr.node1_index2,
+                    expr.node2_index2,
+                )
+            )
+        if isinstance(expr, MethodCall):
+            return any(
+                self._transition_probe_target_is_discrete(
+                    arg,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+                for arg in expr.args
+            )
+        return False
+
+    def _compile_transition_probe_expr(self, expr: Expr) -> str:
+        if isinstance(expr, NumberLiteral):
+            return repr(expr.value)
+        if isinstance(expr, StringLiteral):
+            return repr(expr.value)
+        if isinstance(expr, Identifier):
+            name = expr.name
+            for p in self.module.parameters:
+                if p.name == name:
+                    return f"self.params[{name!r}]"
+            if name in ("$abstime", "$realtime"):
+                return "_probe_time"
+            if name == "inf":
+                return "float('inf')"
+            if name == "$temperature":
+                return "(self._temperature + 273.15)"
+            if name == "$vt":
+                return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
+            return f"_probe_state.get({name!r}, self.state.get({name!r}, 0.0))"
+        if isinstance(expr, ArrayAccess):
+            idx = self._compile_transition_probe_expr(expr.index)
+            return f"self._array_get({expr.name!r}, int({idx}))"
+        if isinstance(expr, BinaryExpr):
+            left = self._compile_transition_probe_expr(expr.left)
+            right = self._compile_transition_probe_expr(expr.right)
+            op = expr.op
+            if op == "/" and self._expr_is_integer(expr):
+                return f"self._int_div(({left}), ({right}))"
+            if op == "^":
+                return f"(int({left}) ^ int({right}))"
+            if op == "&":
+                return f"(int({left}) & int({right}))"
+            if op == "|":
+                return f"(int({left}) | int({right}))"
+            if op == "<<":
+                return f"(int({left}) << int({right}))"
+            if op == ">>":
+                return f"(int({left}) >> int({right}))"
+            if op == "&&":
+                return f"(({left}) and ({right}))"
+            if op == "||":
+                return f"(({left}) or ({right}))"
+            if op == ">":
+                return f"self._cmp_gt(({left}), ({right}))"
+            if op == "<":
+                return f"self._cmp_lt(({left}), ({right}))"
+            if op == ">=":
+                return f"self._cmp_ge(({left}), ({right}))"
+            if op == "<=":
+                return f"self._cmp_le(({left}), ({right}))"
+            return f"({left} {op} {right})"
+        if isinstance(expr, UnaryExpr):
+            operand = self._compile_transition_probe_expr(expr.operand)
+            if expr.op == "!":
+                return f"(not ({operand}))"
+            if expr.op == "~":
+                return f"(~int({operand}))"
+            return f"({expr.op}{operand})"
+        if isinstance(expr, TernaryExpr):
+            cond = self._compile_transition_probe_expr(expr.cond)
+            true_e = self._compile_transition_probe_expr(expr.true_expr)
+            false_e = self._compile_transition_probe_expr(expr.false_expr)
+            return f"(({true_e}) if ({cond}) else ({false_e}))"
+        if isinstance(expr, BranchAccess):
+            if expr.node2:
+                n1 = self._compile_transition_probe_node_voltage(
+                    expr.node1,
+                    expr.node1_index,
+                    expr.node1_index2,
+                )
+                n2 = self._compile_transition_probe_node_voltage(
+                    expr.node2,
+                    expr.node2_index,
+                    expr.node2_index2,
+                )
+                if expr.access_type == "V":
+                    return f"({n1} - {n2})"
+                return "0.0"
+            if expr.access_type == "V":
+                return self._compile_transition_probe_node_voltage(
+                    expr.node1,
+                    expr.node1_index,
+                    expr.node1_index2,
+                )
+            return "0.0"
+        if isinstance(expr, FunctionCall):
+            return self._compile_transition_probe_function_call(expr)
+        if isinstance(expr, MethodCall):
+            return self._compile_transition_probe_method_call(expr)
+        return "0.0"
+
+    def _compile_transition_probe_node_voltage(
+        self,
+        node: str,
+        index_expr=None,
+        index_expr2=None,
+    ) -> str:
+        if index_expr is not None:
+            idx = self._compile_transition_probe_expr(index_expr)
+            if index_expr2 is not None:
+                idx2 = self._compile_transition_probe_expr(index_expr2)
+                node_expr = f"self._resolve_dynamic_node({node!r}, {idx}, {idx2})"
+                return f"self._get_voltage({node_expr}, nv)"
+            node_expr = f"self._resolve_dynamic_node({node!r}, {idx})"
+            return f"self._get_voltage({node_expr}, nv)"
+        return f"self._get_voltage({node!r}, nv)"
+
+    def _compile_transition_probe_function_call(self, expr: FunctionCall) -> str:
+        name = expr.name
+        math_aliases = {
+            "ln", "log", "exp", "sqrt", "abs", "pow", "min", "max",
+            "sin", "cos", "tan", "tanh", "floor", "ceil",
+        }
+        if name.startswith("$") and name[1:] in math_aliases:
+            name = name[1:]
+        args = [self._compile_transition_probe_expr(a) for a in expr.args]
+        if name == "ln":
+            return f"math.log({args[0]})"
+        if name == "log":
+            return f"math.log10({args[0]})"
+        if name == "exp":
+            return f"math.exp({args[0]})"
+        if name == "sqrt":
+            return f"math.sqrt({args[0]})"
+        if name == "abs":
+            return f"abs({args[0]})"
+        if name == "pow":
+            return f"pow({args[0]}, {args[1]})"
+        if name == "min":
+            return f"min({args[0]}, {args[1]})"
+        if name == "max":
+            return f"max({args[0]}, {args[1]})"
+        if name == "sin":
+            return f"math.sin({args[0]})"
+        if name == "cos":
+            return f"math.cos({args[0]})"
+        if name == "tan":
+            return f"math.tan({args[0]})"
+        if name == "tanh":
+            return f"math.tanh({args[0]})"
+        if name == "floor":
+            return f"math.floor({args[0]})"
+        if name == "ceil":
+            return f"math.ceil({args[0]})"
+        if name == "transition" and expr.args:
+            return self._compile_transition_probe_expr(expr.args[0])
+        return "0.0"
+
+    def _compile_transition_probe_method_call(self, expr: MethodCall) -> str:
+        args = [self._compile_transition_probe_expr(a) for a in expr.args]
+        if expr.method == "substr":
+            return f"self.params[{expr.obj!r}][int({args[0]}):int({args[1]})+1]"
+        return "''"
 
     def _compile_expr(self, expr: Expr) -> str:
         """Compile an expression to Python code string."""

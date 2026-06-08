@@ -36,6 +36,42 @@ fn copies_f64_values() {
 }
 
 #[test]
+fn pulse_source_next_breakpoint_uses_ordered_knees() {
+    let source = EvasRustSimSourceSpec {
+        kind: RUST_SIM_SOURCE_PULSE,
+        flags: RUST_SIM_SOURCE_FLAG_HAS_WIDTH,
+        node_id: 0,
+        data_start: 0,
+        data_count: 0,
+        p0: 0.0,
+        p1: 0.9,
+        p2: 1.0e-9,
+        p3: 0.5,
+        p4: 10.0e-12,
+        p5: 10.0e-12,
+        p6: 100.0e-12,
+        p7: 500.0e-12,
+    };
+
+    let cases = [
+        (0.0, Some(100.0e-12)),
+        (100.0e-12, Some(105.0e-12)),
+        (105.0e-12, Some(110.0e-12)),
+        (614.0e-12, Some(615.0e-12)),
+        (619.0e-12, Some(620.0e-12)),
+        (620.0e-12, Some(1.1e-9)),
+    ];
+    for (time, expected) in cases {
+        let breakpoint = rust_sim_source_next_breakpoint(&source, &[], time).unwrap();
+        match (breakpoint, expected) {
+            (Some(value), Some(target)) => assert!((value - target).abs() < 1.0e-24),
+            (None, None) => {}
+            other => panic!("unexpected breakpoint for {time}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn prbs7_trace_generates_clocked_state_bus() {
     let times = [0.0, 0.1e-9, 0.11e-9, 0.12e-9, 1.11e-9, 1.12e-9];
     let mut values = vec![0.0; times.len() * 11];
@@ -349,6 +385,308 @@ fn c_abi_scans_transition_breakpoints() {
     assert_eq!(rc, 0);
     assert_eq!(found, 1);
     assert_eq!(out_time, 2.0e-9);
+}
+
+#[test]
+fn detects_transition_target_change_after_pre_always_state_update() {
+    let body_stmt_ops = [
+        EvasRustBodyStmtOp {
+            target_kind: BODY_STMT_BOUND_STEP,
+            target_integer: 0,
+            target_id: 0,
+            expr_start: 9,
+            expr_count: 3,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 0,
+            target_id: 4,
+            expr_start: 12,
+            expr_count: 3,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: BODY_STMT_IF,
+            target_integer: 0,
+            target_id: 0,
+            expr_start: 15,
+            expr_count: 3,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 0,
+            target_id: 4,
+            expr_start: 18,
+            expr_count: 1,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: BODY_STMT_ENDIF,
+            target_integer: 0,
+            target_id: 0,
+            expr_start: 0,
+            expr_count: 0,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: BODY_STMT_IF,
+            target_integer: 0,
+            target_id: 0,
+            expr_start: 19,
+            expr_count: 3,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 0,
+            target_id: 4,
+            expr_start: 22,
+            expr_count: 1,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: BODY_STMT_ENDIF,
+            target_integer: 0,
+            target_id: 0,
+            expr_start: 0,
+            expr_count: 0,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 0,
+            target_id: 5,
+            expr_start: 23,
+            expr_count: 6,
+        },
+        EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 0,
+            target_id: 6,
+            expr_start: 29,
+            expr_count: 3,
+        },
+    ];
+    let body_expr_ops = [
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_NODE,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_NODE,
+            index: 1,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 3,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 3,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_ADD,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 3,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 2,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_DIV,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_TIME,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 2,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_SUB,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 4,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_LT,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 4,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_GT,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 4,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 1,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_LE,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 1.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_SELECT,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 4,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_PARAM,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_DIV,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_STATE,
+            index: 5,
+            value: 0.0,
+        },
+    ];
+    let events = [EvasRustSimEventSpec {
+        kind: RUST_SIM_EVENT_ALWAYS,
+        phase: RUST_SIM_EVENT_PHASE_PRE,
+        direction: 0,
+        expr_start: 0,
+        expr_count: 0,
+        time_tol_start: 0,
+        time_tol_count: 0,
+        expr_tol_start: 0,
+        expr_tol_count: 0,
+        timer_start_expr_start: 0,
+        timer_start_expr_count: 0,
+        timer_period_expr_start: 0,
+        timer_period_expr_count: 0,
+        body_stmt_start: 0,
+        body_stmt_count: body_stmt_ops.len(),
+    }];
+    let transitions = [EvasRustSimTransitionSpec {
+        output_node_id: 2,
+        reference_node_id: CONDITION_NONE,
+        target_expr_start: 32,
+        target_expr_count: 1,
+        delay_expr_start: 0,
+        delay_expr_count: 0,
+        rise_expr_start: 0,
+        rise_expr_count: 0,
+        fall_expr_start: 0,
+        fall_expr_count: 0,
+        output_bias_expr_start: 0,
+        output_bias_expr_count: 0,
+        output_scale_expr_start: 0,
+        output_scale_expr_count: 0,
+        default_transition: 1.0e-12,
+    }];
+    let param_values = [8.0e-9, 1.5000000000000002e-9, 16.0, 40.0e-12];
+    let node_values = [0.9, 0.0, 0.9];
+    let state_values = [0.9, 0.0, 0.0, 8.0e-9, 1.5e-9, 1.0, 0.1875];
+
+    let breakpoint = rust_sim_next_transition_target_change_breakpoint(
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &body_stmt_ops,
+        &body_expr_ops,
+        &events,
+        &transitions,
+        &param_values,
+        &node_values,
+        &state_values,
+        1.5e-9,
+        0.5e-9,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(breakpoint > 1.5e-9);
+    assert!(breakpoint < 1.50000001e-9);
 }
 
 #[test]
@@ -1567,4 +1905,55 @@ fn evaluates_body_ir_select_and_integer_state_write() {
     )
     .unwrap();
     assert_eq!(state_values[0], 3.0);
+}
+
+#[test]
+fn cmp_delay_trace_measures_interpolated_cross_times() {
+    let signal_count = 6;
+    let edge_vth = 0.45_f64;
+    let vdd = 0.9_f64;
+    let vdiff = 1.0e-3_f64;
+    let tau = 4.34e-12_f64;
+    let td0 = 20.5e-12_f64;
+    let td_min = 20.0e-12_f64;
+    let td_max = 200.0e-12_f64;
+    let tedge = 30.0e-12_f64;
+    let clk_cross = 60.0e-12_f64;
+    let td = (td0 + tau * (vdd / vdiff).ln()).min(td_max).max(td_min);
+    let out_cross = clk_cross + td + 0.5 * tedge;
+    let times = vec![
+        0.0,
+        120.0e-12,
+        out_cross,
+        out_cross + 15.0e-12,
+        out_cross + 35.0e-12,
+    ];
+    let point_clk = vec![0.0, vdd, vdd, vdd, vdd];
+    let point_vinn = vec![0.450; times.len()];
+    let point_vinp = vec![0.450 + vdiff; times.len()];
+    let point_vdd = vec![vdd; times.len()];
+    let mut values = vec![0.0; times.len() * signal_count];
+
+    let events = cmp_delay_trace_for_arrays(
+        &times,
+        &mut values,
+        signal_count,
+        &point_clk,
+        &point_vinn,
+        &point_vinp,
+        &point_vdd,
+        0.0,
+        tau,
+        td0,
+        td_min,
+        td_max,
+        tedge,
+        edge_vth,
+    )
+    .unwrap();
+
+    let expected_delay_ps = (td + 0.5 * tedge) * 1.0e12;
+    let final_delay_ps = values[(times.len() - 1) * signal_count + 5];
+    assert_eq!(events, 1);
+    assert!((final_delay_ps - expected_delay_ps).abs() < 1.0e-6);
 }
