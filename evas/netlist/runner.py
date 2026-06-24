@@ -14,7 +14,10 @@ from typing import Dict, List, Optional, TextIO
 import numpy as np
 
 from evas.compiler import ast_nodes as va_ast
-from evas.compiler.parser import parse as parse_va
+from evas.compiler.parser import (
+    SpectreReservedIdentifierError,
+    parse as parse_va,
+)
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
@@ -148,6 +151,51 @@ def _compile_va(
         indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
     )
     return cls, module
+
+
+def _format_spectre_reserved_identifier_error(
+    source: str,
+    error: SpectreReservedIdentifierError,
+) -> List[str]:
+    identifier = str(error.identifier)
+    pattern = _re.compile(rf"\b{_re.escape(identifier)}\b")
+    source_line = None
+    line_no = getattr(getattr(error, "token", None), "line", 1) or 1
+    for idx, line in enumerate(source.splitlines(), start=1):
+        if pattern.search(line):
+            source_line = pattern.sub(f"{identifier}<<--? ", line, count=1)
+            line_no = idx
+            break
+    if source_line is None:
+        source_line = identifier + "<<--? "
+
+    if error.reserved_kind == "built-in function":
+        msg = (
+            f"Identifier \"{identifier}\" is a reserved name for a "
+            "built-in function."
+        )
+        hint = (
+            "Use an identifier that is not a reserved name for a built-in "
+            "function."
+        )
+    elif error.reserved_kind == "simulator library function":
+        msg = (
+            f"Identifier \"{identifier}\" is a reserved name for a simulator "
+            "library function."
+        )
+        hint = (
+            "Use an identifier that is not a reserved name for a simulator "
+            "library function."
+        )
+    else:
+        msg = f"Identifier \"{identifier}\" is reserved by Spectre/AHDL."
+        hint = "Use an identifier that is not reserved by Spectre/AHDL."
+
+    return [
+        f"ERROR (VACOMP-2174): \"{source_line}\"",
+        f"line {line_no}: {msg}",
+        hint,
+    ]
 
 
 def _expr_has_call(expr, call_name: str) -> bool:
@@ -940,8 +988,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             errors += 1
             continue
 
-        original = p.resolve()
-        if va_path != original:
+        expected_path = p.resolve() if p.is_absolute() else (scs_dir / p).resolve()
+        if va_path != expected_path:
             log.write(f"WARNING: ahdl_include resolved to '{va_path.name}' "
                       f"(original path not found, used scs directory fallback)")
             warnings += 1
@@ -952,6 +1000,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 static_branch_fastpath_codegen=static_branch_fastpath,
                 indexed_state_fastpath_codegen=state_local_fastpath,
             )
+        except SpectreReservedIdentifierError as e:
+            source = va_path.read_text(encoding="utf-8", errors="replace")
+            for line in _format_spectre_reserved_identifier_error(source, e):
+                log.write(line)
+            errors += 1
+            continue
         except Exception as e:
             log.write(f"ERROR: Failed to compile Verilog-A file {va_path.name}: {e}")
             errors += 1

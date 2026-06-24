@@ -308,6 +308,52 @@ class TestAhdlIncludePathFallback:
         ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
         assert ok
 
+    def test_reserved_identifier_uses_spectre_vacomp_diagnostic(self, tmp_path):
+        va_file = tmp_path / "sin_port.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module sin_port(sin, out);
+                input sin;
+                output out;
+                electrical sin, out;
+
+                analog begin
+                    V(out) <+ V(sin);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_sin_port.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "sin_port.va"
+
+            Vsin (vin 0) vsource type=dc dc=0.2
+            XDUT (vin out) sin_port
+
+            tran tran stop=1n maxstep=100p
+            save vin out
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert not ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "WARNING: ahdl_include resolved" not in log
+        assert 'ERROR (VACOMP-2174): "module sin_port(sin<<--? , out);"' in log
+        assert 'line 3: Identifier "sin" is a reserved name for a built-in function.' in log
+        assert (
+            "Use an identifier that is not a reserved name for a built-in function."
+            in log
+        )
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance

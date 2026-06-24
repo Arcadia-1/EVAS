@@ -83,6 +83,32 @@ class ParseError(Exception):
         self.token = token
 
 
+class SpectreReservedIdentifierError(ParseError):
+    def __init__(self, token: Token, reserved_kind: str, identifier: str = None):
+        name = identifier or token.value
+        if reserved_kind == "built-in function":
+            msg = (
+                f"Identifier \"{name}\" is a reserved name for a "
+                "built-in function.\nUse an identifier that is not a reserved "
+                "name for a built-in function."
+            )
+        elif reserved_kind == "simulator library function":
+            msg = (
+                f"Identifier \"{name}\" is a reserved name for a "
+                "simulator library function.\nUse an identifier that is not "
+                "a reserved name for a simulator library function."
+            )
+        else:
+            msg = (
+                f"Identifier \"{name}\" is reserved by Spectre/AHDL "
+                "and cannot be used as an identifier."
+            )
+        super().__init__(msg, token)
+        self.identifier = name
+        self.reserved_kind = reserved_kind
+        self.spectre_code = "VACOMP-2174"
+
+
 class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
@@ -124,25 +150,11 @@ class Parser:
                 token,
             )
         if token.value in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
-            raise ParseError(
-                f"Identifier \"{token.value}\" is a reserved name for a "
-                "built-in function.\nUse an identifier that is not a "
-                "reserved name for a built-in function.",
-                token,
-            )
+            raise SpectreReservedIdentifierError(token, "built-in function")
         if token.value in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
-            raise ParseError(
-                f"Identifier \"{token.value}\" is a reserved name for a "
-                "simulator library function.\nUse an identifier that is not "
-                "a reserved name for a simulator library function.",
-                token,
-            )
+            raise SpectreReservedIdentifierError(token, "simulator library function")
         if token.value in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
-            raise ParseError(
-                f"Identifier \"{token.value}\" is reserved by Spectre/AHDL "
-                "and cannot be used as an identifier.",
-                token,
-            )
+            raise SpectreReservedIdentifierError(token, "Spectre/AHDL")
         if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
             raise ParseError(
                 f"Spectre-incompatible {context}: {token.value!r} is a "
@@ -164,25 +176,11 @@ class Parser:
                     token,
                 )
             if target.name in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is a reserved name for a "
-                    "built-in function.\nUse an identifier that is not a "
-                    "reserved name for a built-in function.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "built-in function", target.name)
             if target.name in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is a reserved name for a "
-                    "simulator library function.\nUse an identifier that is "
-                    "not a reserved name for a simulator library function.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "simulator library function", target.name)
             if target.name in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is reserved by Spectre/AHDL "
-                    "and cannot be used as an identifier.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "Spectre/AHDL", target.name)
             return
         if isinstance(target, ArrayAccess):
             if target.name in _SPECTRE_RESERVED_IDENTIFIERS:
@@ -192,25 +190,11 @@ class Parser:
                     token,
                 )
             if target.name in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is a reserved name for a "
-                    "built-in function.\nUse an identifier that is not a "
-                    "reserved name for a built-in function.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "built-in function", target.name)
             if target.name in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is a reserved name for a "
-                    "simulator library function.\nUse an identifier that is "
-                    "not a reserved name for a simulator library function.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "simulator library function", target.name)
             if target.name in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
-                raise ParseError(
-                    f"Identifier \"{target.name}\" is reserved by Spectre/AHDL "
-                    "and cannot be used as an identifier.",
-                    token,
-                )
+                raise SpectreReservedIdentifierError(token, "Spectre/AHDL", target.name)
             return
         raise ParseError(
             "Spectre-incompatible assignment target: left side of '=' must be "
