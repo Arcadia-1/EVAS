@@ -698,6 +698,110 @@ class TestParserEventStatements:
         with pytest.raises(ParseError, match="event keyword"):
             _parse(src)
 
+    def _assert_identifier_is_rejected(self, name: str, expected: str):
+        src = f"""
+        module m({name}, out);
+        input {name};
+        output out;
+        electrical {name}, out;
+        analog begin
+            V(out) <+ V({name});
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError) as excinfo:
+            _parse(src)
+        assert expected in str(excinfo.value)
+
+    def test_builtin_function_name_as_header_port_is_rejected(self):
+        src = """
+        module sin_port(sin, out);
+        input sin;
+        output out;
+        electrical sin, out;
+        analog begin
+            V(out) <+ V(sin);
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError) as excinfo:
+            _parse(src)
+        assert (
+            'Identifier "sin" is a reserved name for a built-in function.\n'
+            'Use an identifier that is not a reserved name for a built-in function.'
+        ) in str(excinfo.value)
+
+    def test_builtin_function_name_as_direction_decl_is_rejected(self):
+        src = """
+        module m(serial_in, out);
+        input sin;
+        output out;
+        electrical serial_in, out;
+        analog begin
+            V(out) <+ V(serial_in);
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError) as excinfo:
+            _parse(src)
+        assert 'Identifier "sin" is a reserved name for a built-in function.' in str(excinfo.value)
+
+    def test_builtin_function_name_as_discipline_decl_is_rejected(self):
+        src = """
+        module m(serial_in, out);
+        input serial_in;
+        output out;
+        electrical sin, out;
+        analog begin
+            V(out) <+ V(serial_in);
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError) as excinfo:
+            _parse(src)
+        assert 'Identifier "sin" is a reserved name for a built-in function.' in str(excinfo.value)
+
+    def test_builtin_function_name_as_branch_node_ref_is_rejected(self):
+        src = """
+        module m(serial_in, out);
+        input serial_in;
+        output out;
+        electrical serial_in, out;
+        analog begin
+            V(out) <+ V(sin);
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError) as excinfo:
+            _parse(src)
+        assert 'Identifier "sin" is a reserved name for a built-in function.' in str(excinfo.value)
+
+    @pytest.mark.parametrize("name", ["cross", "transition", "white_noise"])
+    def test_simulator_library_function_names_are_rejected(self, name):
+        self._assert_identifier_is_rejected(
+            name,
+            f'Identifier "{name}" is a reserved name for a simulator library function.\n'
+            'Use an identifier that is not a reserved name for a simulator library function.',
+        )
+
+    def test_analog_operator_name_is_rejected(self):
+        self._assert_identifier_is_rejected(
+            "ddt",
+            'Identifier "ddt" is reserved by Spectre/AHDL and cannot be used as an identifier.',
+        )
+
+    def test_builtin_function_call_is_still_allowed(self):
+        stmts = _stmts("x = sin($abstime);")
+        expr = stmts[0].value
+        assert isinstance(expr, FunctionCall)
+        assert expr.name == "sin"
+
+    def test_simulator_library_function_call_is_still_allowed(self):
+        stmts = _stmts("x = white_noise(1.0, \"thermal\");")
+        expr = stmts[0].value
+        assert isinstance(expr, FunctionCall)
+        assert expr.name == "white_noise"
+
     def test_combined_event_cross_or_initial_step(self):
         stmts = _stmts("@(cross(V(a) - 0.45) or initial_step) x = 1;")
         stmt = stmts[0]

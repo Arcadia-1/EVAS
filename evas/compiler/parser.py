@@ -13,6 +13,61 @@ _SPECTRE_RESERVED_IDENTIFIERS = {
     'final_step',
 }
 
+_SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES = {
+    # Spectre VACOMP rejects these built-in function names when they are used
+    # as user identifiers. They remain legal as function/event calls.
+    'abs',
+    'acos',
+    'acosh',
+    'asin',
+    'asinh',
+    'atan',
+    'atan2',
+    'atanh',
+    'ceil',
+    'cos',
+    'cosh',
+    'exp',
+    'floor',
+    'hypot',
+    'ln',
+    'log',
+    'max',
+    'min',
+    'pow',
+    'sin',
+    'sinh',
+    'sqrt',
+    'tan',
+    'tanh',
+}
+
+_SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES = {
+    # Spectre reports these as "reserved name for a simulator library function".
+    'above',
+    'analysis',
+    'cross',
+    'flicker_noise',
+    'last_crossing',
+    'limexp',
+    'noise_table',
+    'slew',
+    'timer',
+    'transition',
+    'white_noise',
+}
+
+_SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES = {
+    # These also fail as identifiers in Spectre in the minimal reproducer, but
+    # Spectre reports a syntax/parser error rather than a reserved-name text.
+    'absdelay',
+    'ddt',
+    'final_step',
+    'idt',
+    'idtmod',
+    'initial_step',
+}
+
 _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
     # Digital Verilog procedural blocks are outside the supported Verilog-A
     # subset and Spectre rejects them in AHDL compilation.
@@ -68,6 +123,26 @@ class Parser:
                 "Verilog-A event keyword and cannot be used as an identifier",
                 token,
             )
+        if token.value in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
+            raise ParseError(
+                f"Identifier \"{token.value}\" is a reserved name for a "
+                "built-in function.\nUse an identifier that is not a "
+                "reserved name for a built-in function.",
+                token,
+            )
+        if token.value in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
+            raise ParseError(
+                f"Identifier \"{token.value}\" is a reserved name for a "
+                "simulator library function.\nUse an identifier that is not "
+                "a reserved name for a simulator library function.",
+                token,
+            )
+        if token.value in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
+            raise ParseError(
+                f"Identifier \"{token.value}\" is reserved by Spectre/AHDL "
+                "and cannot be used as an identifier.",
+                token,
+            )
         if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
             raise ParseError(
                 f"Spectre-incompatible {context}: {token.value!r} is a "
@@ -88,12 +163,52 @@ class Parser:
                     "is a Verilog-A event keyword",
                     token,
                 )
+            if target.name in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is a reserved name for a "
+                    "built-in function.\nUse an identifier that is not a "
+                    "reserved name for a built-in function.",
+                    token,
+                )
+            if target.name in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is a reserved name for a "
+                    "simulator library function.\nUse an identifier that is "
+                    "not a reserved name for a simulator library function.",
+                    token,
+                )
+            if target.name in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is reserved by Spectre/AHDL "
+                    "and cannot be used as an identifier.",
+                    token,
+                )
             return
         if isinstance(target, ArrayAccess):
             if target.name in _SPECTRE_RESERVED_IDENTIFIERS:
                 raise ParseError(
                     f"Spectre-incompatible assignment target: {target.name!r} "
                     "is a Verilog-A event keyword",
+                    token,
+                )
+            if target.name in _SPECTRE_RESERVED_BUILTIN_FUNCTION_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is a reserved name for a "
+                    "built-in function.\nUse an identifier that is not a "
+                    "reserved name for a built-in function.",
+                    token,
+                )
+            if target.name in _SPECTRE_RESERVED_SIMULATOR_LIBRARY_FUNCTION_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is a reserved name for a "
+                    "simulator library function.\nUse an identifier that is "
+                    "not a reserved name for a simulator library function.",
+                    token,
+                )
+            if target.name in _SPECTRE_RESERVED_OPERATOR_OR_EVENT_NAMES:
+                raise ParseError(
+                    f"Identifier \"{target.name}\" is reserved by Spectre/AHDL "
+                    "and cannot be used as an identifier.",
                     token,
                 )
             return
@@ -135,6 +250,7 @@ class Parser:
 
         self.expect(TokenType.MODULE)
         name_tok = self.expect(TokenType.IDENT)
+        self._reject_reserved_identifier(name_tok, "module name")
         name = name_tok.value
 
         # Parse port list
@@ -1016,15 +1132,10 @@ class Parser:
         # Identifier (variable, parameter, function call)
         if tok.type == TokenType.IDENT:
             name = self.advance().value
-            if name in _SPECTRE_RESERVED_IDENTIFIERS:
-                raise ParseError(
-                    f"Spectre-incompatible expression: {name!r} is a "
-                    "Verilog-A event keyword and cannot be used as an identifier",
-                    tok,
-                )
 
             # Method call: name.method(args)
             if self.at(TokenType.DOT):
+                self._reject_reserved_identifier(tok, "method-call object")
                 self.advance()
                 method = self.expect(TokenType.IDENT).value
                 self.expect(TokenType.LPAREN)
@@ -1038,6 +1149,8 @@ class Parser:
                 args = self._parse_arg_list()
                 self.expect(TokenType.RPAREN)
                 return FunctionCall(name=name, args=args)
+
+            self._reject_reserved_identifier(tok, "expression identifier")
 
             # Array access: name[index]
             if self.at(TokenType.LBRACKET):
@@ -1066,7 +1179,9 @@ class Parser:
           name[i]         → (name, i_expr, None)
           name[i][j]      → (name, i_expr, j_expr)
         """
-        name = self.expect(TokenType.IDENT).value
+        name_tok = self.expect(TokenType.IDENT)
+        self._reject_reserved_identifier(name_tok, "node reference")
+        name = name_tok.value
         index_expr = None
         index_expr2 = None
         if self.at(TokenType.LBRACKET):
