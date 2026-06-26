@@ -3545,6 +3545,52 @@ pub unsafe extern "C" fn evas_rust_max_err_ratio(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn evas_rust_adaptive_step_floor(
+    tstep: f64,
+    min_step: f64,
+    min_step_defaulted: u8,
+    out_floor: *mut f64,
+) -> i32 {
+    if out_floor.is_null() {
+        return -55;
+    }
+
+    match adaptive_step_floor(tstep, min_step, min_step_defaulted != 0) {
+        Ok(floor) => {
+            *out_floor = floor;
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn evas_rust_adaptive_shrink_step(
+    dynamic_step: f64,
+    err_ratio: f64,
+    min_step: f64,
+    adaptive_floor: f64,
+    out_step: *mut f64,
+    out_clamped: *mut u8,
+) -> i32 {
+    if out_step.is_null() {
+        return -56;
+    }
+    if out_clamped.is_null() {
+        return -57;
+    }
+
+    match adaptive_shrink_step(dynamic_step, err_ratio, min_step, adaptive_floor) {
+        Ok((step, clamped)) => {
+            *out_step = step;
+            *out_clamped = if clamped { 1 } else { 0 };
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn evas_rust_interpolate_event_values(
     previous_values: *const f64,
     previous_count: usize,
