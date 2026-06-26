@@ -1144,6 +1144,40 @@ endmodule
         assert fast._perf_stats["dynamic_step_shrinks"] == 0
         assert fast._perf_stats["err_ratio_skipped_sources"] > 0
 
+    def test_default_adaptive_floor_caps_error_control_shrink(self):
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        sim.record("vin")
+
+        result = sim.run(tstop=0.3e-9, tstep=0.1e-9, reltol=1e-6, vabstol=1e-9)
+
+        assert sim._perf_stats["adaptive_step_floor"] == pytest.approx(0.1e-9 / 64.0)
+        assert sim._perf_stats["adaptive_step_floor_defaulted"] == 1
+        assert sim._perf_stats["adaptive_step_floor_clamps"] > 0
+        assert sim._perf_stats["dynamic_step_shrinks"] > 0
+        assert len(result.time) < 250
+
+    def test_adaptive_floor_does_not_hide_source_breakpoints(self):
+        sim = Simulator()
+        sim.add_source(
+            "x",
+            pwl(
+                [0.0, 1e-12, 2e-12, 100e-12],
+                [0.0, 1.0, 0.0, 0.0],
+            ),
+        )
+        sim.record("x")
+
+        result = sim.run(tstop=100e-12, tstep=1e-9)
+
+        assert result.time.tolist() == pytest.approx(
+            [0.0, 1e-12, 2e-12, 64.5e-12, 100e-12]
+        )
+        assert result.signals["x"].tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0, 0.0])
+        assert sim._perf_stats["adaptive_step_floor"] == pytest.approx(1e-9 / 64.0)
+        assert sim._perf_stats["source_breakpoint_clamps"] >= 2
+        assert sim._perf_stats["min_step_clamps"] == 0
+
     def test_rust_full_model_required_rejects_python_fallback(self):
         sim = Simulator()
         sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))

@@ -552,6 +552,33 @@ def test_rust_backend_computes_max_err_ratio_for_node_ids():
     assert ratio == pytest.approx(0.5 / (1.0e-3 * 0.5 + 1.0e-6))
 
 
+def test_rust_backend_adaptive_step_policy_matches_python_scheduler():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+
+    default_floor = backend.adaptive_step_floor(
+        1.0e-9,
+        1.0e-9 / 4096.0,
+        min_step_defaulted=True,
+    )
+    explicit_floor = backend.adaptive_step_floor(
+        1.0e-9,
+        1.0e-13,
+        min_step_defaulted=False,
+    )
+    shrunk, clamped = backend.adaptive_shrink_step(
+        dynamic_step=1.0e-12,
+        err_ratio=100.0,
+        min_step=1.0e-9 / 4096.0,
+        adaptive_floor=default_floor,
+    )
+
+    assert default_floor == pytest.approx(1.0e-9 / 64.0)
+    assert explicit_floor == pytest.approx(1.0e-13)
+    assert shrunk == pytest.approx(default_floor)
+    assert clamped is True
+
+
 def test_rust_backend_records_values_for_node_ids():
     _build_rust_core()
     backend = load_rust_backend(default_rust_core_library_path())

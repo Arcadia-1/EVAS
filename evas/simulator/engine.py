@@ -3665,8 +3665,12 @@ class Simulator:
             tstep = tstop / 10000
         if max_step is None:
             max_step = tstep
-        if min_step is None:
+        min_step_defaulted = min_step is None
+        if min_step_defaulted:
             min_step = tstep / 4096.0
+        adaptive_step_floor = min_step
+        if min_step_defaulted:
+            adaptive_step_floor = max(min_step, tstep / 64.0)
         indexed_arrays_requested = bool(indexed_arrays)
         indexed_state_storage_requested = bool(indexed_state_storage)
         if not rust_static_eval:
@@ -3736,6 +3740,9 @@ class Simulator:
             "transition_target_breakpoint_clamps": 0,
             "bound_step_clamps": 0,
             "min_step_clamps": 0,
+            "adaptive_step_floor": adaptive_step_floor,
+            "adaptive_step_floor_clamps": 0,
+            "adaptive_step_floor_defaulted": int(min_step_defaulted),
             "cross_refine_triggers": 0,
             "cross_event_steps": 0,
             "dynamic_step_shrinks": 0,
@@ -7019,7 +7026,12 @@ class Simulator:
                 _add_profile_time("err_ratio_node_scan_s", _section_start)
             if err_ratio > 1.0:
                 scale = min(4.0, max(1.2, math.sqrt(err_ratio)))
-                dynamic_step = max(min_step, dynamic_step / scale)
+                next_dynamic_step = dynamic_step / scale
+                if next_dynamic_step < adaptive_step_floor:
+                    dynamic_step = adaptive_step_floor
+                    self._perf_stats["adaptive_step_floor_clamps"] += 1
+                else:
+                    dynamic_step = next_dynamic_step
                 self._perf_stats["dynamic_step_shrinks"] += 1
             elif err_ratio < 0.2:
                 dynamic_step = min(tstep, dynamic_step * 1.15)

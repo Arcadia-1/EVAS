@@ -412,6 +412,54 @@ pub fn max_err_ratio_for_nodes(
     Ok(max_ratio)
 }
 
+pub fn adaptive_step_floor(
+    tstep: f64,
+    min_step: f64,
+    min_step_defaulted: bool,
+) -> Result<f64, i32> {
+    if !tstep.is_finite() || !min_step.is_finite() {
+        return Err(-51);
+    }
+    if tstep <= 0.0 || min_step <= 0.0 {
+        return Err(-52);
+    }
+    if min_step_defaulted {
+        Ok(min_step.max(tstep / 64.0))
+    } else {
+        Ok(min_step)
+    }
+}
+
+pub fn adaptive_shrink_step(
+    dynamic_step: f64,
+    err_ratio: f64,
+    min_step: f64,
+    adaptive_floor: f64,
+) -> Result<(f64, bool), i32> {
+    if !dynamic_step.is_finite()
+        || !err_ratio.is_finite()
+        || !min_step.is_finite()
+        || !adaptive_floor.is_finite()
+    {
+        return Err(-53);
+    }
+    if dynamic_step <= 0.0 || min_step <= 0.0 || adaptive_floor <= 0.0 {
+        return Err(-54);
+    }
+    if err_ratio <= 1.0 {
+        return Ok((dynamic_step, false));
+    }
+
+    let scale = err_ratio.sqrt().max(1.2).min(4.0);
+    let floor = adaptive_floor.max(min_step);
+    let candidate = dynamic_step / scale;
+    if candidate < floor {
+        Ok((floor, true))
+    } else {
+        Ok((candidate, false))
+    }
+}
+
 pub fn interpolate_event_values_for_arrays(
     previous_values: &[f64],
     current_values: &[f64],

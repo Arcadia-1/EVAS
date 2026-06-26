@@ -1530,6 +1530,34 @@ class RustBackend:
         ]
         err_ratio_fn.restype = ctypes.c_int
         self._max_err_ratio = err_ratio_fn
+        try:
+            adaptive_floor_fn = self._lib.evas_rust_adaptive_step_floor
+        except AttributeError:
+            adaptive_floor_fn = None
+        if adaptive_floor_fn is not None:
+            adaptive_floor_fn.argtypes = [
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            adaptive_floor_fn.restype = ctypes.c_int
+        self._adaptive_step_floor = adaptive_floor_fn
+        try:
+            adaptive_shrink_fn = self._lib.evas_rust_adaptive_shrink_step
+        except AttributeError:
+            adaptive_shrink_fn = None
+        if adaptive_shrink_fn is not None:
+            adaptive_shrink_fn.argtypes = [
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_uint8),
+            ]
+            adaptive_shrink_fn.restype = ctypes.c_int
+        self._adaptive_shrink_step = adaptive_shrink_fn
         record_values_fn = self._lib.evas_rust_record_values_for_node_ids
         record_values_fn.argtypes = [
             ctypes.POINTER(ctypes.c_double),
@@ -2178,6 +2206,49 @@ class RustBackend:
         if rc != 0:
             raise RustBackendError(f"Rust err_ratio scan failed with code {rc}")
         return float(out_ratio.value)
+
+    def adaptive_step_floor(
+        self,
+        tstep: float,
+        min_step: float,
+        *,
+        min_step_defaulted: bool,
+    ) -> float:
+        if self._adaptive_step_floor is None:
+            raise RustBackendError("Rust adaptive step floor helper is unavailable")
+        out_floor = ctypes.c_double(0.0)
+        rc = self._adaptive_step_floor(
+            float(tstep),
+            float(min_step),
+            ctypes.c_uint8(1 if min_step_defaulted else 0),
+            ctypes.byref(out_floor),
+        )
+        if rc != 0:
+            raise RustBackendError(f"Rust adaptive step floor failed with code {rc}")
+        return float(out_floor.value)
+
+    def adaptive_shrink_step(
+        self,
+        dynamic_step: float,
+        err_ratio: float,
+        min_step: float,
+        adaptive_floor: float,
+    ) -> tuple[float, bool]:
+        if self._adaptive_shrink_step is None:
+            raise RustBackendError("Rust adaptive shrink helper is unavailable")
+        out_step = ctypes.c_double(0.0)
+        out_clamped = ctypes.c_uint8(0)
+        rc = self._adaptive_shrink_step(
+            float(dynamic_step),
+            float(err_ratio),
+            float(min_step),
+            float(adaptive_floor),
+            ctypes.byref(out_step),
+            ctypes.byref(out_clamped),
+        )
+        if rc != 0:
+            raise RustBackendError(f"Rust adaptive shrink failed with code {rc}")
+        return float(out_step.value), bool(out_clamped.value)
 
     def record_values_for_ids(
         self,

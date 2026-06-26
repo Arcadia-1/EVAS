@@ -303,6 +303,28 @@ fn computes_max_err_ratio_for_node_ids() {
 }
 
 #[test]
+fn adaptive_step_floor_uses_coarser_default_only_for_default_min_step() {
+    let default_floor = adaptive_step_floor(1.0e-9, 1.0e-9 / 4096.0, true).unwrap();
+    let explicit_floor = adaptive_step_floor(1.0e-9, 1.0e-13, false).unwrap();
+
+    assert!((default_floor - 1.0e-9 / 64.0).abs() < 1.0e-24);
+    assert!((explicit_floor - 1.0e-13).abs() < 1.0e-24);
+}
+
+#[test]
+fn adaptive_shrink_step_clamps_only_error_control_step() {
+    let floor = adaptive_step_floor(1.0e-9, 1.0e-9 / 4096.0, true).unwrap();
+    let (step, clamped) = adaptive_shrink_step(1.0e-12, 100.0, 1.0e-9 / 4096.0, floor).unwrap();
+    let (unchanged, unchanged_clamped) =
+        adaptive_shrink_step(1.0e-12, 0.5, 1.0e-9 / 4096.0, floor).unwrap();
+
+    assert!((step - floor).abs() < 1.0e-24);
+    assert!(clamped);
+    assert!((unchanged - 1.0e-12).abs() < 1.0e-24);
+    assert!(!unchanged_clamped);
+}
+
+#[test]
 fn records_values_for_node_ids_with_default_for_missing_nodes() {
     let values = [1.0, 2.0, 3.0];
     let node_ids = [2_usize, 0_usize, 9_usize];
