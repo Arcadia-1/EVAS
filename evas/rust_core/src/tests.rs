@@ -314,12 +314,21 @@ fn adaptive_step_floor_uses_coarser_default_only_for_default_min_step() {
 #[test]
 fn adaptive_shrink_step_clamps_only_error_control_step() {
     let floor = adaptive_step_floor(1.0e-9, 1.0e-9 / 4096.0, true).unwrap();
-    let (step, clamped) = adaptive_shrink_step(1.0e-12, 100.0, 1.0e-9 / 4096.0, floor).unwrap();
+    let (step, clamped) =
+        adaptive_shrink_step(1.0e-12, 100.0, 1.0e-9 / 4096.0, floor, false, true).unwrap();
+    let (source_step, source_clamped) =
+        adaptive_shrink_step(1.0e-12, 100.0, 1.0e-9 / 4096.0, floor, true, true).unwrap();
+    let (guarded_step, guarded_clamped) =
+        adaptive_shrink_step(1.0e-12, 100.0, 1.0e-9 / 4096.0, floor, false, false).unwrap();
     let (unchanged, unchanged_clamped) =
-        adaptive_shrink_step(1.0e-12, 0.5, 1.0e-9 / 4096.0, floor).unwrap();
+        adaptive_shrink_step(1.0e-12, 0.5, 1.0e-9 / 4096.0, floor, false, true).unwrap();
 
     assert!((step - floor).abs() < 1.0e-24);
     assert!(clamped);
+    assert!((source_step - 2.5e-13).abs() < 1.0e-24);
+    assert!(!source_clamped);
+    assert!((guarded_step - 2.5e-13).abs() < 1.0e-24);
+    assert!(!guarded_clamped);
     assert!((unchanged - 1.0e-12).abs() < 1.0e-24);
     assert!(!unchanged_clamped);
 }

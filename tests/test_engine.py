@@ -1145,17 +1145,63 @@ endmodule
         assert fast._perf_stats["err_ratio_skipped_sources"] > 0
 
     def test_default_adaptive_floor_caps_error_control_shrink(self):
+        class InternalRampModel(CompiledModel):
+            _has_dynamic_breakpoints = False
+            _has_post_update_events = False
+            _uses_bound_step = False
+
+            def evaluate(self, node_voltages, time):
+                node_voltages["vinternal"] = time / 1e-9
+
         sim = Simulator()
-        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
-        sim.record("vin")
+        sim.add_model(InternalRampModel())
+        sim.record("vinternal")
 
         result = sim.run(tstop=0.3e-9, tstep=0.1e-9, reltol=1e-6, vabstol=1e-9)
 
         assert sim._perf_stats["adaptive_step_floor"] == pytest.approx(0.1e-9 / 64.0)
         assert sim._perf_stats["adaptive_step_floor_defaulted"] == 1
         assert sim._perf_stats["adaptive_step_floor_clamps"] > 0
+        assert sim._perf_stats["adaptive_step_floor_model_bypasses"] == 0
+        assert sim._perf_stats["adaptive_step_floor_sensitive_models"] == 0
+        assert sim._perf_stats["adaptive_step_floor_source_bypasses"] == 0
         assert sim._perf_stats["dynamic_step_shrinks"] > 0
         assert len(result.time) < 250
+
+    def test_adaptive_floor_bypasses_dynamic_breakpoint_models(self):
+        class BreakpointRampModel(CompiledModel):
+            _uses_bound_step = False
+            _has_post_update_events = False
+
+            def evaluate(self, node_voltages, time):
+                node_voltages["vinternal"] = time / 1e-9
+
+            def next_breakpoint(self, time):
+                return None
+
+        sim = Simulator()
+        sim.add_model(BreakpointRampModel())
+        sim.record("vinternal")
+
+        sim.run(tstop=0.3e-9, tstep=0.1e-9, reltol=1e-6, vabstol=1e-9)
+
+        assert sim._perf_stats["adaptive_step_floor"] == pytest.approx(0.1e-9 / 64.0)
+        assert sim._perf_stats["adaptive_step_floor_sensitive_models"] == 1
+        assert sim._perf_stats["adaptive_step_floor_clamps"] == 0
+        assert sim._perf_stats["adaptive_step_floor_model_bypasses"] > 0
+        assert sim._perf_stats["dynamic_step_shrinks"] > 0
+
+    def test_source_error_control_shrink_bypasses_adaptive_floor(self):
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        sim.record("vin")
+
+        sim.run(tstop=0.3e-9, tstep=0.1e-9, reltol=1e-6, vabstol=1e-9)
+
+        assert sim._perf_stats["adaptive_step_floor"] == pytest.approx(0.1e-9 / 64.0)
+        assert sim._perf_stats["adaptive_step_floor_clamps"] == 0
+        assert sim._perf_stats["adaptive_step_floor_source_bypasses"] > 0
+        assert sim._perf_stats["dynamic_step_shrinks"] > 0
 
     def test_adaptive_floor_does_not_hide_source_breakpoints(self):
         sim = Simulator()

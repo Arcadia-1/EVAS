@@ -435,6 +435,8 @@ pub fn adaptive_shrink_step(
     err_ratio: f64,
     min_step: f64,
     adaptive_floor: f64,
+    err_ratio_from_source: bool,
+    adaptive_floor_allowed: bool,
 ) -> Result<(f64, bool), i32> {
     if !dynamic_step.is_finite()
         || !err_ratio.is_finite()
@@ -451,7 +453,11 @@ pub fn adaptive_shrink_step(
     }
 
     let scale = err_ratio.sqrt().max(1.2).min(4.0);
-    let floor = adaptive_floor.max(min_step);
+    let floor = if adaptive_floor_allowed && !err_ratio_from_source {
+        adaptive_floor.max(min_step)
+    } else {
+        min_step
+    };
     let candidate = dynamic_step / scale;
     if candidate < floor {
         Ok((floor, true))

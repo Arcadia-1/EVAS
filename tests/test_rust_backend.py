@@ -572,11 +572,29 @@ def test_rust_backend_adaptive_step_policy_matches_python_scheduler():
         min_step=1.0e-9 / 4096.0,
         adaptive_floor=default_floor,
     )
+    source_shrunk, source_clamped = backend.adaptive_shrink_step(
+        dynamic_step=1.0e-12,
+        err_ratio=100.0,
+        min_step=1.0e-9 / 4096.0,
+        adaptive_floor=default_floor,
+        err_ratio_from_source=True,
+    )
+    guarded_shrunk, guarded_clamped = backend.adaptive_shrink_step(
+        dynamic_step=1.0e-12,
+        err_ratio=100.0,
+        min_step=1.0e-9 / 4096.0,
+        adaptive_floor=default_floor,
+        adaptive_floor_allowed=False,
+    )
 
     assert default_floor == pytest.approx(1.0e-9 / 64.0)
     assert explicit_floor == pytest.approx(1.0e-13)
     assert shrunk == pytest.approx(default_floor)
     assert clamped is True
+    assert source_shrunk == pytest.approx(2.5e-13)
+    assert source_clamped is False
+    assert guarded_shrunk == pytest.approx(2.5e-13)
+    assert guarded_clamped is False
 
 
 def test_rust_backend_records_values_for_node_ids():
