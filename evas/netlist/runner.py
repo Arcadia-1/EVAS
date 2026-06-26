@@ -14,10 +14,8 @@ from typing import Dict, List, Optional, TextIO
 import numpy as np
 
 from evas.compiler import ast_nodes as va_ast
-from evas.compiler.parser import (
-    SpectreReservedIdentifierError,
-    parse as parse_va,
-)
+from evas.compiler.parser import SpectreReservedIdentifierError
+from evas.compiler.parser import parse as parse_va
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
