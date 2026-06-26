@@ -3743,6 +3743,9 @@ class Simulator:
             "adaptive_step_floor": adaptive_step_floor,
             "adaptive_step_floor_clamps": 0,
             "adaptive_step_floor_defaulted": int(min_step_defaulted),
+            "adaptive_step_floor_model_bypasses": 0,
+            "adaptive_step_floor_sensitive_models": 0,
+            "adaptive_step_floor_source_bypasses": 0,
             "cross_refine_triggers": 0,
             "cross_event_steps": 0,
             "dynamic_step_shrinks": 0,
@@ -5081,6 +5084,15 @@ class Simulator:
         model_has_post_update_events = tuple(
             bool(getattr(model, "_has_post_update_events", True))
             for model in self.models
+        )
+        adaptive_step_floor_model_sensitive = bool(
+            breakpoint_models
+            or transition_target_breakpoint_models
+            or bound_step_models
+            or any(model_has_post_update_events)
+        )
+        self._perf_stats["adaptive_step_floor_sensitive_models"] = int(
+            adaptive_step_floor_model_sensitive
         )
         model_needs_future_node_voltages = tuple(
             bool(getattr(model, "_needs_future_node_voltages_tree", lambda: False)())
@@ -6935,6 +6947,7 @@ class Simulator:
             # Tolerance-guided dynamic step adaptation (voltage-domain heuristic).
             # This is not full LTE/Newton control, but gives user-visible precision control.
             err_ratio = 0.0
+            err_ratio_from_source = False
             _section_start = profile_clock() if profile_clock is not None else 0.0
             model_output_nodes = _refresh_model_output_nodes()
             if profile_clock is not None:
@@ -7001,6 +7014,9 @@ class Simulator:
                     self._perf_stats["indexed_array_err_ratio_reads"] += len(
                         err_ratio_node_id_batch
                     )
+                    err_ratio_from_source = any(
+                        node in source_nodes for node in err_ratio_nodes
+                    )
                     used_rust_err_ratio = True
                 except RustBackendError:
                     self._perf_stats["rust_array_err_ratio_fallbacks"] += 1
@@ -7020,6 +7036,7 @@ class Simulator:
                         er = dv / tol
                         if er > err_ratio:
                             err_ratio = er
+                            err_ratio_from_source = node in source_nodes
             if indexed_array is not None:
                 _refresh_indexed_array_stats()
             if profile_clock is not None:
@@ -7027,9 +7044,27 @@ class Simulator:
             if err_ratio > 1.0:
                 scale = min(4.0, max(1.2, math.sqrt(err_ratio)))
                 next_dynamic_step = dynamic_step / scale
-                if next_dynamic_step < adaptive_step_floor:
-                    dynamic_step = adaptive_step_floor
-                    self._perf_stats["adaptive_step_floor_clamps"] += 1
+                adaptive_floor_allowed = not (
+                    err_ratio_from_source or adaptive_step_floor_model_sensitive
+                )
+                shrink_floor = adaptive_step_floor if adaptive_floor_allowed else min_step
+                if (
+                    err_ratio_from_source
+                    and adaptive_step_floor > min_step
+                    and next_dynamic_step < adaptive_step_floor
+                ):
+                    self._perf_stats["adaptive_step_floor_source_bypasses"] += 1
+                if (
+                    adaptive_step_floor_model_sensitive
+                    and not err_ratio_from_source
+                    and adaptive_step_floor > min_step
+                    and next_dynamic_step < adaptive_step_floor
+                ):
+                    self._perf_stats["adaptive_step_floor_model_bypasses"] += 1
+                if next_dynamic_step < shrink_floor:
+                    dynamic_step = shrink_floor
+                    if adaptive_floor_allowed:
+                        self._perf_stats["adaptive_step_floor_clamps"] += 1
                 else:
                     dynamic_step = next_dynamic_step
                 self._perf_stats["dynamic_step_shrinks"] += 1

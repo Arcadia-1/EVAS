@@ -1553,6 +1553,8 @@ class RustBackend:
                 ctypes.c_double,
                 ctypes.c_double,
                 ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.c_uint8,
                 ctypes.POINTER(ctypes.c_double),
                 ctypes.POINTER(ctypes.c_uint8),
             ]
@@ -2233,6 +2235,9 @@ class RustBackend:
         err_ratio: float,
         min_step: float,
         adaptive_floor: float,
+        *,
+        err_ratio_from_source: bool = False,
+        adaptive_floor_allowed: bool = True,
     ) -> tuple[float, bool]:
         if self._adaptive_shrink_step is None:
             raise RustBackendError("Rust adaptive shrink helper is unavailable")
@@ -2243,6 +2248,8 @@ class RustBackend:
             float(err_ratio),
             float(min_step),
             float(adaptive_floor),
+            ctypes.c_uint8(1 if err_ratio_from_source else 0),
+            ctypes.c_uint8(1 if adaptive_floor_allowed else 0),
             ctypes.byref(out_step),
             ctypes.byref(out_clamped),
         )

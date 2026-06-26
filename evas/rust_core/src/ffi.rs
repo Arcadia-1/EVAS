@@ -3570,6 +3570,8 @@ pub unsafe extern "C" fn evas_rust_adaptive_shrink_step(
     err_ratio: f64,
     min_step: f64,
     adaptive_floor: f64,
+    err_ratio_from_source: u8,
+    adaptive_floor_allowed: u8,
     out_step: *mut f64,
     out_clamped: *mut u8,
 ) -> i32 {
@@ -3580,7 +3582,14 @@ pub unsafe extern "C" fn evas_rust_adaptive_shrink_step(
         return -57;
     }
 
-    match adaptive_shrink_step(dynamic_step, err_ratio, min_step, adaptive_floor) {
+    match adaptive_shrink_step(
+        dynamic_step,
+        err_ratio,
+        min_step,
+        adaptive_floor,
+        err_ratio_from_source != 0,
+        adaptive_floor_allowed != 0,
+    ) {
         Ok((step, clamped)) => {
             *out_step = step;
             *out_clamped = if clamped { 1 } else { 0 };
