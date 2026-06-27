@@ -339,6 +339,27 @@ endmodule
     assert model._evaluate_rust_static_affine_scalar(bias, model.params) == pytest.approx(0.25)
 
 
+def test_compiled_model_records_rust_static_affine_ops_for_subtracted_parameter_expression():
+    src = """\
+`include "disciplines.vams"
+module subtract_param_expr(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real dither_amp = 0.064;
+    analog begin
+        V(vout) <+ V(vin) - dither_amp * 0.5;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    read_node, write_node, gain, bias = ModelCls._rust_static_affine_ops[0]
+
+    assert (read_node, write_node) == ("vin", "vout")
+    assert model._evaluate_rust_static_affine_scalar(gain, model.params) == pytest.approx(1.0)
+    assert model._evaluate_rust_static_affine_scalar(bias, model.params) == pytest.approx(-0.032)
+
+
 def test_compiled_model_records_static_linear_evaluate_ir_for_differential_model():
     src = """\
 `include "disciplines.vams"

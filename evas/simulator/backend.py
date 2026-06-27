@@ -9467,7 +9467,11 @@ class _ModuleCompiler:
                 if left is None or right is None:
                     return None
                 if expr.op == "-":
-                    right = (right[0], -right[1], -right[2])
+                    right = (
+                        right[0],
+                        self._rust_scalar_neg(right[1]),
+                        self._rust_scalar_neg(right[2]),
+                    )
                 return self._combine_rust_affine(left, right)
 
             if expr.op == "*":
