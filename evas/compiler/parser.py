@@ -416,6 +416,14 @@ class Parser:
             self._parse_parameter_decl(module)
             return
 
+        # User-defined functions/tasks
+        if tok.type == TokenType.FUNCTION:
+            module.functions.append(self._parse_function_decl())
+            return
+        if tok.type == TokenType.TASK:
+            module.tasks.append(self._parse_task_decl())
+            return
+
         # Variable declarations: real, integer, genvar, string
         if (
             tok.type in (TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
@@ -640,7 +648,24 @@ class Parser:
             range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
         ))
 
-    def _parse_variable_decl(self, module: Module):
+    def _parse_decl_type(self, default: ParamType = ParamType.REAL) -> Tuple[ParamType, bool]:
+        """Parse an optional scalar declaration type.
+
+        Returns ``(type, is_genvar)``.  The caller decides whether a missing
+        type is legal; this helper only consumes a token when one is present.
+        """
+        if self.match(TokenType.REAL):
+            return ParamType.REAL, False
+        if self.match(TokenType.INTEGER):
+            return ParamType.INTEGER, False
+        if self.match(TokenType.GENVAR):
+            return ParamType.INTEGER, True
+        if self.at(TokenType.IDENT) and self.peek().value == "string":
+            self.advance()
+            return ParamType.STRING, False
+        return default, False
+
+    def _parse_variable_decl_list(self) -> List[VariableDecl]:
         """Parse: real|integer|genvar|string name[range] [= init] [, name] ;"""
         type_tok = self.advance()
         if type_tok.type == TokenType.REAL:
@@ -651,6 +676,7 @@ class Parser:
             var_type = ParamType.INTEGER
         is_genvar = type_tok.type == TokenType.GENVAR
 
+        decls: List[VariableDecl] = []
         while True:
             name = self._expect_identifier_name("variable declaration")
             is_array = False
@@ -677,12 +703,127 @@ class Parser:
             vd = VariableDecl(name=name, var_type=var_type, is_array=is_array,
                               array_hi=array_hi, array_lo=array_lo,
                               init_values=init_values, is_genvar=is_genvar)
-            module.variables.append(vd)
+            decls.append(vd)
 
             if not self.match(TokenType.COMMA):
                 break
 
         self.match(TokenType.SEMI)
+        return decls
+
+    def _parse_variable_decl(self, module: Module):
+        """Parse and append module-scope variable declarations."""
+        module.variables.extend(self._parse_variable_decl_list())
+
+    def _parse_subprogram_arg_decl(self) -> List[SubprogramArg]:
+        """Parse old-style function/task arg declaration: input real x, y;"""
+        direction = Direction.INPUT
+        if self.match(TokenType.INPUT):
+            direction = Direction.INPUT
+        elif self.match(TokenType.OUTPUT):
+            direction = Direction.OUTPUT
+        elif self.match(TokenType.INOUT):
+            direction = Direction.INOUT
+
+        var_type, _ = self._parse_decl_type(default=ParamType.REAL)
+        args: List[SubprogramArg] = []
+        while True:
+            name = self._expect_identifier_name("subprogram argument")
+            if self.at(TokenType.LBRACKET):
+                self._skip_range()
+            args.append(SubprogramArg(name=name, var_type=var_type, direction=direction))
+            if not self.match(TokenType.COMMA):
+                break
+            # Verilog allows repeated typed groups: input real a, input integer b
+            if self.at(TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT):
+                more = self._parse_subprogram_arg_decl()
+                args.extend(more)
+                return args
+        self.match(TokenType.SEMI)
+        return args
+
+    def _parse_ansi_subprogram_arg_list(self) -> List[SubprogramArg]:
+        args: List[SubprogramArg] = []
+        while not self.at(TokenType.RPAREN, TokenType.EOF):
+            direction = Direction.INPUT
+            if self.match(TokenType.INPUT):
+                direction = Direction.INPUT
+            elif self.match(TokenType.OUTPUT):
+                direction = Direction.OUTPUT
+            elif self.match(TokenType.INOUT):
+                direction = Direction.INOUT
+
+            var_type, _ = self._parse_decl_type(default=ParamType.REAL)
+            name = self._expect_identifier_name("ANSI subprogram argument")
+            if self.at(TokenType.LBRACKET):
+                self._skip_range()
+            args.append(SubprogramArg(name=name, var_type=var_type, direction=direction))
+            if not self.match(TokenType.COMMA):
+                break
+        return args
+
+    def _parse_function_decl(self) -> FunctionDecl:
+        """Parse a safe user-defined function subset."""
+        self.expect(TokenType.FUNCTION)
+        return_type, _ = self._parse_decl_type(default=ParamType.REAL)
+        name = self._expect_identifier_name("function name")
+
+        args: List[SubprogramArg] = []
+        if self.match(TokenType.LPAREN):
+            args = self._parse_ansi_subprogram_arg_list()
+            self.expect(TokenType.RPAREN)
+        self.match(TokenType.SEMI)
+
+        variables: List[VariableDecl] = []
+        statements: List[Statement] = []
+        while not self.at(TokenType.ENDFUNCTION, TokenType.EOF):
+            if self.at(TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT):
+                args.extend(self._parse_subprogram_arg_decl())
+            elif (
+                self.at(TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
+                or (self.at(TokenType.IDENT) and self.peek().value == "string")
+            ):
+                variables.extend(self._parse_variable_decl_list())
+            elif self.match(TokenType.SEMI):
+                continue
+            else:
+                statements.append(self._parse_statement())
+        self.expect(TokenType.ENDFUNCTION)
+        return FunctionDecl(
+            name=name,
+            return_type=return_type,
+            args=args,
+            variables=variables,
+            body=Block(statements=statements),
+        )
+
+    def _parse_task_decl(self) -> TaskDecl:
+        """Parse a safe no-timing user-defined task subset."""
+        self.expect(TokenType.TASK)
+        name = self._expect_identifier_name("task name")
+
+        args: List[SubprogramArg] = []
+        if self.match(TokenType.LPAREN):
+            args = self._parse_ansi_subprogram_arg_list()
+            self.expect(TokenType.RPAREN)
+        self.match(TokenType.SEMI)
+
+        variables: List[VariableDecl] = []
+        statements: List[Statement] = []
+        while not self.at(TokenType.ENDTASK, TokenType.EOF):
+            if self.at(TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT):
+                args.extend(self._parse_subprogram_arg_decl())
+            elif (
+                self.at(TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
+                or (self.at(TokenType.IDENT) and self.peek().value == "string")
+            ):
+                variables.extend(self._parse_variable_decl_list())
+            elif self.match(TokenType.SEMI):
+                continue
+            else:
+                statements.append(self._parse_statement())
+        self.expect(TokenType.ENDTASK)
+        return TaskDecl(name=name, args=args, variables=variables, body=Block(statements=statements))
 
     # ─── Statements ───
 
@@ -953,12 +1094,7 @@ class Parser:
 
         if self.match(TokenType.SEMI):
             if isinstance(expr, FunctionCall):
-                raise ParseError(
-                    "Spectre-incompatible expression statement: standalone "
-                    f"{expr.name}() call is not supported; use an assignment, "
-                    "contribution, event control, or system task",
-                    self.peek(),
-                )
+                return TaskCall(name=expr.name, args=expr.args)
             raise ParseError(
                 "Spectre-incompatible expression statement: use an assignment, "
                 "contribution, event control, or system task",

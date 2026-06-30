@@ -8615,3 +8615,72 @@ endmodule
 
         # By 15ns, with 1e8 V/s rise limit and 10ns elapsed since 5ns step, output nears 1V.
         assert result.signals["out"][-1] == pytest.approx(1.0, abs=0.1)
+
+
+class TestUserSubprograms:
+
+    def test_user_defined_function_clamps_contribution(self):
+        src = """\
+`include "disciplines.vams"
+module fn_clamp(out);
+    output voltage out;
+    parameter real x = 1.7;
+
+    function real clamp;
+        input real value;
+        input real lo, hi;
+        real tmp;
+        begin
+            tmp = value;
+            if (tmp < lo) clamp = lo;
+            else if (tmp > hi) clamp = hi;
+            else clamp = tmp;
+        end
+    endfunction
+
+    analog begin
+        V(out) <+ clamp(x, 0.0, 1.0);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([1.0, 1.0])
+
+    def test_user_defined_task_updates_module_state(self):
+        src = """\
+`include "disciplines.vams"
+module task_update(out);
+    output voltage out;
+    real y;
+
+    task load(input real value, input integer scale);
+        real local;
+        begin
+            local = value * scale;
+            y = local + 0.25;
+        end
+    endtask
+
+    analog begin
+        load(1.5, 2);
+        V(out) <+ y;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["y"] == pytest.approx(3.25)
+        assert result.signals["out"].tolist() == pytest.approx([3.25, 3.25])

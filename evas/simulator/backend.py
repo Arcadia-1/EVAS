@@ -4774,6 +4774,12 @@ class _ModuleCompiler:
         self._system_task_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
+        self._user_function_by_name = {decl.name: decl for decl in module.functions}
+        self._user_task_by_name = {decl.name: decl for decl in module.tasks}
+        self._local_name_by_var: Dict[str, str] = {}
+        self._local_types: Dict[str, ParamType] = {}
+        self._current_user_function: Optional[str] = None
+        self._current_user_task: Optional[str] = None
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
         self._event_key_cache: Dict[tuple, str] = {}
@@ -5021,6 +5027,8 @@ class _ModuleCompiler:
                 lines.append("            _mapped = f'@parent:{_target}'")
                 lines.append(f"            {child_var}.node_map[_pname] = _mapped")
             lines.append(f"        self._child_models.append({child_var})")
+
+        lines.extend(self._compile_user_subprogram_methods())
 
         # Generate initial_step method
         lines.append("")
@@ -5336,6 +5344,136 @@ class _ModuleCompiler:
         cls._generated_code = code  # Store for debugging
         return cls
 
+    @staticmethod
+    def _safe_python_suffix(name: str) -> str:
+        suffix = re.sub(r"\W", "_", str(name))
+        if not suffix or suffix[0].isdigit():
+            suffix = f"_{suffix}"
+        return suffix
+
+    @staticmethod
+    def _default_value_for_type(param_type: ParamType) -> str:
+        if param_type == ParamType.STRING:
+            return "''"
+        if param_type == ParamType.INTEGER:
+            return "0"
+        return "0.0"
+
+    def _local_python_name(self, prefix: str, name: str) -> str:
+        safe = self._safe_python_suffix(name)
+        return f"_{prefix}_{safe}"
+
+    def _compile_user_subprogram_methods(self) -> List[str]:
+        lines: List[str] = []
+        for decl in self.module.functions:
+            lines.extend(self._compile_user_function_method(decl))
+        for decl in self.module.tasks:
+            lines.extend(self._compile_user_task_method(decl))
+        return lines
+
+    def _compile_user_function_method(self, decl: FunctionDecl) -> List[str]:
+        method = f"_user_fn_{self._safe_python_suffix(decl.name)}"
+        arg_names = [self._local_python_name("arg", arg.name) for arg in decl.args]
+        signature = ", ".join(["self", "nv", "time", *arg_names])
+        lines = ["", f"    def {method}({signature}):"]
+
+        previous_locals = self._local_name_by_var
+        previous_types = self._local_types
+        previous_function = self._current_user_function
+        previous_task = self._current_user_task
+        try:
+            local_names: Dict[str, str] = {
+                arg.name: py_name for arg, py_name in zip(decl.args, arg_names)
+            }
+            local_types: Dict[str, ParamType] = {
+                arg.name: arg.var_type for arg in decl.args
+            }
+            ret_name = self._local_python_name("ret", decl.name)
+            local_names[decl.name] = ret_name
+            local_types[decl.name] = decl.return_type
+            for var in decl.variables:
+                local_names[var.name] = self._local_python_name("local", var.name)
+                local_types[var.name] = var.var_type
+
+            self._local_name_by_var = local_names
+            self._local_types = local_types
+            self._current_user_function = decl.name
+            self._current_user_task = None
+
+            lines.append(
+                f"        {ret_name} = {self._default_value_for_type(decl.return_type)}"
+            )
+            for var in decl.variables:
+                py_name = local_names[var.name]
+                if var.init_values:
+                    init = self._compile_expr(var.init_values[0])
+                    if var.var_type == ParamType.INTEGER:
+                        init = f"self._to_integer({init})"
+                    lines.append(f"        {py_name} = {init}")
+                else:
+                    lines.append(
+                        f"        {py_name} = {self._default_value_for_type(var.var_type)}"
+                    )
+            body_lines = self._compile_statement(decl.body, 2)
+            lines.extend(body_lines)
+            if decl.return_type == ParamType.INTEGER:
+                lines.append(f"        return self._to_integer({ret_name})")
+            else:
+                lines.append(f"        return {ret_name}")
+        finally:
+            self._local_name_by_var = previous_locals
+            self._local_types = previous_types
+            self._current_user_function = previous_function
+            self._current_user_task = previous_task
+        return lines
+
+    def _compile_user_task_method(self, decl: TaskDecl) -> List[str]:
+        method = f"_user_task_{self._safe_python_suffix(decl.name)}"
+        arg_names = [self._local_python_name("arg", arg.name) for arg in decl.args]
+        signature = ", ".join(["self", "nv", "time", *arg_names])
+        lines = ["", f"    def {method}({signature}):"]
+
+        previous_locals = self._local_name_by_var
+        previous_types = self._local_types
+        previous_function = self._current_user_function
+        previous_task = self._current_user_task
+        try:
+            local_names: Dict[str, str] = {
+                arg.name: py_name for arg, py_name in zip(decl.args, arg_names)
+            }
+            local_types: Dict[str, ParamType] = {
+                arg.name: arg.var_type for arg in decl.args
+            }
+            for var in decl.variables:
+                local_names[var.name] = self._local_python_name("local", var.name)
+                local_types[var.name] = var.var_type
+
+            self._local_name_by_var = local_names
+            self._local_types = local_types
+            self._current_user_function = None
+            self._current_user_task = decl.name
+
+            for var in decl.variables:
+                py_name = local_names[var.name]
+                if var.init_values:
+                    init = self._compile_expr(var.init_values[0])
+                    if var.var_type == ParamType.INTEGER:
+                        init = f"self._to_integer({init})"
+                    lines.append(f"        {py_name} = {init}")
+                else:
+                    lines.append(
+                        f"        {py_name} = {self._default_value_for_type(var.var_type)}"
+                    )
+            body_lines = self._compile_statement(decl.body, 2)
+            lines.extend(body_lines)
+            lines.append("        pass")
+        finally:
+            self._local_name_by_var = previous_locals
+            self._local_types = previous_types
+            self._current_user_function = previous_function
+            self._current_user_task = previous_task
+        return lines
+
     def _validate_spectre_operator_rules(self) -> None:
         """Reject patterns that Spectre VACOMP does not allow."""
         if not self.module.analog_block:
@@ -5441,6 +5579,9 @@ class _ModuleCompiler:
         elif isinstance(stmt, Contribution):
             restricted |= self._collect_restricted_calls_from_expr(stmt.expr)
         elif isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                restricted |= self._collect_restricted_calls_from_expr(arg)
+        elif isinstance(stmt, TaskCall):
             for arg in stmt.args:
                 restricted |= self._collect_restricted_calls_from_expr(arg)
         return restricted
@@ -5700,6 +5841,11 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                yield from self._iter_function_calls_in_expr(arg)
+            return
+
+        if isinstance(stmt, TaskCall):
             for arg in stmt.args:
                 yield from self._iter_function_calls_in_expr(arg)
 
@@ -8718,6 +8864,12 @@ class _ModuleCompiler:
                 self._collect_evaluate_ir_expr_rejections(arg, add)
             return
 
+        if isinstance(stmt, TaskCall):
+            add("task_call")
+            for arg in stmt.args:
+                self._collect_evaluate_ir_expr_rejections(arg, add)
+            return
+
         add("unsupported_statement")
 
     def _collect_evaluate_ir_event_rejections(
@@ -10140,6 +10292,11 @@ class _ModuleCompiler:
         if isinstance(stmt, SystemTask):
             for arg in stmt.args:
                 self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
+            return
+
+        if isinstance(stmt, TaskCall):
+            for arg in stmt.args:
+                self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
 
     def _statement_has_dynamic_breakpoints(self, stmt) -> bool:
         if stmt is None:
@@ -10290,6 +10447,9 @@ class _ModuleCompiler:
             return False
 
         if isinstance(stmt, SystemTask):
+            return any(self._expr_has_function_call(arg, names) for arg in stmt.args)
+
+        if isinstance(stmt, TaskCall):
             return any(self._expr_has_function_call(arg, names) for arg in stmt.args)
 
         return False
@@ -10459,6 +10619,10 @@ class _ModuleCompiler:
         prefix = '    ' * indent
         if isinstance(target, Identifier):
             name = target.name
+            if name in self._local_name_by_var:
+                if self._is_integer_name(name):
+                    value = f"self._to_integer({value})"
+                return [f"{prefix}{self._local_name_by_var[name]} = {value}"]
             if self._is_integer_variable(name):
                 value = f"self._to_integer({value})"
             if self._state_local_fastpath_active and name in self._state_local_fastpath_names:
@@ -10566,6 +10730,22 @@ class _ModuleCompiler:
 
         return lines
 
+    def _compile_task_call(self, stmt: TaskCall, indent: int) -> List[str]:
+        if stmt.name not in self._user_task_by_name:
+            raise CompilationError(
+                f"Unsupported Verilog-A task call: {stmt.name}()"
+            )
+        if self._current_user_task == stmt.name:
+            raise CompilationError(
+                f"Recursive Verilog-A task call is not supported: {stmt.name}()"
+            )
+        prefix = '    ' * indent
+        method = f"_user_task_{self._safe_python_suffix(stmt.name)}"
+        args = ", ".join(self._compile_expr(arg) for arg in stmt.args)
+        if args:
+            return [f"{prefix}self.{method}(nv, time, {args})"]
+        return [f"{prefix}self.{method}(nv, time)"]
+
     def _compile_statement(self, stmt, indent) -> List[str]:
         """Compile a statement to Python code lines."""
         prefix = '    ' * indent
@@ -10628,6 +10808,9 @@ class _ModuleCompiler:
 
         elif isinstance(stmt, SystemTask):
             lines.extend(self._compile_system_task(stmt, indent))
+
+        elif isinstance(stmt, TaskCall):
+            lines.extend(self._compile_task_call(stmt, indent))
 
         return lines
 
@@ -10727,6 +10910,9 @@ class _ModuleCompiler:
 
         elif isinstance(stmt, SystemTask):
             lines.extend(self._compile_system_task(stmt, indent))
+
+        elif isinstance(stmt, TaskCall):
+            lines.extend(self._compile_task_call(stmt, indent))
 
         return lines
 
@@ -11881,7 +12067,7 @@ class _ModuleCompiler:
     def _has_refresh_logic(self, stmt) -> bool:
         if isinstance(stmt, Block):
             return any(self._has_refresh_logic(s) for s in stmt.statements)
-        if isinstance(stmt, (Contribution, Assignment)):
+        if isinstance(stmt, (Contribution, Assignment, TaskCall)):
             return True
         if isinstance(stmt, IfStatement):
             return self._has_refresh_logic(stmt.then_body) or (
@@ -12075,6 +12261,9 @@ class _ModuleCompiler:
 
         if isinstance(stmt, Assignment):
             return self._compile_assignment(stmt, indent)
+
+        if isinstance(stmt, TaskCall):
+            return self._compile_task_call(stmt, indent)
 
         if isinstance(stmt, IfStatement):
             cond = self._compile_expr(stmt.cond)
@@ -12279,6 +12468,11 @@ class _ModuleCompiler:
         if isinstance(stmt, SystemTask):
             for arg in stmt.args:
                 self._collect_state_scalar_accesses_from_expr(arg, acc)
+            return
+
+        if isinstance(stmt, TaskCall):
+            for arg in stmt.args:
+                self._collect_state_scalar_accesses_from_expr(arg, acc)
 
     def _collect_evaluate_assignment_accesses(self, stmt: Assignment, acc: set[str]) -> None:
         if isinstance(stmt.target, Identifier) and stmt.target.name in self._state_scalar_slot_by_name:
@@ -12424,6 +12618,10 @@ class _ModuleCompiler:
 
         if isinstance(stmt.target, Identifier):
             name = stmt.target.name
+            if name in self._local_name_by_var:
+                if self._is_integer_name(name):
+                    val = f"self._to_integer({val})"
+                return [f"{prefix}{self._local_name_by_var[name]} = {val}"]
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
             if name == self._in_loop_var:
@@ -12638,6 +12836,13 @@ class _ModuleCompiler:
             if variable.name == name:
                 return self._is_integer_decl(variable)
         return False
+
+    def _is_integer_name(self, name: str) -> bool:
+        if name in self._local_types:
+            return self._local_types[name] == ParamType.INTEGER
+        if name in self._param_types:
+            return self._param_types[name] == ParamType.INTEGER
+        return self._is_integer_variable(name)
 
     def _is_integer_decl(self, variable) -> bool:
         return (
@@ -12923,6 +13128,8 @@ class _ModuleCompiler:
                 probe_count += 1
             return probe_count
         if isinstance(stmt, SystemTask):
+            return 0
+        if isinstance(stmt, TaskCall):
             return 0
         # Loops/case statements can carry complex stateful semantics.  The
         # conservative probe skips them instead of guessing and perturbing the
@@ -13225,6 +13432,8 @@ class _ModuleCompiler:
 
         if isinstance(expr, Identifier):
             name = expr.name
+            if name in self._local_name_by_var:
+                return self._local_name_by_var[name]
             # Check if it's a parameter
             for p in self.module.parameters:
                 if p.name == name:
@@ -13346,6 +13555,8 @@ class _ModuleCompiler:
             return float(expr.value).is_integer(), False
 
         if isinstance(expr, Identifier):
+            if expr.name in self._local_types:
+                return self._local_types.get(expr.name) == ParamType.INTEGER, True
             if self._param_types.get(expr.name) == ParamType.INTEGER:
                 return True, True
             if self._var_types.get(expr.name) == ParamType.INTEGER:
@@ -13412,6 +13623,17 @@ class _ModuleCompiler:
         if name.startswith('$') and name[1:] in math_aliases:
             name = name[1:]
         args = [self._compile_expr(a) for a in expr.args]
+
+        if name in self._user_function_by_name:
+            if self._current_user_function == name:
+                raise CompilationError(
+                    f"Recursive Verilog-A function call is not supported: {name}()"
+                )
+            method = f"_user_fn_{self._safe_python_suffix(name)}"
+            joined = ", ".join(args)
+            if joined:
+                return f"self.{method}(nv, time, {joined})"
+            return f"self.{method}(nv, time)"
 
         if name == 'transition':
             key_expr, target, delay, rise, fall = self._compile_transition_call_parts(expr)

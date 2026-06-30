@@ -29,6 +29,10 @@ class TokenType(Enum):
     WHILE = auto()
     CASE = auto()
     ENDCASE = auto()
+    FUNCTION = auto()
+    ENDFUNCTION = auto()
+    TASK = auto()
+    ENDTASK = auto()
     OR = auto()
 
     # Literals
@@ -107,6 +111,10 @@ KEYWORDS = {
     'while': TokenType.WHILE,
     'case': TokenType.CASE,
     'endcase': TokenType.ENDCASE,
+    'function': TokenType.FUNCTION,
+    'endfunction': TokenType.ENDFUNCTION,
+    'task': TokenType.TASK,
+    'endtask': TokenType.ENDTASK,
     'or': TokenType.OR,
 }
 

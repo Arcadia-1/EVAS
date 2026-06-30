@@ -31,6 +31,7 @@ from evas.compiler.ast_nodes import (
     EventType,
     ForStatement,
     FunctionCall,
+    FunctionDecl,
     Identifier,
     IfStatement,
     MethodCall,
@@ -38,7 +39,10 @@ from evas.compiler.ast_nodes import (
     NumberLiteral,
     ParamType,
     StringLiteral,
+    SubprogramArg,
     SystemTask,
+    TaskCall,
+    TaskDecl,
     TernaryExpr,
     UnaryExpr,
     WhileStatement,
@@ -544,6 +548,66 @@ class TestParserVariables:
         assert v.is_array
         assert v.init_values is not None
         assert len(v.init_values) == 2
+
+
+class TestParserSubprograms:
+
+    def test_old_style_function_declaration(self):
+        src = """
+        module m();
+        function real clamp;
+            input real x;
+            input real lo, hi;
+            real tmp;
+            begin
+                tmp = x;
+                if (tmp < lo) clamp = lo;
+                else if (tmp > hi) clamp = hi;
+                else clamp = tmp;
+            end
+        endfunction
+        analog begin
+            y = clamp(1.2, 0.0, 1.0);
+        end
+        endmodule
+        """
+        m = _parse(src)
+
+        assert len(m.functions) == 1
+        fn = m.functions[0]
+        assert isinstance(fn, FunctionDecl)
+        assert fn.name == "clamp"
+        assert fn.return_type == ParamType.REAL
+        assert [arg.name for arg in fn.args] == ["x", "lo", "hi"]
+        assert all(isinstance(arg, SubprogramArg) for arg in fn.args)
+        assert [var.name for var in fn.variables] == ["tmp"]
+
+    def test_ansi_task_declaration_and_call(self):
+        src = """
+        module m();
+        task update(input real x, input integer code);
+            real y;
+            begin
+                y = x + code;
+                total = y;
+            end
+        endtask
+        analog begin
+            update(1.5, 2);
+        end
+        endmodule
+        """
+        m = _parse(src)
+
+        assert len(m.tasks) == 1
+        task = m.tasks[0]
+        assert isinstance(task, TaskDecl)
+        assert task.name == "update"
+        assert [arg.name for arg in task.args] == ["x", "code"]
+        assert task.args[1].var_type == ParamType.INTEGER
+        call = m.analog_block.body.statements[0]
+        assert isinstance(call, TaskCall)
+        assert call.name == "update"
 
 
 class TestParserContributions:

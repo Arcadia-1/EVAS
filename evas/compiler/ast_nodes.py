@@ -191,8 +191,15 @@ class SystemTask:
     name: str
     args: List[Expr]
 
+@dataclass
+class TaskCall:
+    """User-defined task call."""
+    name: str
+    args: List[Expr]
+
 Statement = Union[Assignment, Contribution, EventStatement, Block,
-                  IfStatement, ForStatement, WhileStatement, CaseStatement, SystemTask]
+                  IfStatement, ForStatement, WhileStatement, CaseStatement,
+                  SystemTask, TaskCall]
 
 
 # --- Declaration nodes ---
@@ -227,6 +234,27 @@ class VariableDecl:
     is_genvar: bool = False
 
 @dataclass
+class SubprogramArg:
+    name: str
+    var_type: ParamType = ParamType.REAL
+    direction: Direction = Direction.INPUT
+
+@dataclass
+class FunctionDecl:
+    name: str
+    return_type: ParamType = ParamType.REAL
+    args: List[SubprogramArg] = field(default_factory=list)
+    variables: List[VariableDecl] = field(default_factory=list)
+    body: Block = field(default_factory=lambda: Block(statements=[]))
+
+@dataclass
+class TaskDecl:
+    name: str
+    args: List[SubprogramArg] = field(default_factory=list)
+    variables: List[VariableDecl] = field(default_factory=list)
+    body: Block = field(default_factory=lambda: Block(statements=[]))
+
+@dataclass
 class AnalogBlock:
     body: Block
 
@@ -257,6 +285,8 @@ class Module:
     port_decls: List[PortDecl] = field(default_factory=list)
     parameters: List[ParameterDecl] = field(default_factory=list)
     variables: List[VariableDecl] = field(default_factory=list)
+    functions: List[FunctionDecl] = field(default_factory=list)
+    tasks: List[TaskDecl] = field(default_factory=list)
     analog_block: Optional[AnalogBlock] = None
     instances: List[ModuleInstance] = field(default_factory=list)
     default_transition: Optional[float] = None
