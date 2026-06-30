@@ -676,6 +676,10 @@ class Parser:
             var_type = ParamType.INTEGER
         is_genvar = type_tok.type == TokenType.GENVAR
 
+        vector_hi, vector_lo = None, None
+        if self.at(TokenType.LBRACKET):
+            vector_hi, vector_lo = self._parse_range()
+
         decls: List[VariableDecl] = []
         while True:
             name = self._expect_identifier_name("variable declaration")
@@ -702,6 +706,8 @@ class Parser:
 
             vd = VariableDecl(name=name, var_type=var_type, is_array=is_array,
                               array_hi=array_hi, array_lo=array_lo,
+                              is_vector=vector_hi is not None,
+                              vector_hi=vector_hi, vector_lo=vector_lo,
                               init_values=init_values, is_genvar=is_genvar)
             decls.append(vd)
 
@@ -1250,6 +1256,15 @@ class Parser:
         if self.match(TokenType.TILDE):
             operand = self._parse_unary()
             return UnaryExpr('~', operand)
+        if self.match(TokenType.AMP):
+            operand = self._parse_unary()
+            return UnaryExpr('&', operand)
+        if self.match(TokenType.PIPE):
+            operand = self._parse_unary()
+            return UnaryExpr('|', operand)
+        if self.match(TokenType.CARET):
+            operand = self._parse_unary()
+            return UnaryExpr('^', operand)
         if self.match(TokenType.PLUS):
             return self._parse_unary()
         return self._parse_primary()
@@ -1273,6 +1288,21 @@ class Parser:
             expr = self._parse_expression()
             self.expect(TokenType.RPAREN)
             return expr
+
+        # Concatenation and replication: {a, b} or {3{a}}
+        if tok.type == TokenType.LBRACE:
+            self.advance()
+            first = self._parse_expression()
+            if self.match(TokenType.LBRACE):
+                replicated = self._parse_expression()
+                self.expect(TokenType.RBRACE)
+                self.expect(TokenType.RBRACE)
+                return ReplicateExpr(count=first, expr=replicated)
+            parts = [first]
+            while self.match(TokenType.COMMA):
+                parts.append(self._parse_expression())
+            self.expect(TokenType.RBRACE)
+            return ConcatExpr(parts=parts)
 
         # V(...) or I(...) branch access
         if tok.type == TokenType.IDENT and tok.value in ('V', 'I'):
@@ -1314,9 +1344,13 @@ class Parser:
             # Array access: name[index]
             if self.at(TokenType.LBRACKET):
                 self.advance()
-                index = self._parse_expression()
+                first = self._parse_expression()
+                if self.match(TokenType.COLON):
+                    lsb = self._parse_expression()
+                    self.expect(TokenType.RBRACKET)
+                    return PartSelect(name=name, msb=first, lsb=lsb)
                 self.expect(TokenType.RBRACKET)
-                return ArrayAccess(name=name, index=index)
+                return ArrayAccess(name=name, index=first)
 
             return Identifier(name)
 

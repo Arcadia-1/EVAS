@@ -24,6 +24,7 @@ from evas.compiler.ast_nodes import (
     BranchAccess,
     CaseStatement,
     CombinedEvent,
+    ConcatExpr,
     Contribution,
     Direction,
     EventExpr,
@@ -38,6 +39,8 @@ from evas.compiler.ast_nodes import (
     Module,
     NumberLiteral,
     ParamType,
+    PartSelect,
+    ReplicateExpr,
     StringLiteral,
     SubprogramArg,
     SystemTask,
@@ -203,6 +206,11 @@ class TestLexerIdentifiers:
         assert tok.type == TokenType.IDENT
         assert tok.value == "$strobe"
 
+    def test_escaped_identifier(self):
+        tok = _first(r"\net.with/slash ")
+        assert tok.type == TokenType.IDENT
+        assert tok.value == "net.with/slash"
+
     def test_hash_delimiter(self):
         tok = _first("#")
         assert tok.type == TokenType.HASH
@@ -214,6 +222,18 @@ class TestLexerNumbers:
         tok = _first("42")
         assert tok.type == TokenType.NUMBER
         assert float(tok.value) == pytest.approx(42.0)
+
+    def test_based_binary_literal(self):
+        tok = _first("4'b1010")
+        assert tok.type == TokenType.NUMBER
+        assert tok.raw == "4'b1010"
+        assert float(tok.value) == pytest.approx(10.0)
+
+    def test_based_hex_literal(self):
+        tok = _first("8'hff")
+        assert tok.type == TokenType.NUMBER
+        assert tok.raw == "8'hff"
+        assert float(tok.value) == pytest.approx(255.0)
 
     def test_float(self):
         tok = _first("3.14")
@@ -1202,6 +1222,29 @@ class TestParserExpressions:
         expr = stmts[0].value
         assert isinstance(expr, ArrayAccess)
         assert expr.name == "arr"
+
+    def test_part_select_expr(self):
+        stmts = _stmts("x = code[3:1];")
+        expr = stmts[0].value
+        assert isinstance(expr, PartSelect)
+        assert expr.name == "code"
+
+    def test_concat_expr(self):
+        stmts = _stmts("x = {code[3:2], 2'b01};")
+        expr = stmts[0].value
+        assert isinstance(expr, ConcatExpr)
+        assert len(expr.parts) == 2
+
+    def test_replication_expr(self):
+        stmts = _stmts("x = {3{code[0]}};")
+        expr = stmts[0].value
+        assert isinstance(expr, ReplicateExpr)
+
+    def test_reduction_unary_expr(self):
+        stmts = _stmts("x = &code;")
+        expr = stmts[0].value
+        assert isinstance(expr, UnaryExpr)
+        assert expr.op == "&"
 
     def test_method_call(self):
         stmts = _stmts("x = conf.substr(0, 1);")

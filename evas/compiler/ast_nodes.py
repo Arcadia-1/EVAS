@@ -75,6 +75,12 @@ class ArrayAccess:
     index: 'Expr'
 
 @dataclass
+class PartSelect:
+    name: str
+    msb: 'Expr'
+    lsb: 'Expr'
+
+@dataclass
 class BinaryExpr:
     op: str
     left: 'Expr'
@@ -90,6 +96,15 @@ class TernaryExpr:
     cond: 'Expr'
     true_expr: 'Expr'
     false_expr: 'Expr'
+
+@dataclass
+class ConcatExpr:
+    parts: List['Expr']
+
+@dataclass
+class ReplicateExpr:
+    count: 'Expr'
+    expr: 'Expr'
 
 @dataclass
 class FunctionCall:
@@ -114,8 +129,8 @@ class MethodCall:
     method: str
     args: List['Expr']
 
-Expr = Union[NumberLiteral, StringLiteral, Identifier, ArrayAccess,
-             BinaryExpr, UnaryExpr, TernaryExpr, FunctionCall,
+Expr = Union[NumberLiteral, StringLiteral, Identifier, ArrayAccess, PartSelect,
+             BinaryExpr, UnaryExpr, TernaryExpr, ConcatExpr, ReplicateExpr, FunctionCall,
              BranchAccess, MethodCall]
 
 
@@ -212,6 +227,9 @@ class PortDecl:
     is_array: bool = False
     array_hi: Optional[int] = None
     array_lo: Optional[int] = None
+    is_vector: bool = False
+    vector_hi: Optional[int] = None
+    vector_lo: Optional[int] = None
 
 @dataclass
 class ParameterDecl:
@@ -230,6 +248,9 @@ class VariableDecl:
     is_array: bool = False
     array_hi: Optional[int] = None
     array_lo: Optional[int] = None
+    is_vector: bool = False
+    vector_hi: Optional[int] = None
+    vector_lo: Optional[int] = None
     init_values: Optional[List[Expr]] = None
     is_genvar: bool = False
 

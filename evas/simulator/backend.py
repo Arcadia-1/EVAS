@@ -4727,6 +4727,53 @@ class CompiledModel:
         rng = self._seed_to_stream(seed)
         return rng.randint(-2147483648, 2147483647)
 
+    @staticmethod
+    def _bit_select(value: Any, index: Any) -> int:
+        idx = max(0, int(index))
+        return (CompiledModel._to_integer(value) >> idx) & 1
+
+    @staticmethod
+    def _part_select(value: Any, msb: Any, lsb: Any) -> int:
+        hi = int(msb)
+        lo = int(lsb)
+        low = min(hi, lo)
+        width = abs(hi - lo) + 1
+        mask = (1 << width) - 1
+        return (CompiledModel._to_integer(value) >> low) & mask
+
+    @staticmethod
+    def _concat_bits(*parts: Tuple[Any, int]) -> int:
+        result = 0
+        for value, width in parts:
+            width_i = max(0, int(width))
+            mask = (1 << width_i) - 1 if width_i else 0
+            result = (result << width_i) | (CompiledModel._to_integer(value) & mask)
+        return result
+
+    @staticmethod
+    def _replicate_bits(count: Any, value: Any, width: int) -> int:
+        result = 0
+        count_i = max(0, int(count))
+        width_i = max(0, int(width))
+        mask = (1 << width_i) - 1 if width_i else 0
+        part = CompiledModel._to_integer(value) & mask
+        for _ in range(count_i):
+            result = (result << width_i) | part
+        return result
+
+    @staticmethod
+    def _reduce_bits(op: str, value: Any, width: int) -> int:
+        width_i = max(1, int(width))
+        mask = (1 << width_i) - 1
+        bits = CompiledModel._to_integer(value) & mask
+        if op == "&":
+            return 1 if bits == mask else 0
+        if op == "|":
+            return 1 if bits != 0 else 0
+        if op == "^":
+            return int(bin(int(bits)).count("1") & 1)
+        return 0
+
 
 def compile_module(
     module: Module,
@@ -5630,6 +5677,21 @@ class _ModuleCompiler:
         if isinstance(expr, ArrayAccess):
             return self._collect_restricted_calls_from_expr(expr.index)
 
+        if isinstance(expr, PartSelect):
+            restricted |= self._collect_restricted_calls_from_expr(expr.msb)
+            restricted |= self._collect_restricted_calls_from_expr(expr.lsb)
+            return restricted
+
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                restricted |= self._collect_restricted_calls_from_expr(part)
+            return restricted
+
+        if isinstance(expr, ReplicateExpr):
+            restricted |= self._collect_restricted_calls_from_expr(expr.count)
+            restricted |= self._collect_restricted_calls_from_expr(expr.expr)
+            return restricted
+
         if isinstance(expr, BranchAccess):
             if expr.node1_index is not None:
                 restricted |= self._collect_restricted_calls_from_expr(expr.node1_index)
@@ -5753,6 +5815,18 @@ class _ModuleCompiler:
         if isinstance(expr, ArrayAccess):
             return expr.name in continuous_vars or self._expr_is_continuous(expr.index, continuous_vars)
 
+        if isinstance(expr, PartSelect):
+            return expr.name in continuous_vars or self._expr_is_continuous(expr.msb, continuous_vars) or self._expr_is_continuous(expr.lsb, continuous_vars)
+
+        if isinstance(expr, ConcatExpr):
+            return any(self._expr_is_continuous(part, continuous_vars) for part in expr.parts)
+
+        if isinstance(expr, ReplicateExpr):
+            return (
+                self._expr_is_continuous(expr.count, continuous_vars)
+                or self._expr_is_continuous(expr.expr, continuous_vars)
+            )
+
         if isinstance(expr, BranchAccess):
             return True
 
@@ -5869,6 +5943,21 @@ class _ModuleCompiler:
             yield from self._iter_function_calls_in_expr(expr.cond)
             yield from self._iter_function_calls_in_expr(expr.true_expr)
             yield from self._iter_function_calls_in_expr(expr.false_expr)
+            return
+
+        if isinstance(expr, PartSelect):
+            yield from self._iter_function_calls_in_expr(expr.msb)
+            yield from self._iter_function_calls_in_expr(expr.lsb)
+            return
+
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                yield from self._iter_function_calls_in_expr(part)
+            return
+
+        if isinstance(expr, ReplicateExpr):
+            yield from self._iter_function_calls_in_expr(expr.count)
+            yield from self._iter_function_calls_in_expr(expr.expr)
             return
 
         if isinstance(expr, ArrayAccess):
@@ -10100,6 +10189,21 @@ class _ModuleCompiler:
             self._collect_static_branch_io_from_expr(expr.index, acc, in_event_body)
             return
 
+        if isinstance(expr, PartSelect):
+            self._collect_static_branch_io_from_expr(expr.msb, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(expr.lsb, acc, in_event_body)
+            return
+
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                self._collect_static_branch_io_from_expr(part, acc, in_event_body)
+            return
+
+        if isinstance(expr, ReplicateExpr):
+            self._collect_static_branch_io_from_expr(expr.count, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(expr.expr, acc, in_event_body)
+            return
+
         if isinstance(expr, BranchAccess):
             self._collect_static_branch_io_from_branch_read(expr, acc, in_event_body)
             return
@@ -10145,6 +10249,21 @@ class _ModuleCompiler:
 
         if isinstance(expr, ArrayAccess):
             self._collect_event_trigger_voltage_nodes_from_expr(expr.index, acc)
+            return
+
+        if isinstance(expr, PartSelect):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.msb, acc)
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.lsb, acc)
+            return
+
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                self._collect_event_trigger_voltage_nodes_from_expr(part, acc)
+            return
+
+        if isinstance(expr, ReplicateExpr):
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.count, acc)
+            self._collect_event_trigger_voltage_nodes_from_expr(expr.expr, acc)
             return
 
         if isinstance(expr, BranchAccess):
@@ -11971,6 +12090,20 @@ class _ModuleCompiler:
             return nodes
         if isinstance(expr, ArrayAccess):
             return self._collect_branch_nodes_from_expr(expr.index)
+        if isinstance(expr, PartSelect):
+            return (
+                self._collect_branch_nodes_from_expr(expr.msb)
+                | self._collect_branch_nodes_from_expr(expr.lsb)
+            )
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                nodes |= self._collect_branch_nodes_from_expr(part)
+            return nodes
+        if isinstance(expr, ReplicateExpr):
+            return (
+                self._collect_branch_nodes_from_expr(expr.count)
+                | self._collect_branch_nodes_from_expr(expr.expr)
+            )
         if isinstance(expr, MethodCall):
             for arg in expr.args:
                 nodes |= self._collect_branch_nodes_from_expr(arg)
@@ -12012,6 +12145,18 @@ class _ModuleCompiler:
             return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
         if isinstance(expr, ArrayAccess):
             return self._collect_branch_nudge_nodes_from_expr(expr.index, polarity)
+        if isinstance(expr, PartSelect):
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.msb, polarity))
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.lsb, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                merge(self._collect_branch_nudge_nodes_from_expr(part, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, ReplicateExpr):
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.count, polarity))
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.expr, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
         if isinstance(expr, MethodCall):
             for arg in expr.args:
                 merge(self._collect_branch_nudge_nodes_from_expr(arg, polarity))
@@ -12512,7 +12657,15 @@ class _ModuleCompiler:
                 acc.add(expr.name)
             return
         if isinstance(expr, ArrayAccess):
+            if not self._is_array_name(expr.name) and expr.name in self._state_scalar_slot_by_name:
+                acc.add(expr.name)
             self._collect_state_scalar_accesses_from_expr(expr.index, acc)
+            return
+        if isinstance(expr, PartSelect):
+            if expr.name in self._state_scalar_slot_by_name:
+                acc.add(expr.name)
+            self._collect_state_scalar_accesses_from_expr(expr.msb, acc)
+            self._collect_state_scalar_accesses_from_expr(expr.lsb, acc)
             return
         if isinstance(expr, BinaryExpr):
             self._collect_state_scalar_accesses_from_expr(expr.left, acc)
@@ -12525,6 +12678,14 @@ class _ModuleCompiler:
             self._collect_state_scalar_accesses_from_expr(expr.cond, acc)
             self._collect_state_scalar_accesses_from_expr(expr.true_expr, acc)
             self._collect_state_scalar_accesses_from_expr(expr.false_expr, acc)
+            return
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                self._collect_state_scalar_accesses_from_expr(part, acc)
+            return
+        if isinstance(expr, ReplicateExpr):
+            self._collect_state_scalar_accesses_from_expr(expr.count, acc)
+            self._collect_state_scalar_accesses_from_expr(expr.expr, acc)
             return
         if isinstance(expr, FunctionCall):
             for arg in expr.args:
@@ -13158,6 +13319,18 @@ class _ModuleCompiler:
         if isinstance(expr, ArrayAccess):
             yield from self._iter_transition_targets_in_expr(expr.index)
             return
+        if isinstance(expr, PartSelect):
+            yield from self._iter_transition_targets_in_expr(expr.msb)
+            yield from self._iter_transition_targets_in_expr(expr.lsb)
+            return
+        if isinstance(expr, ConcatExpr):
+            for part in expr.parts:
+                yield from self._iter_transition_targets_in_expr(part)
+            return
+        if isinstance(expr, ReplicateExpr):
+            yield from self._iter_transition_targets_in_expr(expr.count)
+            yield from self._iter_transition_targets_in_expr(expr.expr)
+            return
         if isinstance(expr, BranchAccess):
             for sub in (
                 expr.node1_index,
@@ -13200,7 +13373,7 @@ class _ModuleCompiler:
                 )
             )
         if isinstance(expr, UnaryExpr):
-            if expr.op in {"!", "~"}:
+            if expr.op in {"!", "~", "&", "|", "^"}:
                 return True
             return self._transition_probe_target_is_discrete(
                 expr.operand,
@@ -13230,6 +13403,25 @@ class _ModuleCompiler:
                 conditionally_assigned,
                 seen=seen,
             )
+        if isinstance(expr, PartSelect):
+            return (
+                self._transition_probe_target_is_discrete(
+                    expr.msb,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+                or self._transition_probe_target_is_discrete(
+                    expr.lsb,
+                    assignment_exprs,
+                    conditionally_assigned,
+                    seen=seen,
+                )
+            )
+        if isinstance(expr, ConcatExpr):
+            return True
+        if isinstance(expr, ReplicateExpr):
+            return True
         if isinstance(expr, FunctionCall):
             return any(
                 self._transition_probe_target_is_discrete(
@@ -13289,7 +13481,15 @@ class _ModuleCompiler:
             return f"_probe_state.get({name!r}, self.state.get({name!r}, 0.0))"
         if isinstance(expr, ArrayAccess):
             idx = self._compile_transition_probe_expr(expr.index)
-            return f"self._array_get({expr.name!r}, int({idx}))"
+            if self._is_array_name(expr.name):
+                return f"self._array_get({expr.name!r}, int({idx}))"
+            base = self._compile_transition_probe_expr(Identifier(expr.name))
+            return f"self._bit_select({base}, {idx})"
+        if isinstance(expr, PartSelect):
+            base = self._compile_transition_probe_expr(Identifier(expr.name))
+            msb = self._compile_transition_probe_expr(expr.msb)
+            lsb = self._compile_transition_probe_expr(expr.lsb)
+            return f"self._part_select({base}, {msb}, {lsb})"
         if isinstance(expr, BinaryExpr):
             left = self._compile_transition_probe_expr(expr.left)
             right = self._compile_transition_probe_expr(expr.right)
@@ -13321,6 +13521,9 @@ class _ModuleCompiler:
             return f"({left} {op} {right})"
         if isinstance(expr, UnaryExpr):
             operand = self._compile_transition_probe_expr(expr.operand)
+            if expr.op in {"&", "|", "^"}:
+                width = self._expr_bit_width(expr.operand)
+                return f"self._reduce_bits({expr.op!r}, {operand}, {width})"
             if expr.op == "!":
                 return f"(not ({operand}))"
             if expr.op == "~":
@@ -13331,6 +13534,17 @@ class _ModuleCompiler:
             true_e = self._compile_transition_probe_expr(expr.true_expr)
             false_e = self._compile_transition_probe_expr(expr.false_expr)
             return f"(({true_e}) if ({cond}) else ({false_e}))"
+        if isinstance(expr, ConcatExpr):
+            parts = ", ".join(
+                f"({self._compile_transition_probe_expr(part)}, {self._expr_bit_width(part)})"
+                for part in expr.parts
+            )
+            return f"self._concat_bits({parts})"
+        if isinstance(expr, ReplicateExpr):
+            count = self._compile_transition_probe_expr(expr.count)
+            value = self._compile_transition_probe_expr(expr.expr)
+            width = self._expr_bit_width(expr.expr)
+            return f"self._replicate_bits({count}, {value}, {width})"
         if isinstance(expr, BranchAccess):
             if expr.node2:
                 n1 = self._compile_transition_probe_node_voltage(
@@ -13422,6 +13636,70 @@ class _ModuleCompiler:
             return f"self.params[{expr.obj!r}][int({args[0]}):int({args[1]})+1]"
         return "''"
 
+    def _is_array_name(self, name: str) -> bool:
+        return any(v.name == name and v.is_array for v in self.module.variables)
+
+    def _declared_bit_width(self, name: str) -> int:
+        for variable in self.module.variables:
+            if variable.name != name:
+                continue
+            if getattr(variable, "is_vector", False) and variable.vector_hi is not None:
+                return abs(int(variable.vector_hi) - int(variable.vector_lo or 0)) + 1
+            if self._is_integer_decl(variable):
+                return 32
+            return 1
+        for port in self.module.port_decls:
+            if port.name != name:
+                continue
+            if port.is_array and port.array_hi is not None:
+                return abs(int(port.array_hi) - int(port.array_lo or 0)) + 1
+            return 1
+        if self._param_types.get(name) == ParamType.INTEGER:
+            return 32
+        return 1
+
+    @staticmethod
+    def _literal_bit_width(expr: NumberLiteral) -> int:
+        raw = getattr(expr, "raw", None) or ""
+        match = re.match(r"(?i)^(\d+)'[s]?[bodh]", raw)
+        if match:
+            return max(1, int(match.group(1)))
+        value = int(float(expr.value))
+        if value == 0:
+            return 1
+        return max(1, abs(value).bit_length())
+
+    def _expr_bit_width(self, expr: Expr) -> int:
+        if isinstance(expr, NumberLiteral):
+            return self._literal_bit_width(expr)
+        if isinstance(expr, Identifier):
+            return self._declared_bit_width(expr.name)
+        if isinstance(expr, ArrayAccess):
+            if self._is_array_name(expr.name):
+                return self._declared_bit_width(expr.name)
+            return 1
+        if isinstance(expr, PartSelect):
+            msb = int(self._eval_expr_static(expr.msb, self._evaluate_ir_static_param_values))
+            lsb = int(self._eval_expr_static(expr.lsb, self._evaluate_ir_static_param_values))
+            return abs(msb - lsb) + 1
+        if isinstance(expr, ConcatExpr):
+            return sum(self._expr_bit_width(part) for part in expr.parts)
+        if isinstance(expr, ReplicateExpr):
+            count = int(self._eval_expr_static(expr.count, self._evaluate_ir_static_param_values))
+            return max(0, count) * self._expr_bit_width(expr.expr)
+        if isinstance(expr, UnaryExpr) and expr.op in {'&', '|', '^'}:
+            return 1
+        if isinstance(expr, TernaryExpr):
+            return max(
+                self._expr_bit_width(expr.true_expr),
+                self._expr_bit_width(expr.false_expr),
+            )
+        if isinstance(expr, BinaryExpr):
+            if expr.op in {'<<', '>>'}:
+                return self._expr_bit_width(expr.left)
+            return max(self._expr_bit_width(expr.left), self._expr_bit_width(expr.right))
+        return 1
+
     def _compile_expr(self, expr: Expr) -> str:
         """Compile an expression to Python code string."""
         if isinstance(expr, NumberLiteral):
@@ -13468,7 +13746,16 @@ class _ModuleCompiler:
 
         if isinstance(expr, ArrayAccess):
             idx = self._compile_expr(expr.index)
-            return f"self._array_get({expr.name!r}, int({idx}))"
+            if self._is_array_name(expr.name):
+                return f"self._array_get({expr.name!r}, int({idx}))"
+            base = self._compile_expr(Identifier(expr.name))
+            return f"self._bit_select({base}, {idx})"
+
+        if isinstance(expr, PartSelect):
+            base = self._compile_expr(Identifier(expr.name))
+            msb = self._compile_expr(expr.msb)
+            lsb = self._compile_expr(expr.lsb)
+            return f"self._part_select({base}, {msb}, {lsb})"
 
         if isinstance(expr, BinaryExpr):
             left = self._compile_expr(expr.left)
@@ -13503,6 +13790,9 @@ class _ModuleCompiler:
 
         if isinstance(expr, UnaryExpr):
             operand = self._compile_expr(expr.operand)
+            if expr.op in {'&', '|', '^'}:
+                width = self._expr_bit_width(expr.operand)
+                return f"self._reduce_bits({expr.op!r}, {operand}, {width})"
             if expr.op == '!':
                 return f"(not ({operand}))"
             if expr.op == '~':
@@ -13514,6 +13804,19 @@ class _ModuleCompiler:
             true_e = self._compile_expr(expr.true_expr)
             false_e = self._compile_expr(expr.false_expr)
             return f"(({true_e}) if ({cond}) else ({false_e}))"
+
+        if isinstance(expr, ConcatExpr):
+            parts = ", ".join(
+                f"({self._compile_expr(part)}, {self._expr_bit_width(part)})"
+                for part in expr.parts
+            )
+            return f"self._concat_bits({parts})"
+
+        if isinstance(expr, ReplicateExpr):
+            count = self._compile_expr(expr.count)
+            value = self._compile_expr(expr.expr)
+            width = self._expr_bit_width(expr.expr)
+            return f"self._replicate_bits({count}, {value}, {width})"
 
         if isinstance(expr, BranchAccess):
             node = expr.node1
@@ -13566,9 +13869,16 @@ class _ModuleCompiler:
         if isinstance(expr, ArrayAccess):
             if self._var_types.get(expr.name) == ParamType.INTEGER:
                 return True, True
+            if not self._is_array_name(expr.name):
+                return True, True
             return False, False
 
+        if isinstance(expr, PartSelect):
+            return True, True
+
         if isinstance(expr, UnaryExpr):
+            if expr.op in {'&', '|', '^'}:
+                return True, True
             return self._expr_integer_kind(expr.operand)
 
         if isinstance(expr, BinaryExpr):
@@ -13584,6 +13894,9 @@ class _ModuleCompiler:
             true_like, true_typed = self._expr_integer_kind(expr.true_expr)
             false_like, false_typed = self._expr_integer_kind(expr.false_expr)
             return true_like and false_like, true_typed or false_typed
+
+        if isinstance(expr, (ConcatExpr, ReplicateExpr)):
+            return True, True
 
         return False, False
 
@@ -13901,16 +14214,46 @@ class _ModuleCompiler:
                 return ~int(self._eval_expr_static(expr.operand, env))
             except Exception:
                 return 0
+        if isinstance(expr, UnaryExpr) and expr.op in {'&', '|', '^'}:
+            value = self._eval_expr_static(expr.operand, env)
+            width = self._expr_bit_width(expr.operand)
+            return CompiledModel._reduce_bits(expr.op, value, width)
         if isinstance(expr, Identifier):
             if expr.name == 'inf':
                 return float('inf')
             if expr.name in env:
                 return env[expr.name]
             return 0
+        if isinstance(expr, ArrayAccess):
+            base = env.get(expr.name, 0)
+            index = self._eval_expr_static(expr.index, env)
+            if self._is_array_name(expr.name):
+                return 0
+            return CompiledModel._bit_select(base, index)
+        if isinstance(expr, PartSelect):
+            base = env.get(expr.name, 0)
+            msb = self._eval_expr_static(expr.msb, env)
+            lsb = self._eval_expr_static(expr.lsb, env)
+            return CompiledModel._part_select(base, msb, lsb)
         if isinstance(expr, BinaryExpr):
             lv = self._eval_expr_static(expr.left, env)
             rv = self._eval_expr_static(expr.right, env)
             return self._eval_static_binary_expr(expr.op, lv, rv)
+        if isinstance(expr, TernaryExpr):
+            cond = self._eval_expr_static(expr.cond, env)
+            branch = expr.true_expr if cond else expr.false_expr
+            return self._eval_expr_static(branch, env)
+        if isinstance(expr, ConcatExpr):
+            parts = [
+                (self._eval_expr_static(part, env), self._expr_bit_width(part))
+                for part in expr.parts
+            ]
+            return CompiledModel._concat_bits(*parts)
+        if isinstance(expr, ReplicateExpr):
+            count = self._eval_expr_static(expr.count, env)
+            value = self._eval_expr_static(expr.expr, env)
+            width = self._expr_bit_width(expr.expr)
+            return CompiledModel._replicate_bits(count, value, width)
         if isinstance(expr, FunctionCall):
             args = [self._eval_expr_static(arg, env) for arg in expr.args]
             name = expr.name[1:] if expr.name.startswith('$') else expr.name

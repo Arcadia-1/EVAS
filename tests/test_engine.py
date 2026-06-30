@@ -8684,3 +8684,55 @@ endmodule
 
         assert model.state["y"] == pytest.approx(3.25)
         assert result.signals["out"].tolist() == pytest.approx([3.25, 3.25])
+
+
+class TestVectorBitSyntax:
+
+    def test_bit_part_concat_replication_and_reductions(self):
+        src = """\
+`include "disciplines.vams"
+module vector_bits(out);
+    output voltage out;
+    integer [3:0] code = 4'b1010;
+    integer encoded;
+    analog begin
+        encoded = {code[3:2], 2'b01};
+        encoded = encoded + {2{code[0]}};
+        encoded = encoded + (|code[1:0]);
+        encoded = encoded + (&code[3:1]);
+        encoded = encoded + (^code[3:0]);
+        V(out) <+ encoded;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["code"] == 10
+        assert model.state["encoded"] == 10
+        assert result.signals["out"].tolist() == pytest.approx([10.0, 10.0])
+
+    def test_escaped_identifier_node_name(self):
+        src = r"""\
+`include "disciplines.vams"
+module escaped_node(\out/net );
+    output voltage \out/net ;
+    analog begin
+        V(\out/net ) <+ 0.75;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out/net")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out/net"].tolist() == pytest.approx([0.75, 0.75])

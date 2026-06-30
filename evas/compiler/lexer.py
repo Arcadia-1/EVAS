@@ -224,10 +224,54 @@ def tokenize(source: str) -> List[Token]:
             tokens.append(Token(TokenType.STRING, s, line, start_col))
             continue
 
+        # Escaped identifiers: backslash followed by non-whitespace characters,
+        # terminated by whitespace.  The leading backslash and terminating
+        # whitespace are not part of the logical identifier name.
+        if ch == '\\':
+            start = i
+            start_col = col
+            i += 1
+            col += 1
+            while i < n and not source[i].isspace():
+                i += 1
+                col += 1
+            name = source[start + 1:i]
+            tokens.append(Token(TokenType.IDENT, name, line, start_col, source[start:i]))
+            continue
+
         # Numbers
         if ch.isdigit() or (ch == '.' and i + 1 < n and source[i + 1].isdigit()):
             start = i
             start_col = col
+            if ch.isdigit():
+                j = i
+                while j < n and source[j].isdigit():
+                    j += 1
+                if j < n and source[j] == "'":
+                    k = j + 1
+                    if k < n and source[k] in "sS":
+                        k += 1
+                    if k < n and source[k] in "bBoOdDhH":
+                        base_ch = source[k].lower()
+                        k += 1
+                        digit_start = k
+                        while k < n and (
+                            source[k].isalnum()
+                            or source[k] in "_xXzZ?"
+                        ):
+                            k += 1
+                        raw_num = source[start:k]
+                        digits = source[digit_start:k].replace("_", "")
+                        digits = ''.join('0' if c in 'xXzZ?' else c for c in digits)
+                        base = {'b': 2, 'o': 8, 'd': 10, 'h': 16}[base_ch]
+                        try:
+                            val = float(int(digits or "0", base))
+                        except ValueError:
+                            val = 0.0
+                        tokens.append(Token(TokenType.NUMBER, str(val), line, start_col, raw_num))
+                        col += k - i
+                        i = k
+                        continue
             # Match number: optional leading digits, optional dot+digits, optional exponent
             while i < n and (source[i].isdigit() or source[i] == '.'):
                 i += 1
