@@ -35,7 +35,8 @@ script is present) are saved there as well.
 Analysis scripts receive the output directory directly from `evas run`.
 
 The default engine is `python`. Use `--engine evas-rust` only when the Rust
-backend has been built and the selected design is covered by evas-rust.
+backend is bundled in the installed wheel or has been built from source, and
+the selected design is covered by evas-rust.
 The legacy `evas2` and `rust2` selectors remain accepted as compatibility aliases.
 
 ## `evas simulate <file.scs>`

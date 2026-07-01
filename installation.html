@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Quickstart" href="quickstart.html"><link rel="prev" title="EVAS — Event-driven Verilog-A Simulator" href="index.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Installation - EVAS 0.5.0 documentation</title>
+        <title>Installation - EVAS 0.5.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">EVAS 0.5.0 documentation</div></a>
+      <a href="index.html"><div class="brand">EVAS 0.5.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.5.0 documentation</span>
+  <span class="sidebar-brand-text">EVAS 0.5.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -288,9 +288,11 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 <section id="engine-selection">
 <h2>Engine Selection<a class="headerlink" href="#engine-selection" title="Link to this heading">¶</a></h2>
 <p>The packaged default is the Python compatibility engine. It works from PyPI or
-a fresh source checkout without compiling native code.</p>
+a fresh source checkout without compiling native code. Compatible Linux wheels
+also include the evas-rust shared library for explicit Rust-engine runs.</p>
 <p>evas-rust is the optional Rust-backed execution path for supported event-driven
-designs. To use it from source, build the Rust core first:</p>
+designs. If your platform installed the pure Python wheel, build the Rust core
+from source before selecting evas-rust:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cargo<span class="w"> </span>build<span class="w"> </span>--manifest-path<span class="w"> </span>evas/rust_core/Cargo.toml<span class="w"> </span>--release
 evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>--engine<span class="w"> </span>evas-rust
 </pre></div>
@@ -391,7 +393,7 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span 
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=1dd76d02"></script>
+</div><script src="_static/documentation_options.js?v=b9afe91b"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
