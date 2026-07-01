@@ -89,6 +89,24 @@ the in-package reference for common wiring patterns:
 
 ## Supported Verilog-A
 
+### Support tiers
+
+EVAS is strongest in the **behavioral-event / waveform-oriented** tier: voltage
+reads and drives, event-controlled state, timers, transitions, table/random/file
+helpers, and small mixed-signal logic/wreal subsets. This tier is implemented by
+a lightweight event/waveform engine and does not require a full conservative
+analog solver.
+
+EVAS also accepts a limited **behavioral-continuous-time** tier. Operators such
+as `ddt()`, `idt()`, `laplace_*`, `zi_*`, and `limexp()` compile and run with
+explicit behavioral approximations for transient compatibility. They should not
+be read as Spectre-equivalent continuous-time transfer-function solving.
+
+EVAS does not implement the **conservative-current / KCL-MNA** tier. Device-style
+models that rely on `I(p,n) <+ ...`, branch charge/current contributions,
+nonlinear device equations, or transistor-level AC/DC matrix solving remain
+outside the current simulator design.
+
 | Feature | Status |
 |---------|--------|
 | `V(node) <+`, `V(a,b)` differential | ✅ |
@@ -97,18 +115,23 @@ the in-package reference for common wiring patterns:
 | `@(timer(period))`, `@(final_step)` | ✅ |
 | `transition()` with delay / rise / fall | ✅ |
 | `slew(x, maxrise, maxfall)` transient limiter | ✅ (behavioral approximation) |
-| `for`, `if/else`, `case/endcase`, `begin/end` | ✅ |
-| arrays, parameters (real / integer / string) | ✅ |
+| `for`, `repeat`, `while`, `do while`, `if/else`, `case/endcase`, `begin/end` | ✅ |
+| arrays, including integer/real 1-D and 2-D state arrays | ✅ |
+| parameters and variables (real / integer / string) | ✅ |
+| user-defined functions/tasks, including bounded recursive functions | ✅ |
+| `module`, `connectmodule`, simple behavioral hierarchy | ✅ |
 | `` `include ``, `` `define ``, `` `default_transition `` | ✅ |
 | SI suffixes, math: `sin` `cos` `exp` `ln` `log` `pow` `floor` `ceil` … | ✅ |
 | `$temperature`, `$vt`, `$abstime` | ✅ |
 | `$bound_step()` | ✅ |
-| `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
-| `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
+| `$fopen()`, `$fclose()`, `$fscanf()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
+| `$display`, `$strobe`, `$sformat()`, `$swrite()` | ✅ |
+| `$random`, `$dist_*()`, `$rdist_*()` behavioral random helpers | ✅ |
 | `last_crossing(expr, dir, time_tol, expr_tol)` | ✅ (most-recent event-time approximation) |
 | `analysis("ac")`, `ac_stim()` | ✅ (behavioral Python sweep helper) |
 | `white_noise()`, `flicker_noise()`, `noise_table()` | ✅ (behavioral PSD / integrated-noise helper) |
-| `I() <+`, `ddt()`, `idt()`, `q() <+` | not supported by design |
+| `ddt()`, `idt()`, `laplace_*()`, `zi_*()`, `limexp()` | ✅ (behavioral transient approximation) |
+| `I() <+`, `q() <+`, branch charge/current contributions | not supported by design |
 | SPICE-style AC/DC matrix solving, transistors | not supported by design |
 | Spectre `subckt` hierarchy | not yet implemented |
 
