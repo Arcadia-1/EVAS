@@ -13,7 +13,7 @@ try:
 
     release = _package_version("evas-sim")
 except Exception:
-    release = "0.5.1"
+    release = "0.5.2"
 language = "en"
 
 extensions = [

@@ -17,12 +17,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
       - run: pip install build wheel
       - name: Build pure Python distribution
         run: EVAS_SKIP_RUST_CORE_BUILD=1 python -m build --sdist --wheel --outdir dist
-      - name: Build Linux evas-rust wheel
-        run: python -m build --wheel --outdir dist
+      - name: Build manylinux evas-rust wheel
+        run: |
+          docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux2014_x86_64 /bin/bash -lc '
+            set -euo pipefail
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            source "$HOME/.cargo/env"
+            /opt/python/cp312-cp312/bin/python -m pip install build wheel
+            EVAS_RUST_WHEEL_PLATFORM_TAG=manylinux2014_x86_64 /opt/python/cp312-cp312/bin/python -m build --wheel --outdir dist
+          '
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -39,3 +45,5 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

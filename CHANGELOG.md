@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.5.2] — 2026-07-01
+
+### Fixed — Publishing
+- Build the Linux evas-rust wheel inside a manylinux2014 container and publish
+  it with the PyPI-supported `manylinux2014_x86_64` platform tag.
+- Allow PyPI publish reruns to skip artifacts that were already uploaded by a
+  partial release attempt.
+
 ## [0.5.1] — 2026-07-01
 
 ### Fixed — Packaging

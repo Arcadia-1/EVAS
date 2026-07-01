@@ -41,6 +41,10 @@ def _rust_library_filename() -> str:
     return "libevas_rust_core.so"
 
 
+def _rust_wheel_platform_tag(default: str) -> str:
+    return os.environ.get("EVAS_RUST_WHEEL_PLATFORM_TAG", default).strip() or default
+
+
 class build_rust_core(Command):
     description = "build the optional evas-rust shared library with cargo"
     user_options = []
@@ -97,7 +101,7 @@ if _bdist_wheel is not None:
             python_tag, abi_tag, platform_tag = super().get_tag()
             if _skip_rust_core_build():
                 return python_tag, abi_tag, platform_tag
-            return "py3", "none", platform_tag
+            return "py3", "none", _rust_wheel_platform_tag(platform_tag)
 
     cmdclass["bdist_wheel"] = bdist_wheel
 
