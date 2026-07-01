@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "evas-sim"
-version = "0.5.0"
+version = "0.5.1"
 description = "Event-driven Verilog-A Simulator with a Python compatibility engine and optional evas-rust backend"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,6 +43,11 @@ include = ["evas*"]
 [tool.setuptools.package-data]
 "evas.examples" = ["**/*"]
 "evas.vams"     = ["*.vams"]
+"evas.rust_core" = [
+    "target/release/libevas_rust_core.dylib",
+    "target/release/libevas_rust_core.so",
+    "target/release/evas_rust_core.dll",
+]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["__pycache__/*", "**/__pycache__/*", "*.pyc", "**/*.pyc"]

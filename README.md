@@ -43,10 +43,13 @@ evas list        # verify install — prints bundled example groups
 If `evas` is not on PATH, use `python -m evas`.
 
 The packaged default uses the Python engine so examples and user netlists run
-from PyPI or a fresh source checkout. To request evas-rust explicitly, build the
-Rust backend first and pass `--engine evas-rust`, set `EVAS_ENGINE=evas-rust`,
-or add `simulatorOptions options evas_engine=evas-rust` to the testbench.
-The legacy `evas2` and `rust2` selectors remain accepted as compatibility aliases.
+from PyPI or a fresh source checkout. Compatible Linux wheels also include the
+evas-rust shared library. To request evas-rust explicitly, pass
+`--engine evas-rust`, set `EVAS_ENGINE=evas-rust`, or add
+`simulatorOptions options evas_engine=evas-rust` to the testbench. If your
+platform installed the pure Python wheel, build the Rust backend from source
+first. The legacy `evas2` and `rust2` selectors remain accepted as compatibility
+aliases.
 
 ## Simulating your own design
 

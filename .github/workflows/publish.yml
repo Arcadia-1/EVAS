@@ -17,8 +17,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install build
-      - run: python -m build
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install build wheel
+      - name: Build pure Python distribution
+        run: EVAS_SKIP_RUST_CORE_BUILD=1 python -m build --sdist --wheel --outdir dist
+      - name: Build Linux evas-rust wheel
+        run: python -m build --wheel --outdir dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist

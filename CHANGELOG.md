@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.5.1] — 2026-07-01
+
+### Fixed — Packaging
+- Publish both a pure Python wheel and a Linux evas-rust wheel so normal PyPI
+  installs keep working without native code while compatible Linux installs can
+  load `libevas_rust_core.so` for `EVAS_ENGINE=evas-rust` and legacy
+  `EVAS_ENGINE=evas2` runs.
+- Added a setuptools cargo build hook that packages the platform Rust shared
+  library into evas-rust wheels and leaves pure Python wheels free of native
+  binaries.
+
+### Fixed — Rust Backend Semantics
+- Aligned Rust full-model `cross(..., 0)` event-body reads with the Spectre and
+  Python post-cross source-side semantics while preserving exact event
+  timestamps.
+
 ## [0.5.0] — 2026-07-01
 
 ### Added — Verilog-A and Verilog-AMS Compatibility

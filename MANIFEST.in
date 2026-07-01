@@ -1,0 +1,4 @@
+include evas/rust_core/Cargo.toml
+include evas/rust_core/Cargo.lock
+recursive-include evas/rust_core/src *.rs
+prune evas/rust_core/target
