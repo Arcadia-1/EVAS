@@ -10,6 +10,8 @@ class TokenType(Enum):
     # Keywords
     MODULE = auto()
     ENDMODULE = auto()
+    CONNECTMODULE = auto()
+    ENDCONNECTMODULE = auto()
     ANALOG = auto()
     BEGIN = auto()
     END = auto()
@@ -100,6 +102,8 @@ class TokenType(Enum):
 KEYWORDS = {
     'module': TokenType.MODULE,
     'endmodule': TokenType.ENDMODULE,
+    'connectmodule': TokenType.CONNECTMODULE,
+    'endconnectmodule': TokenType.ENDCONNECTMODULE,
     'analog': TokenType.ANALOG,
     'begin': TokenType.BEGIN,
     'end': TokenType.END,

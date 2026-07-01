@@ -222,8 +222,8 @@ class Parser:
     # ─── Module ───
 
     def parse_module(self) -> Module:
-        # Skip everything before 'module' keyword (nature/discipline defs from includes, attributes)
-        while not self.at(TokenType.MODULE, TokenType.EOF):
+        # Skip everything before a module artifact keyword.
+        while not self.at(TokenType.MODULE, TokenType.CONNECTMODULE, TokenType.EOF):
             if self.at(TokenType.ATTR_BEGIN):
                 self.advance()
                 while not self.at(TokenType.ATTR_END, TokenType.EOF):
@@ -232,7 +232,13 @@ class Parser:
             else:
                 self.advance()
 
-        self.expect(TokenType.MODULE)
+        module_start = self.peek()
+        if module_start.type == TokenType.CONNECTMODULE:
+            self.advance()
+            end_token = TokenType.ENDCONNECTMODULE
+        else:
+            self.expect(TokenType.MODULE)
+            end_token = TokenType.ENDMODULE
         name_tok = self.expect(TokenType.IDENT)
         self._reject_reserved_identifier(name_tok, "module name")
         name = name_tok.value
@@ -259,11 +265,11 @@ class Parser:
         # Attach any parse-time warnings (e.g. shared-discipline ANSI ports)
         module.warnings.extend(getattr(self, '_ansi_warnings', []))
 
-        # Parse module items until endmodule
-        while not self.at(TokenType.ENDMODULE, TokenType.EOF):
+        # Parse module items until the matching end token.
+        while not self.at(end_token, TokenType.EOF):
             self._parse_module_item(module)
 
-        self.expect(TokenType.ENDMODULE)
+        self.expect(end_token)
         return module
 
     def _parse_port_list_header(self) -> List:
@@ -723,11 +729,14 @@ class Parser:
             name = self._expect_identifier_name("variable declaration")
             is_array = False
             array_hi, array_lo = None, None
+            array2_hi, array2_lo = None, None
             init_values = None
 
             if self.at(TokenType.LBRACKET):
                 array_hi, array_lo = self._parse_range()
                 is_array = True
+                if self.at(TokenType.LBRACKET):
+                    array2_hi, array2_lo = self._parse_range()
 
             if self.match(TokenType.ASSIGN):
                 if self.at(TokenType.LBRACE):
@@ -744,6 +753,7 @@ class Parser:
 
             vd = VariableDecl(name=name, var_type=var_type, is_array=is_array,
                               array_hi=array_hi, array_lo=array_lo,
+                              array2_hi=array2_hi, array2_lo=array2_lo,
                               is_vector=vector_hi is not None,
                               vector_hi=vector_hi, vector_lo=vector_lo,
                               init_values=init_values, is_genvar=is_genvar)
@@ -1439,6 +1449,11 @@ class Parser:
                     self.expect(TokenType.RBRACKET)
                     return PartSelect(name=name, msb=first, lsb=lsb)
                 self.expect(TokenType.RBRACKET)
+                if self.at(TokenType.LBRACKET):
+                    self.advance()
+                    second = self._parse_expression()
+                    self.expect(TokenType.RBRACKET)
+                    return ArrayAccess(name=name, index=first, index2=second)
                 return ArrayAccess(name=name, index=first)
 
             return Identifier(name)

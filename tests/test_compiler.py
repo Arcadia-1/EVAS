@@ -462,6 +462,14 @@ class TestParserModule:
         m = _parse("module foo(); endmodule")
         assert m.name == "foo"
 
+    def test_connectmodule_artifact_parses_like_module(self):
+        m = _parse(
+            "connectmodule bridge(input voltage a, output voltage b); "
+            "analog V(b) <+ V(a); endconnectmodule"
+        )
+        assert m.name == "bridge"
+        assert m.ports == ["a", "b"]
+
     def test_empty_port_list(self):
         m = _parse("module foo(); endmodule")
         assert m.ports == []
@@ -567,6 +575,15 @@ class TestParserVariables:
         assert v.is_array
         assert v.array_hi == 7
         assert v.array_lo == 0
+
+    def test_two_dimensional_array_variable(self):
+        m = _parse("module m(); integer arr[0:1][0:1]; endmodule")
+        v = next(v for v in m.variables if v.name == "arr")
+        assert v.is_array
+        assert v.array_hi == 0
+        assert v.array_lo == 1
+        assert v.array2_hi == 0
+        assert v.array2_lo == 1
 
     def test_variable_with_initializer(self):
         m = _parse("module m(); real x = 0.5; endmodule")
@@ -1286,6 +1303,14 @@ class TestParserExpressions:
         expr = stmts[0].value
         assert isinstance(expr, ArrayAccess)
         assert expr.name == "arr"
+
+    def test_two_dimensional_array_access_expr(self):
+        stmts = _stmts("x = arr[i][j];")
+        expr = stmts[0].value
+        assert isinstance(expr, ArrayAccess)
+        assert expr.name == "arr"
+        assert isinstance(expr.index, Identifier)
+        assert isinstance(expr.index2, Identifier)
 
     def test_part_select_expr(self):
         stmts = _stmts("x = code[3:1];")

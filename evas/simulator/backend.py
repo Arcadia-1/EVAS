@@ -133,6 +133,7 @@ class CompiledModel:
         self.params: Dict[str, Any] = {}
         self.state: Dict[str, Any] = {}
         self.arrays: Dict[str, Dict[int, Any]] = {}
+        self._array_2d_ranges: Dict[str, Tuple[int, int, int, int]] = {}
         self.transitions: Dict[str, TransitionState] = {}
         self._active_transition_keys: set[str] = set()
         self._transition_active_keys_known: bool = False
@@ -331,6 +332,7 @@ class CompiledModel:
             "rust_body_ir_production_state_writes": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
+        self._ddt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
         self._next_fd: int = 1
@@ -397,6 +399,8 @@ class CompiledModel:
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
+        self._user_function_call_depth: Dict[str, int] = {}
+        self._user_function_recursion_limit: int = 128
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
@@ -412,6 +416,21 @@ class CompiledModel:
 
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
+
+    def _enter_user_function(self, name: str) -> int:
+        depth = int(self._user_function_call_depth.get(name, 0))
+        if depth >= self._user_function_recursion_limit:
+            raise RecursionError(
+                f"Verilog-A function recursion limit exceeded in {name}()"
+            )
+        self._user_function_call_depth[name] = depth + 1
+        return depth
+
+    def _exit_user_function(self, name: str, previous_depth: int):
+        if previous_depth <= 0:
+            self._user_function_call_depth.pop(name, None)
+        else:
+            self._user_function_call_depth[name] = previous_depth
 
     def _set_analysis_context(self, mode: str, frequency: float):
         self._analysis_mode = str(mode).strip().lower() or "tran"
@@ -447,6 +466,8 @@ class CompiledModel:
             "timer_states": copy.deepcopy(self.timer_states),
             "timer_last_fired": copy.deepcopy(self.timer_last_fired),
             "timer_kinds": copy.deepcopy(self.timer_kinds),
+            "ddt_states": copy.deepcopy(self._ddt_states),
+            "idt_states": copy.deepcopy(self._idt_states),
             "initial_step_done": self._initial_step_done,
             "bound_step": self._bound_step,
             "event_time": self._event_time,
@@ -471,6 +492,8 @@ class CompiledModel:
         self.timer_states = snapshot["timer_states"]
         self.timer_last_fired = snapshot["timer_last_fired"]
         self.timer_kinds = snapshot["timer_kinds"]
+        self._ddt_states = snapshot["ddt_states"]
+        self._idt_states = snapshot["idt_states"]
         self._initial_step_done = snapshot["initial_step_done"]
         self._bound_step = snapshot["bound_step"]
         self._event_time = snapshot["event_time"]
@@ -4613,6 +4636,63 @@ class CompiledModel:
             )
         return fired
 
+    def _ddt(self, key: str, time: float, x: float) -> float:
+        """Behavioral finite-difference approximation for ddt(x)."""
+        if self._ddt_states is None:
+            self._ddt_states = {}
+        t = float(time)
+        x_f = float(x)
+        if key not in self._ddt_states:
+            self._ddt_states[key] = {"last_t": t, "last_x": x_f, "last_y": 0.0}
+            return 0.0
+        st = self._ddt_states[key]
+        dt = t - float(st["last_t"])
+        if dt <= 0.0:
+            return float(st["last_y"])
+        y = (x_f - float(st["last_x"])) / dt
+        st["last_t"] = t
+        st["last_x"] = x_f
+        st["last_y"] = y
+        return y
+
+    def _idt(self, key: str, time: float, x: float, ic: float = 0.0) -> float:
+        """Behavioral trapezoidal approximation for idt(x, ic)."""
+        if self._idt_states is None:
+            self._idt_states = {}
+        t = float(time)
+        x_f = float(x)
+        if key not in self._idt_states:
+            self._idt_states[key] = {
+                "y": float(ic),
+                "last_t": t,
+                "last_x": x_f,
+                "last_eval_t": t,
+            }
+            return float(ic)
+        st = self._idt_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        dt = t - float(st["last_t"])
+        if dt > 0.0:
+            st["y"] = float(st["y"]) + 0.5 * (float(st["last_x"]) + x_f) * dt
+            st["last_t"] = t
+            st["last_x"] = x_f
+        elif dt < 0.0:
+            st["y"] = float(ic)
+            st["last_t"] = t
+            st["last_x"] = x_f
+        st["last_eval_t"] = t
+        return float(st["y"])
+
+    @staticmethod
+    def _limexp(x: Any) -> float:
+        x_f = float(x)
+        if x_f > 80.0:
+            return math.exp(80.0) * (1.0 + (x_f - 80.0))
+        if x_f < -745.0:
+            return 0.0
+        return math.exp(x_f)
+
     def _idtmod(self, key: str, time: float, x: float,
                 ic: float = 0.0, mod: float = 1.0) -> float:
         """
@@ -4682,6 +4762,19 @@ class CompiledModel:
             return self.arrays[name][idx]
         return 0
 
+    def _array_flat_index_2d(self, name: str, idx1: Any, idx2: Any) -> int:
+        ranges = self._array_2d_ranges.get(name)
+        if ranges is None:
+            return int(idx1)
+        lo1, hi1, lo2, hi2 = ranges
+        cols = max(1, int(hi2) - int(lo2) + 1)
+        row = int(idx1) - int(lo1)
+        col = int(idx2) - int(lo2)
+        return row * cols + col
+
+    def _array_get_2d(self, name: str, idx1: Any, idx2: Any) -> Any:
+        return self._array_get(name, self._array_flat_index_2d(name, idx1, idx2))
+
     def _array_set(self, name: str, idx: int, val: Any):
         if name not in self.arrays:
             self.arrays[name] = {}
@@ -4706,6 +4799,9 @@ class CompiledModel:
         if values is not None and flat_slot is not None and 0 <= flat_slot < len(values):
             values[flat_slot] = float(stored)
         self._perf_stats["indexed_state_array_writes"] += 1
+
+    def _array_set_2d(self, name: str, idx1: Any, idx2: Any, val: Any):
+        self._array_set(name, self._array_flat_index_2d(name, idx1, idx2), val)
 
     @staticmethod
     def _format_message(fmt: Any, *args: Any) -> str:
@@ -5118,6 +5214,7 @@ class _ModuleCompiler:
         self._combined_counter = 0
         self._initial_step_counter = 0
         self._final_step_counter = 0
+        self._ddt_counter = 0
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
@@ -5202,7 +5299,14 @@ class _ModuleCompiler:
                 hi = v.array_hi if v.array_hi is not None else 0
                 lo = v.array_lo if v.array_lo is not None else 0
                 if not is_string:
-                    state_array_ranges.append((v.name, min(hi, lo), max(hi, lo), is_integer))
+                    hi2 = getattr(v, "array2_hi", None)
+                    lo2 = getattr(v, "array2_lo", None)
+                    if hi2 is not None and lo2 is not None:
+                        rows = abs(int(hi) - int(lo)) + 1
+                        cols = abs(int(hi2) - int(lo2)) + 1
+                        state_array_ranges.append((v.name, 0, rows * cols - 1, is_integer))
+                    else:
+                        state_array_ranges.append((v.name, min(hi, lo), max(hi, lo), is_integer))
             else:
                 if not is_string:
                     state_scalar_names.append(v.name)
@@ -5299,7 +5403,9 @@ class _ModuleCompiler:
             if v.is_array:
                 hi = v.array_hi if v.array_hi is not None else 0
                 lo = v.array_lo if v.array_lo is not None else 0
-                array_vars[v.name] = (hi, lo, v.init_values)
+                hi2 = getattr(v, "array2_hi", None)
+                lo2 = getattr(v, "array2_lo", None)
+                array_vars[v.name] = (hi, lo, hi2, lo2, v.init_values)
 
         # Build array port info
         array_ports = {}
@@ -5348,10 +5454,30 @@ class _ModuleCompiler:
             static_env[p.name] = init_val
 
         # Initialize array variables
-        for name, (hi, lo, init_vals) in array_vars.items():
+        for name, (hi, lo, hi2, lo2, init_vals) in array_vars.items():
             lines.append(f"        self.arrays[{name!r}] = {{}}")
             lo_idx = min(hi, lo)
             hi_idx = max(hi, lo)
+            if hi2 is not None and lo2 is not None:
+                lo2_idx = min(hi2, lo2)
+                hi2_idx = max(hi2, lo2)
+                lines.append(
+                    f"        self._array_2d_ranges[{name!r}] = "
+                    f"({lo_idx!r}, {hi_idx!r}, {lo2_idx!r}, {hi2_idx!r})"
+                )
+                flat_count = (hi_idx - lo_idx + 1) * (hi2_idx - lo2_idx + 1)
+                if init_vals:
+                    for flat, iv in enumerate(init_vals[:flat_count]):
+                        val = self._eval_expr_static(iv, static_env)
+                        if self._is_integer_variable(name):
+                            val = CompiledModel._to_integer(val)
+                        lines.append(f"        self.arrays[{name!r}][{flat}] = {val!r}")
+                    for flat in range(len(init_vals), flat_count):
+                        lines.append(f"        self.arrays[{name!r}][{flat}] = 0")
+                else:
+                    for flat in range(flat_count):
+                        lines.append(f"        self.arrays[{name!r}][{flat}] = 0")
+                continue
             if init_vals:
                 for i, iv in enumerate(init_vals):
                     idx = hi_idx - i
@@ -5425,6 +5551,7 @@ class _ModuleCompiler:
         self._combined_counter = 0
         self._initial_step_counter = 0
         self._final_step_counter = 0
+        self._ddt_counter = 0
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
@@ -5773,8 +5900,10 @@ class _ModuleCompiler:
             self._current_user_function = decl.name
             self._current_user_task = None
 
+            lines.append(f"        _previous_depth = self._enter_user_function({decl.name!r})")
+            lines.append("        try:")
             lines.append(
-                f"        {ret_name} = {self._default_value_for_type(decl.return_type)}"
+                f"            {ret_name} = {self._default_value_for_type(decl.return_type)}"
             )
             for var in decl.variables:
                 py_name = local_names[var.name]
@@ -5782,17 +5911,19 @@ class _ModuleCompiler:
                     init = self._compile_expr(var.init_values[0])
                     if var.var_type == ParamType.INTEGER:
                         init = f"self._to_integer({init})"
-                    lines.append(f"        {py_name} = {init}")
+                    lines.append(f"            {py_name} = {init}")
                 else:
                     lines.append(
-                        f"        {py_name} = {self._default_value_for_type(var.var_type)}"
+                        f"            {py_name} = {self._default_value_for_type(var.var_type)}"
                     )
-            body_lines = self._compile_statement(decl.body, 2)
+            body_lines = self._compile_statement(decl.body, 3)
             lines.extend(body_lines)
             if decl.return_type == ParamType.INTEGER:
-                lines.append(f"        return self._to_integer({ret_name})")
+                lines.append(f"            return self._to_integer({ret_name})")
             else:
-                lines.append(f"        return {ret_name}")
+                lines.append(f"            return {ret_name}")
+            lines.append("        finally:")
+            lines.append(f"            self._exit_user_function({decl.name!r}, _previous_depth)")
         finally:
             self._local_name_by_var = previous_locals
             self._local_types = previous_types
@@ -11081,6 +11212,9 @@ class _ModuleCompiler:
             name = target.name
             if self._is_integer_variable(name):
                 value = f"self._to_integer({value})"
+            if getattr(target, "index2", None) is not None:
+                idx2 = self._compile_expr(target.index2)
+                return [f"{prefix}self._array_set_2d({name!r}, int({idx}), int({idx2}), {value})"]
             return [f"{prefix}self._array_set({name!r}, int({idx}), {value})"]
         raise CompilationError(
             f"Module {self.module.name} has invalid system task target; "
@@ -11098,6 +11232,13 @@ class _ModuleCompiler:
             return repr(("state", name, self._is_integer_variable(name)))
         if isinstance(target, ArrayAccess):
             idx = self._compile_expr(target.index)
+            if getattr(target, "index2", None) is not None:
+                idx2 = self._compile_expr(target.index2)
+                return (
+                    f"('array', {target.name!r}, "
+                    f"self._array_flat_index_2d({target.name!r}, int({idx}), int({idx2})), "
+                    f"{self._is_integer_variable(target.name)!r})"
+                )
             return f"('array', {target.name!r}, int({idx}), {self._is_integer_variable(target.name)!r})"
         raise CompilationError(
             "$fscanf() target arguments must be variables or array elements"
@@ -12564,6 +12705,12 @@ class _ModuleCompiler:
         elif kind == "last_crossing":
             key = f"last_cross_{self._last_cross_counter}"
             self._last_cross_counter += 1
+        elif kind == "ddt":
+            key = f"ddt_{self._ddt_counter}"
+            self._ddt_counter += 1
+        elif kind == "idt":
+            key = f"idt_{self._idt_counter}"
+            self._idt_counter += 1
         elif kind == "idtmod":
             key = f"idtmod_{self._idt_counter}"
             self._idt_counter += 1
@@ -13202,6 +13349,9 @@ class _ModuleCompiler:
             idx = self._compile_expr(stmt.target.index)
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
+            if getattr(stmt.target, "index2", None) is not None:
+                idx2 = self._compile_expr(stmt.target.index2)
+                return [f"{prefix}self._array_set_2d({name!r}, int({idx}), int({idx2}), {val})"]
             return [f"{prefix}self._array_set({name!r}, int({idx}), {val})"]
 
         raise CompilationError(
@@ -13889,7 +14039,14 @@ class _ModuleCompiler:
             return f"_probe_state.get({name!r}, self.state.get({name!r}, 0.0))"
         if isinstance(expr, ArrayAccess):
             idx = self._compile_transition_probe_expr(expr.index)
+            idx2 = (
+                self._compile_transition_probe_expr(expr.index2)
+                if getattr(expr, "index2", None) is not None
+                else None
+            )
             if self._is_array_name(expr.name):
+                if idx2 is not None:
+                    return f"self._array_get_2d({expr.name!r}, int({idx}), int({idx2}))"
                 return f"self._array_get({expr.name!r}, int({idx}))"
             base = self._compile_transition_probe_expr(Identifier(expr.name))
             return f"self._bit_select({base}, {idx})"
@@ -14160,6 +14317,9 @@ class _ModuleCompiler:
         if isinstance(expr, ArrayAccess):
             idx = self._compile_expr(expr.index)
             if self._is_array_name(expr.name):
+                if getattr(expr, "index2", None) is not None:
+                    idx2 = self._compile_expr(expr.index2)
+                    return f"self._array_get_2d({expr.name!r}, int({idx}), int({idx2}))"
                 return f"self._array_get({expr.name!r}, int({idx}))"
             base = self._compile_expr(Identifier(expr.name))
             return f"self._bit_select({base}, {idx})"
@@ -14353,10 +14513,6 @@ class _ModuleCompiler:
         args = [self._compile_expr(a) for a in expr.args]
 
         if name in self._user_function_by_name:
-            if self._current_user_function == name:
-                raise CompilationError(
-                    f"Recursive Verilog-A function call is not supported: {name}()"
-                )
             method = f"_user_fn_{self._safe_python_suffix(name)}"
             joined = ", ".join(args)
             if joined:
@@ -14375,6 +14531,21 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._slew(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {target}, {maxrise}, {maxfall})"
             return f"self._slew({base_key!r}, time, {target}, {maxrise}, {maxfall})"
+
+        if name == 'ddt':
+            base_key = self._alloc_stateful_func_key("ddt", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            if self._in_loop_var:
+                return f"self._ddt(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x})"
+            return f"self._ddt({base_key!r}, time, {x})"
+
+        if name == 'idt':
+            base_key = self._alloc_stateful_func_key("idt", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            ic = args[1] if len(args) > 1 else "0.0"
+            if self._in_loop_var:
+                return f"self._idt(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {ic})"
+            return f"self._idt({base_key!r}, time, {x}, {ic})"
 
         if name == 'idtmod':
             key = self._alloc_stateful_func_key("idtmod", expr)
@@ -14429,6 +14600,14 @@ class _ModuleCompiler:
             return f"math.floor({args[0]})"
         if name == 'ceil':
             return f"math.ceil({args[0]})"
+        if name == 'limexp':
+            x = args[0] if args else "0.0"
+            return f"self._limexp({x})"
+        if name in {
+            'laplace_nd', 'laplace_np', 'laplace_zd', 'laplace_zp',
+            'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
+        }:
+            return args[0] if args else "0.0"
         if name == '$rdist_normal':
             # $rdist_normal(seed, mean, std_dev)
             # Also accept $rdist_normal(mean, std_dev) as a seedless shorthand.

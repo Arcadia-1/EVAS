@@ -7617,6 +7617,87 @@ endmodule
         assert result.signals["out"][-1] == pytest.approx(14.0, abs=1e-12)
 
 
+class TestDynamicTransferOperators:
+
+    def test_dynamic_and_transfer_operators_compile_and_evaluate_behaviorally(self):
+        src = """\
+`include "disciplines.vams"
+module dynamic_transfer_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ ddt(V(vin))
+                + idt(1.0, 0.0)
+                + limexp(0.0)
+                + laplace_nd(V(vin), {1.0}, {1.0})
+                + zi_np(3.0, {1.0}, {1.0}, 1.0);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        nv0 = {"vin": 0.0}
+        model.evaluate(nv0, 0.0)
+        assert nv0["out"] == pytest.approx(4.0)
+
+        nv1 = {"vin": 2.0}
+        model.evaluate(nv1, 2.0)
+        assert nv1["out"] == pytest.approx(9.0)
+
+
+class TestConnectmoduleAndMultidimensionalArrays:
+
+    def test_connectmodule_artifact_compiles_like_behavioral_module(self):
+        src = """\
+`include "disciplines.vams"
+connectmodule bridge(in, out);
+    input voltage in;
+    output voltage out;
+    analog begin
+        V(out) <+ V(in);
+    end
+endconnectmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"in": 1.25}
+
+        model.evaluate(nv, 0.0)
+
+        assert nv["out"] == pytest.approx(1.25)
+
+    def test_two_dimensional_integer_array_state_reads_and_writes(self):
+        src = """\
+`include "disciplines.vams"
+module array2d_probe(out);
+    output voltage out;
+    integer arr[0:1][0:1];
+    integer i;
+    integer j;
+    analog begin
+        @(initial_step) begin
+            for (i = 0; i < 2; i = i + 1) begin
+                for (j = 0; j < 2; j = j + 1) begin
+                    arr[i][j] = i * 10 + j;
+                end
+            end
+        end
+        V(out) <+ arr[0][0] + arr[0][1] + arr[1][0] + arr[1][1];
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([22.0, 22.0])
+
+
 class TestIdtmodEvent:
     """Smoke test for idtmod() compilation and runtime behavior."""
 
@@ -8813,6 +8894,35 @@ endmodule
         result = sim.run(tstop=1e-9, tstep=1e-9)
 
         assert result.signals["out"].tolist() == pytest.approx([1.0, 1.0])
+
+    def test_recursive_user_defined_function_evaluates_with_depth_guard(self):
+        src = """\
+`include "disciplines.vams"
+module fn_recursive(out);
+    output voltage out;
+
+    function integer fact;
+        input integer n;
+        begin
+            if (n <= 1) fact = 1;
+            else fact = n * fact(n - 1);
+        end
+    endfunction
+
+    analog begin
+        V(out) <+ fact(5);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([120.0, 120.0])
 
     def test_user_defined_task_updates_module_state(self):
         src = """\

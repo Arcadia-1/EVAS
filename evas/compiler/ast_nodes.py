@@ -75,6 +75,7 @@ class Identifier:
 class ArrayAccess:
     name: str
     index: 'Expr'
+    index2: Optional['Expr'] = None
 
 @dataclass
 class PartSelect:
@@ -250,6 +251,8 @@ class VariableDecl:
     is_array: bool = False
     array_hi: Optional[int] = None
     array_lo: Optional[int] = None
+    array2_hi: Optional[int] = None
+    array2_lo: Optional[int] = None
     is_vector: bool = False
     vector_hi: Optional[int] = None
     vector_lo: Optional[int] = None
