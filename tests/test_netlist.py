@@ -354,6 +354,57 @@ class TestAhdlIncludePathFallback:
             in log
         )
 
+    def test_user_defined_function_call_allowed_by_netlist_runner(self, tmp_path):
+        va_file = tmp_path / "fn_clamp.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module fn_clamp(in, out);
+                input in;
+                output out;
+                electrical in, out;
+                real out_v;
+
+                function real clamp01;
+                    input real x;
+                    begin
+                        if (x < 0.1) clamp01 = 0.1;
+                        else if (x > 0.8) clamp01 = 0.8;
+                        else clamp01 = x;
+                    end
+                endfunction
+
+                analog begin
+                    out_v = clamp01(V(in));
+                    V(out) <+ out_v;
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_fn_clamp.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "fn_clamp.va"
+
+            Vin (in 0) vsource type=pwl wave=[ 0n 0.05 5n 0.05 6n 0.9 10n 0.9 ]
+            XDUT (in out) fn_clamp
+
+            tran tran stop=10n maxstep=100p
+            save in out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+
+        with (out_dir / "tran.csv").open(newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert rows
+        low_row = min(rows, key=lambda row: abs(float(row["time"]) - 2e-9))
+        high_row = min(rows, key=lambda row: abs(float(row["time"]) - 8e-9))
+        assert float(low_row["out"]) == pytest.approx(0.1, abs=1e-6)
+        assert float(high_row["out"]) == pytest.approx(0.8, abs=1e-6)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance

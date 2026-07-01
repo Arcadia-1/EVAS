@@ -299,15 +299,18 @@ def _assignment_target_name(assign) -> Optional[str]:
 
 def _validate_transition_statement(stmt, conditional_depth: int = 0,
                                    genvar_names: Optional[set] = None,
-                                   in_event: bool = False) -> None:
+                                   in_event: bool = False,
+                                   user_function_names: Optional[set] = None) -> None:
     """Reject Verilog-A structures known to diverge from Spectre VACOMP."""
     if genvar_names is None:
         genvar_names = set()
+    if user_function_names is None:
+        user_function_names = set()
     if stmt is None:
         return
     if isinstance(stmt, va_ast.Block):
         for child in stmt.statements:
-            _validate_transition_statement(child, conditional_depth, genvar_names, in_event)
+            _validate_transition_statement(child, conditional_depth, genvar_names, in_event, user_function_names)
         return
     if isinstance(stmt, va_ast.Contribution):
         if in_event:
@@ -320,7 +323,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
                 "Spectre-incompatible Verilog-A: transition() contribution "
                 "is inside a conditional/event/loop/case statement"
             )
-        _validate_supported_function_calls(stmt.expr)
+        _validate_supported_function_calls(stmt.expr, user_function_names)
         return
     if isinstance(stmt, va_ast.Assignment):
         if isinstance(stmt.target, va_ast.FunctionCall):
@@ -333,12 +336,12 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
                 "Spectre-incompatible Verilog-A: transition() expression "
                 "is inside a conditional/event/loop/case statement"
             )
-        _validate_supported_function_calls(stmt.target)
-        _validate_supported_function_calls(stmt.value)
+        _validate_supported_function_calls(stmt.target, user_function_names)
+        _validate_supported_function_calls(stmt.value, user_function_names)
         return
     if isinstance(stmt, va_ast.SystemTask):
         for arg in stmt.args:
-            _validate_supported_function_calls(arg)
+            _validate_supported_function_calls(arg, user_function_names)
         return
     if isinstance(stmt, va_ast.EventStatement):
         event_is_initial_step = (
@@ -350,36 +353,39 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
             conditional_depth + 1,
             genvar_names,
             False if event_is_initial_step else True,
+            user_function_names,
         )
         return
     if isinstance(stmt, va_ast.IfStatement):
-        _validate_supported_function_calls(stmt.cond)
-        _validate_transition_statement(stmt.then_body, conditional_depth + 1, genvar_names, in_event)
-        _validate_transition_statement(stmt.else_body, conditional_depth + 1, genvar_names, in_event)
+        _validate_supported_function_calls(stmt.cond, user_function_names)
+        _validate_transition_statement(stmt.then_body, conditional_depth + 1, genvar_names, in_event, user_function_names)
+        _validate_transition_statement(stmt.else_body, conditional_depth + 1, genvar_names, in_event, user_function_names)
         return
     if isinstance(stmt, va_ast.ForStatement):
         loop_var = _assignment_target_name(stmt.init)
         loop_depth = conditional_depth if loop_var in genvar_names else conditional_depth + 1
-        _validate_transition_statement(stmt.init, conditional_depth, genvar_names, in_event)
-        _validate_supported_function_calls(stmt.cond)
-        _validate_transition_statement(stmt.update, conditional_depth, genvar_names, in_event)
-        _validate_transition_statement(stmt.body, loop_depth, genvar_names, in_event)
+        _validate_transition_statement(stmt.init, conditional_depth, genvar_names, in_event, user_function_names)
+        _validate_supported_function_calls(stmt.cond, user_function_names)
+        _validate_transition_statement(stmt.update, conditional_depth, genvar_names, in_event, user_function_names)
+        _validate_transition_statement(stmt.body, loop_depth, genvar_names, in_event, user_function_names)
         return
     if isinstance(stmt, va_ast.WhileStatement):
-        _validate_supported_function_calls(stmt.cond)
-        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names, in_event)
+        _validate_supported_function_calls(stmt.cond, user_function_names)
+        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names, in_event, user_function_names)
         return
     if isinstance(stmt, va_ast.CaseStatement):
-        _validate_supported_function_calls(stmt.expr)
+        _validate_supported_function_calls(stmt.expr, user_function_names)
         for item in stmt.items:
             for value in item.values:
-                _validate_supported_function_calls(value)
-            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names, in_event)
+                _validate_supported_function_calls(value, user_function_names)
+            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names, in_event, user_function_names)
 
 
-def _validate_supported_function_calls(expr) -> None:
+def _validate_supported_function_calls(expr, user_function_names: Optional[set] = None) -> None:
+    if user_function_names is None:
+        user_function_names = set()
     for call in _iter_expr_calls(expr):
-        if call.name not in _SUPPORTED_FUNCTION_CALLS:
+        if call.name not in _SUPPORTED_FUNCTION_CALLS and call.name not in user_function_names:
             raise ValueError(
                 "Spectre-incompatible/unsupported Verilog-A function call: "
                 f"{call.name}()"
@@ -435,7 +441,12 @@ def _validate_va_spectre_compat(module) -> None:
             )
     if module.analog_block is not None:
         genvar_names = {v.name for v in module.variables if getattr(v, "is_genvar", False)}
-        _validate_transition_statement(module.analog_block.body, genvar_names=genvar_names)
+        user_function_names = {fn.name for fn in getattr(module, "functions", [])}
+        _validate_transition_statement(
+            module.analog_block.body,
+            genvar_names=genvar_names,
+            user_function_names=user_function_names,
+        )
 
 
 def _source_constrained_nodes(netlist: SpectreNetlist) -> set:
