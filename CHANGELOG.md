@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.5.0] — 2026-07-01
+
+### Added — Verilog-A and Verilog-AMS Compatibility
+- Added deterministic Verilog-AMS `logic` and `wreal` behavior for mixed
+  analog/digital models.
+- Added function-like macro expansion, conditional preprocessor directives,
+  escaped identifiers, bit-vector expressions, bitwise operators, shifts, and
+  right-associative power expressions.
+- Added user-defined Verilog-A functions and tasks, including recursive user
+  functions with a guarded recursion limit.
+- Added `repeat` and `do/while` statements, extended random distribution
+  helpers, string formatting helpers, `$fscanf()` function form, text-file
+  reads, and `$table_model()` support.
+- Added hierarchical parameter overrides, multidimensional arrays, and
+  `connectmodule` syntax.
+
+### Added — Analysis and Behavioral Modeling
+- Added behavioral AC and noise helper functions plus transient/noise analysis
+  plumbing.
+- Added behavioral approximations for dynamic/continuous-time operators,
+  including `ddt`, `idt`, `limexp`, `laplace_*`, and `zi_*` forms.
+- Added support-tier documentation for Verilog-A features and backend coverage.
+
+### Added — Cadence/LRM Gap-Fill Compatibility
+- Added `analog initial` lowering to `initial_step` and merged multiple analog
+  blocks in source order.
+- Added function-call forms for `$temperature()`, `$abstime()`, `$realtime()`,
+  `$vt(temp)`, and `$simparam(...)`.
+- Added conservative support for Cadence/LRM helper syntax including indirect
+  branch balance statements, node attribute probes, generic
+  `potential()`/`flow()` access, `potential(...) <+ ...` contributions,
+  `$analog_node_alias`, `$rtoi`, `$param_given`, `$port_connected`, and
+  `$cds_get_mc_trial_number`.
+- Allowed LRM helper calls through the Spectre netlist runner path.
+
 ## [0.4.6] — 2026-06-30
 
 ### Fixed — Verilog-A Compatibility
