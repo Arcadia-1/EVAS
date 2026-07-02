@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.6.1] — 2026-07-02
+
+### Added — Simulation Lint Preflight
+- Added optional `evas simulate --ahdllint` preflight diagnostics that run the
+  EVAS lint checks before model compilation and copy any findings into the
+  simulator log.
+- Added `--ahdllint-min-transition` plus netlist-level
+  `simulatorOptions options ahdllint=true` and `evas_ahdllint=true` controls.
+- Kept the preflight non-blocking: diagnostics increase the warning count
+  without changing simulation pass/fail behavior.
+
 ## [0.6.0] — 2026-07-02
 
 ### Added — Lint Diagnostics
