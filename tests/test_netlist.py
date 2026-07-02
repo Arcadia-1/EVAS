@@ -2399,3 +2399,51 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         final_p = float(rows[-1]["p"])
 
         assert final_p == pytest.approx(9.5e-15, rel=0.02)
+
+    def test_ordinary_current_contribution_is_visible_to_branch_probe(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVAS_ENGINE", "python")
+        dut_file = tmp_path / "current_conductance.va"
+        dut_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module current_conductance(p, n);
+                input p, n;
+                electrical p, n;
+                parameter real gain = 1e-3;
+                analog begin
+                    I(p, n) <+ gain * V(p, n);
+                end
+            endmodule
+        """))
+        monitor_file = tmp_path / "branch_current_monitor.va"
+        monitor_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module branch_current_monitor(p, n, imon);
+                input p, n;
+                output imon;
+                electrical p, n, imon;
+                analog begin
+                    V(imon) <+ I(p, n);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_current_conductance.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "current_conductance.va"
+            ahdl_include "branch_current_monitor.va"
+            Vp (p 0) vsource dc=0.7
+            Vn (n 0) vsource dc=0.2
+            XDUT (p n) current_conductance gain=1e-3
+            XMON (p n imon) branch_current_monitor
+            tran tran stop=1n
+            save p n imon
+        """))
+
+        out_dir = tmp_path / "out_current_conductance"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        assert float(rows[-1]["imon"]) == pytest.approx(5e-4, rel=1e-6)

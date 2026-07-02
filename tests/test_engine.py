@@ -630,6 +630,51 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([0.625, 0.625])
 
+    def test_ordinary_branch_current_contribution_can_be_probed(self):
+        source_src = """\
+`include "disciplines.vams"
+module branch_current_source(p, n);
+    input p, n;
+    electrical p, n;
+    analog begin
+        I(p, n) <+ V(p, n);
+        I(p, n) <+ 0.125;
+    end
+endmodule
+"""
+        monitor_src = """\
+`include "disciplines.vams"
+
+module branch_current_monitor(p, n, out);
+    input p, n;
+    output out;
+    electrical p, n, out;
+    analog begin
+        V(out) <+ I(p, n);
+    end
+endmodule
+"""
+        SourceCls = compile_module(parse(source_src))
+        MonitorCls = compile_module(parse(monitor_src))
+        source = SourceCls()
+        monitor = MonitorCls()
+
+        sim = Simulator()
+        sim.add_source("p", pwl([0.0, 1e-9, 2e-9], [0.75, 0.25, 1.0]))
+        sim.add_source("n", dc(0.25))
+        sim.add_model(source)
+        sim.add_model(monitor)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=1e-9)
+
+        def out_at(time_s: float) -> float:
+            idx = min(range(len(result.time)), key=lambda i: abs(result.time[i] - time_s))
+            return result.signals["out"][idx]
+
+        assert out_at(0.0) == pytest.approx(0.625)
+        assert out_at(1e-9) == pytest.approx(0.125)
+        assert out_at(2e-9) == pytest.approx(0.875)
+
     def test_static_bitwise_variable_initializers_use_parameter_env(self):
         src = """\
 `include "disciplines.vams"

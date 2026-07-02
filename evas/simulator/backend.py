@@ -150,6 +150,7 @@ class CompiledModel:
         self.digital_edge_states: Dict[str, int] = {}
         self.output_nodes: Dict[str, Any] = {}
         self._declared_branch_currents: Dict[str, float] = {}
+        self._contributed_branch_currents: Dict[Tuple[str, str], float] = {}
         self._output_nodes_version: int = 0
         self._analysis_mode: str = "tran"
         self._analysis_frequency: float = 0.0
@@ -471,6 +472,7 @@ class CompiledModel:
             "above_detectors": copy.deepcopy(self.above_detectors),
             "digital_edge_states": copy.deepcopy(self.digital_edge_states),
             "output_nodes": copy.deepcopy(self.output_nodes),
+            "contributed_branch_currents": copy.deepcopy(self._contributed_branch_currents),
             "output_nodes_version": self._output_nodes_version,
             "timer_states": copy.deepcopy(self.timer_states),
             "timer_last_fired": copy.deepcopy(self.timer_last_fired),
@@ -499,6 +501,7 @@ class CompiledModel:
         self.above_detectors = snapshot["above_detectors"]
         self.digital_edge_states = snapshot["digital_edge_states"]
         self.output_nodes = snapshot["output_nodes"]
+        self._contributed_branch_currents = snapshot.get("contributed_branch_currents", {})
         self._output_nodes_version = snapshot["output_nodes_version"]
         self.timer_states = snapshot["timer_states"]
         self.timer_last_fired = snapshot["timer_last_fired"]
@@ -3962,10 +3965,46 @@ class CompiledModel:
         return 0.0
 
     def _get_branch_current(self, node1: str, node2: str, node_voltages: Dict[str, float]) -> float:
-        """Read an independent current-source branch value when available."""
+        """Read current flowing from node1 to node2 when available.
+
+        EVAS does not solve a full MNA system here.  This exposes branch-current
+        observability for independent current sources and for behavioral
+        ``I(a,b) <+ expr`` contributions emitted by already-evaluated models.
+        """
         ext1 = self._resolve_external_node(node1)
         ext2 = self._resolve_external_node(node2)
-        return float(node_voltages.get(f"@I:{ext1}:{ext2}", 0.0))
+        source_current = float(node_voltages.get(f"@I:{ext1}:{ext2}", 0.0))
+        contributed_current = float(node_voltages.get(f"@IC:{ext1}:{ext2}", 0.0))
+        return source_current + contributed_current
+
+    def _clear_contributed_branch_currents(self, node_voltages: Dict[str, float]) -> None:
+        """Remove this model's previous ordinary branch-current contributions."""
+        if not self._contributed_branch_currents:
+            return
+        for (ext1, ext2), value in list(self._contributed_branch_currents.items()):
+            fwd_key = f"@IC:{ext1}:{ext2}"
+            rev_key = f"@IC:{ext2}:{ext1}"
+            node_voltages[fwd_key] = float(node_voltages.get(fwd_key, 0.0)) - float(value)
+            node_voltages[rev_key] = float(node_voltages.get(rev_key, 0.0)) + float(value)
+            if abs(node_voltages[fwd_key]) < 1e-300:
+                node_voltages.pop(fwd_key, None)
+            if abs(node_voltages[rev_key]) < 1e-300:
+                node_voltages.pop(rev_key, None)
+        self._contributed_branch_currents.clear()
+
+    def _add_branch_current(self, node1: str, node2: str, value: float, node_voltages: Dict[str, float]) -> None:
+        """Accumulate an ordinary ``I(node1,node2) <+ value`` contribution."""
+        ext1 = self._resolve_external_node(node1)
+        ext2 = self._resolve_external_node(node2)
+        amount = float(value)
+        key = (str(ext1), str(ext2))
+        self._contributed_branch_currents[key] = (
+            float(self._contributed_branch_currents.get(key, 0.0)) + amount
+        )
+        fwd_key = f"@IC:{ext1}:{ext2}"
+        rev_key = f"@IC:{ext2}:{ext1}"
+        node_voltages[fwd_key] = float(node_voltages.get(fwd_key, 0.0)) + amount
+        node_voltages[rev_key] = float(node_voltages.get(rev_key, 0.0)) - amount
 
     def _add_declared_branch_current(self, branch_name: str, value: float) -> None:
         """Accumulate current contributions for an explicit Verilog-A branch."""
@@ -6023,6 +6062,7 @@ class _ModuleCompiler:
         lines.append("        if self._transition_pending_count > 0:")
         lines.append("            self._reset_transition_pending()")
         lines.append("        self._declared_branch_currents.clear()")
+        lines.append("        self._clear_contributed_branch_currents(nv)")
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.evaluate(nv, time)")
         loop_state_targets: set[str] = set()
@@ -13859,6 +13899,16 @@ class _ModuleCompiler:
             expr = self._compile_expr(stmt.expr)
             if node in self._branch_decl_by_name:
                 return [f"{prefix}self._add_declared_branch_current({node!r}, {expr})"]
+        if (
+            branch.access_type == "I"
+            and branch.node2 is not None
+            and branch.node1_index is None
+            and branch.node1_index2 is None
+            and branch.node2_index is None
+            and branch.node2_index2 is None
+        ):
+            expr = self._compile_expr(stmt.expr)
+            return [f"{prefix}self._add_branch_current({node!r}, {branch.node2!r}, {expr}, nv)"]
 
         transition_affine = None
         if (
