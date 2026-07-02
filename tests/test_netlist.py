@@ -162,6 +162,12 @@ class TestExtractNodes:
         assert name == "I1"
         assert nodes == ["VDD", "VSS", "DOUT<9>", "DOUT<0>"]
 
+    def test_bracketed_bus_group_nodes_are_flattened(self):
+        name, nodes, rem = _extract_nodes("Xdut ([a7 a6 a1 a0] [y3 y2 y1 y0]) packed")
+        assert name == "Xdut"
+        assert nodes == ["a7", "a6", "a1", "a0", "y3", "y2", "y1", "y0"]
+        assert rem == "packed"
+
     def test_rejects_two_names_before_node_list(self):
         with pytest.raises(ValueError, match="exactly one name"):
             _extract_nodes("ramp_gen dut (clk rst code_0) param=1")

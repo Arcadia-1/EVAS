@@ -707,7 +707,7 @@ def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
     nodes_str = line[paren_start + 1:paren_end].strip()
     remainder = line[paren_end + 1:].strip()
 
-    nodes = [_normalize_node_name(n) for n in nodes_str.split()]
+    nodes = [_normalize_node_name(n.strip("[]")) for n in nodes_str.split()]
     return name, nodes, remainder
 
 
