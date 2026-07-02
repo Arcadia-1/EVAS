@@ -709,6 +709,32 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([1.2, 1.2])
 
+    def test_valueless_define_selects_voltage_behavior(self):
+        src = """\
+`include "disciplines.vams"
+`define USE_HIGH
+module pp_select_valueless(out);
+    output voltage out;
+    analog begin
+`ifdef USE_HIGH
+        V(out) <+ 1.2;
+`else
+        V(out) <+ 0.3;
+`endif
+    end
+endmodule
+"""
+        preprocessed, _defines, _default_transition = preprocess(src)
+        ModelCls = compile_module(parse(preprocessed))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([1.2, 1.2])
+
     def test_transient_analysis_and_noise_functions_are_deterministic(self):
         src = """\
 `include "disciplines.vams"

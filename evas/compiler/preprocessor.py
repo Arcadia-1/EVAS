@@ -151,6 +151,12 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
             defines[name] = value
             continue
 
+        # `define NAME
+        m = re.match(r'`define\s+(\w+)\s*$', stripped)
+        if m:
+            defines[m.group(1)] = ""
+            continue
+
         # `undef NAME
         m = re.match(r'`undef\s+(\w+)', stripped)
         if m:

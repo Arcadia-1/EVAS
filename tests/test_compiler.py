@@ -116,6 +116,21 @@ gone = 1;
         assert "gone = 1;" in out
         assert "USE_B" not in defines
 
+    def test_valueless_define_enables_ifdef(self):
+        src = """\
+`define USE_HIGH
+`ifdef USE_HIGH
+value = 7;
+`else
+value = 3;
+`endif
+"""
+        out, defines, _default_transition = preprocess(src)
+
+        assert defines["USE_HIGH"] == ""
+        assert "value = 7;" in out
+        assert "value = 3;" not in out
+
     def test_function_like_macro_expands_arguments(self):
         src = """\
 `define CLIP(x, lo, hi) (((x) < (lo)) ? (lo) : (((x) > (hi)) ? (hi) : (x)))
