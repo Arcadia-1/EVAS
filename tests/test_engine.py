@@ -9383,6 +9383,38 @@ endmodule
         model.evaluate(nv, 1e-9)
         assert model.output_nodes["y"] == pytest.approx(1.0)
 
+    def test_internal_logic_packed_vector_is_not_array(self):
+        src = """\
+module vector_counter(input logic clk, input logic en, output logic q);
+    logic [1:0] count;
+    always @(posedge clk) begin
+        if (en) count = count + 1;
+    end
+    assign q = count[1];
+endmodule
+"""
+        module = parse(src)
+        count_decl = next(var for var in module.variables if var.name == "count")
+
+        assert count_decl.is_vector
+        assert not count_decl.is_array
+        assert count_decl.vector_hi == 1
+        assert count_decl.vector_lo == 0
+
+        ModelCls = compile_module(module)
+        model = ModelCls()
+        nv = {"clk": 0.0, "en": 1.0}
+
+        model.evaluate(nv, 0.0)
+        nv["clk"] = 1.0
+        model.evaluate(nv, 1e-9)
+        nv["clk"] = 0.0
+        model.evaluate(nv, 2e-9)
+        nv["clk"] = 1.0
+        model.evaluate(nv, 3e-9)
+
+        assert model.state["count"] == 2
+
     def test_generate_for_assign_subset_drives_wreal_stage_array(self):
         src = """\
 module generated_stage(input a, output y);

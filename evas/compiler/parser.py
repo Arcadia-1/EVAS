@@ -750,15 +750,23 @@ class Parser:
                         break
                 if not found:
                     if effective_array_hi is not None:
-                        module.variables.append(VariableDecl(
-                            name=name,
-                            var_type=ParamType.REAL,
-                            is_array=True,
-                            array_hi=effective_array_hi,
-                            array_lo=effective_array_lo,
-                        ))
-                        if discipline in {"logic"}:
-                            module.variables[-1].var_type = ParamType.INTEGER
+                        var_type = ParamType.INTEGER if discipline in {"logic"} else ParamType.REAL
+                        if discipline in {"logic"} and post_array_hi is None:
+                            module.variables.append(VariableDecl(
+                                name=name,
+                                var_type=var_type,
+                                is_vector=True,
+                                vector_hi=array_hi,
+                                vector_lo=array_lo,
+                            ))
+                        else:
+                            module.variables.append(VariableDecl(
+                                name=name,
+                                var_type=var_type,
+                                is_array=True,
+                                array_hi=effective_array_hi,
+                                array_lo=effective_array_lo,
+                            ))
                         if post_array_hi is not None and array_hi is not None:
                             module.variables[-1].array2_hi = post_array_hi
                             module.variables[-1].array2_lo = post_array_lo
