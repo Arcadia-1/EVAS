@@ -16,7 +16,11 @@ import numpy as np
 from evas.compiler import ast_nodes as va_ast
 from evas.compiler.parser import (
     SpectreReservedIdentifierError,
+)
+from evas.compiler.parser import (
     parse as parse_va,
+)
+from evas.compiler.parser import (
     parse_all as parse_all_va,
 )
 from evas.compiler.preprocessor import preprocess
