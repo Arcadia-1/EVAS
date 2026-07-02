@@ -297,6 +297,13 @@ class InstanceParameterOverride:
     expr: Expr
 
 @dataclass
+class BranchDecl:
+    """Named branch declaration: branch (p, n) br;"""
+    name: str
+    node1: str
+    node2: str
+
+@dataclass
 class ModuleInstance:
     """Hierarchical module instance (inside another module)."""
     module_name: str
@@ -314,6 +321,7 @@ class Module:
     functions: List[FunctionDecl] = field(default_factory=list)
     tasks: List[TaskDecl] = field(default_factory=list)
     analog_block: Optional[AnalogBlock] = None
+    branches: List[BranchDecl] = field(default_factory=list)
     instances: List[ModuleInstance] = field(default_factory=list)
     continuous_assigns: List[Assignment] = field(default_factory=list)
     always_blocks: List[EventStatement] = field(default_factory=list)

@@ -18,6 +18,7 @@ from evas.compiler.parser import (
     SpectreReservedIdentifierError,
 )
 from evas.compiler.parser import (
+    parse_all as parse_all_va,
     parse as parse_va,
 )
 from evas.compiler.preprocessor import preprocess
@@ -153,6 +154,34 @@ def _compile_va(
         indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
     )
     return cls, module
+
+
+def _compile_va_all(
+    va_path: str,
+    source_dir: str = None,
+    static_branch_fastpath_codegen: bool = False,
+    indexed_state_fastpath_codegen: bool = False,
+):
+    """Compile every module/connectmodule artifact in a .va file."""
+    if source_dir is None:
+        source_dir = str(Path(va_path).parent)
+    source = Path(va_path).read_text(encoding='utf-8', errors='replace')
+    pp_src, defines, default_trans = preprocess(source, source_dir=source_dir)
+    modules = parse_all_va(pp_src)
+    if default_trans is None:
+        default_trans = 1e-12
+    compiled = []
+    for module in modules:
+        module.defines = defines
+        _validate_va_spectre_compat(module)
+        cls = compile_module(
+            module,
+            default_trans,
+            static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+            indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
+        )
+        compiled.append((cls, module))
+    return compiled
 
 
 def _format_spectre_reserved_identifier_error(
@@ -1028,7 +1057,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             warnings += 1
 
         try:
-            cls, module = _compile_va(
+            compiled_modules = _compile_va_all(
                 str(va_path),
                 static_branch_fastpath_codegen=static_branch_fastpath,
                 indexed_state_fastpath_codegen=state_local_fastpath,
@@ -1043,11 +1072,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log.write(f"ERROR: Failed to compile Verilog-A file {va_path.name}: {e}")
             errors += 1
             continue
-        models_by_name[module.name] = (cls, module)
-        log.write(f"Compiled Verilog-A module: {module.name}")
-        for w in module.warnings:
-            log.write(f"WARNING ({module.name}): {w}")
-            warnings += 1
+        for cls, module in compiled_modules:
+            models_by_name[module.name] = (cls, module)
+            log.write(f"Compiled Verilog-A module: {module.name}")
+            for w in module.warnings:
+                log.write(f"WARNING ({module.name}): {w}")
+                warnings += 1
 
     # Provide compiled-module registry for hierarchical Verilog-A instances.
     # Each class can instantiate child modules from this table at runtime.

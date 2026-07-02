@@ -74,6 +74,11 @@ _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
     'initial',
 }
 
+_UNSUPPORTED_MODULE_BLOCKS = {
+    'generate',
+    'specify',
+}
+
 
 class ParseError(Exception):
     def __init__(self, msg, token=None):
@@ -272,6 +277,16 @@ class Parser:
         self.expect(end_token)
         return module
 
+    def parse_modules(self) -> List[Module]:
+        modules: List[Module] = []
+        while not self.at(TokenType.EOF):
+            while not self.at(TokenType.MODULE, TokenType.CONNECTMODULE, TokenType.EOF):
+                self.advance()
+            if self.at(TokenType.EOF):
+                break
+            modules.append(self.parse_module())
+        return modules
+
     def _parse_port_list_header(self) -> List:
         """Parse port list in module header. Can be ANSI or non-ANSI style."""
         ports = []
@@ -413,6 +428,17 @@ class Parser:
         tok = self.peek()
         self._reject_unsupported_procedural_block_if_present("module item")
 
+        if tok.type == TokenType.IDENT and tok.value in _UNSUPPORTED_MODULE_BLOCKS:
+            raise ParseError(
+                f"Unsupported Verilog-AMS module block '{tok.value}' is outside "
+                "the EVAS behavioral subset",
+                tok,
+            )
+
+        if tok.type == TokenType.IDENT and tok.value == "branch":
+            module.branches.append(self._parse_branch_decl())
+            return
+
         # Direction declarations: input, output, inout
         if tok.type in (TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT):
             self._parse_port_direction_decl(module)
@@ -487,6 +513,21 @@ class Parser:
 
         # Skip unknown tokens
         self.advance()
+
+    def _parse_branch_decl(self) -> BranchDecl:
+        self.expect(TokenType.IDENT)  # branch
+        self.expect(TokenType.LPAREN)
+        node1 = self._expect_identifier_name("branch node")
+        self.expect(TokenType.COMMA)
+        node2 = self._expect_identifier_name("branch node")
+        self.expect(TokenType.RPAREN)
+        name = self._expect_identifier_name("branch name")
+        while self.match(TokenType.COMMA):
+            # Keep the first branch in this compact AST; skip any extra names.
+            if self.at(TokenType.IDENT):
+                self.advance()
+        self.match(TokenType.SEMI)
+        return BranchDecl(name=name, node1=node1, node2=node2)
 
     def _parse_module_instance(self) -> Optional[ModuleInstance]:
         module_name = self.expect(TokenType.IDENT).value
@@ -1598,3 +1639,10 @@ def parse(source: str) -> Module:
     tokens = tokenize(source)
     parser = Parser(tokens)
     return parser.parse_module()
+
+
+def parse_all(source: str) -> List[Module]:
+    """Parse all module/connectmodule artifacts in preprocessed source."""
+    tokens = tokenize(source)
+    parser = Parser(tokens)
+    return parser.parse_modules()

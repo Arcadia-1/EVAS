@@ -351,6 +351,7 @@ class CompiledModel:
         self._static_branch_write_external_nodes: tuple[str, ...] = ()
         self._node_resolution_cache_enabled: bool = False
         self._node_resolution_cache: Dict[str, str] = {}
+        self._analog_node_aliases: Dict[str, str] = {}
         self._dynamic_node_cache: Dict[Tuple[str, int, Optional[int]], str] = {}
         self._indexed_state_ids: Dict[str, int] = {}
         self._indexed_integer_state_names: set[str] = set()
@@ -547,6 +548,27 @@ class CompiledModel:
     def _param_given(self, name: Any) -> float:
         return 1.0 if str(name).strip().lower() in self._given_params else 0.0
 
+    def _resolve_oomr_node(self, path: Any) -> str:
+        target = str(path).strip()
+        for prefix in ("$root.", "$root/"):
+            if target.startswith(prefix):
+                target = target[len(prefix):]
+                break
+        if target == "$root":
+            return target
+        if target.startswith("$root"):
+            target = target[len("$root"):].lstrip("./")
+        return target.replace("/", ".").split(".")[-1]
+
+    def _analog_node_alias(self, local_node: Any, target_path: Any) -> float:
+        local = self._resolve_oomr_node(local_node)
+        target = self._resolve_oomr_node(target_path)
+        if not local or not target or local == "$root":
+            return 0.0
+        self._analog_node_aliases[local] = target
+        self._node_resolution_cache.pop(local, None)
+        return 1.0
+
     def _attribute_value(self, path: Any) -> float:
         key = str(path).strip().lower()
         if key.endswith(".potential.abstol"):
@@ -558,6 +580,8 @@ class CompiledModel:
         return 0.0
 
     def _table_model(self, *args: Any) -> float:
+        if len(args) >= 5 and self._is_table_axis(args[2]) and self._is_table_axis(args[3]) and self._is_table_axis(args[4]):
+            return self._table_model_2d(args[0], args[1], args[2], args[3], args[4])
         if len(args) >= 2:
             filename = args[1] if isinstance(args[1], str) else args[-1]
             if isinstance(filename, str):
@@ -2080,6 +2104,39 @@ class CompiledModel:
 
     def _resolve_external_node_uncached(self, node: str) -> str:
         """Resolve a local model node through node_map and one parent indirection."""
+        local = self._resolve_oomr_node(node)
+        if local in self._analog_node_aliases:
+            local = self._analog_node_aliases[local]
+        ext = self.node_map.get(local, local)
+        if (
+            isinstance(ext, str)
+            and ext
+            and ext[0] == '@'
+            and ext.startswith('@parent:')
+            and self._parent_model is not None
+        ):
+            pnode = ext[len('@parent:'):]
+            ext = self._parent_model._resolve_external_node_uncached(pnode)
+        return ext
+
+    def _resolve_external_node(self, node: str) -> str:
+        """Resolve a node name, optionally reusing the run-local mapping cache."""
+        if not self.node_map and not self._analog_node_aliases and "$root" not in str(node):
+            return node
+        if not self._node_resolution_cache_enabled:
+            return self._resolve_external_node_uncached(node)
+        ext = self._node_resolution_cache.get(node)
+        if ext is None:
+            ext = self._resolve_external_node_uncached(node)
+            self._node_resolution_cache[node] = ext
+        return ext
+
+    def _resolve_external_node_for_write(self, node: str) -> str:
+        """Resolve output writes without applying read-side node aliases."""
+        if self._node_resolution_cache_enabled and not self._analog_node_aliases:
+            ext = self._node_resolution_cache.get(node)
+            if ext is not None:
+                return ext
         ext = self.node_map.get(node, node)
         if (
             isinstance(ext, str)
@@ -2089,18 +2146,8 @@ class CompiledModel:
             and self._parent_model is not None
         ):
             pnode = ext[len('@parent:'):]
-            ext = self._parent_model.node_map.get(pnode, pnode)
-        return ext
-
-    def _resolve_external_node(self, node: str) -> str:
-        """Resolve a node name, optionally reusing the run-local mapping cache."""
-        if not self.node_map:
-            return node
-        if not self._node_resolution_cache_enabled:
-            return self._resolve_external_node_uncached(node)
-        ext = self._node_resolution_cache.get(node)
-        if ext is None:
-            ext = self._resolve_external_node_uncached(node)
+            ext = self._parent_model._resolve_external_node_for_write(pnode)
+        if self._node_resolution_cache_enabled and not self._analog_node_aliases:
             self._node_resolution_cache[node] = ext
         return ext
 
@@ -3774,7 +3821,12 @@ class CompiledModel:
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
-        if not self.node_map and not self._event_context_active:
+        if (
+            not self.node_map
+            and not self._analog_node_aliases
+            and "$root" not in str(node)
+            and not self._event_context_active
+        ):
             reader = self._indexed_voltage_reader
             if reader is not None:
                 indexed_value = reader(node, node)
@@ -3904,7 +3956,7 @@ class CompiledModel:
 
     def _set_output(self, node: str, value: Any, node_voltages: Dict[str, Any]):
         """Set an output node voltage."""
-        if not self.node_map:
+        if not self.node_map and "$root" not in str(node):
             if node not in self.output_nodes:
                 self._output_nodes_version += 1
             self.output_nodes[node] = value
@@ -3917,7 +3969,7 @@ class CompiledModel:
         if node not in self.output_nodes:
             self._output_nodes_version += 1
         self.output_nodes[node] = value
-        ext = self._resolve_external_node(node)
+        ext = self._resolve_external_node_for_write(node)
         node_voltages[ext] = value
         self._event_trace_audit_note_write("output", ext)
         if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
@@ -3972,7 +4024,7 @@ class CompiledModel:
         if node not in self.output_nodes:
             self._output_nodes_version += 1
         self.output_nodes[node] = value
-        ext = self._resolve_external_node(node)
+        ext = self._resolve_external_node_for_write(node)
         node_voltages[ext] = value
         self._event_trace_audit_note_write("output", ext)
         if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
@@ -5033,6 +5085,79 @@ class CompiledModel:
                 return y0 + alpha * (y1 - y0)
         return table[-1][1]
 
+    @staticmethod
+    def _is_table_axis(value: Any) -> bool:
+        return isinstance(value, (list, tuple, dict))
+
+    def _table_array_values(self, name: str) -> Tuple[Any, ...]:
+        values = self.arrays.get(str(name), {})
+        if not isinstance(values, dict):
+            return ()
+        return tuple(values[idx] for idx in sorted(values))
+
+    def _table_model_2d(self, x: Any, y: Any, xs: Any, ys: Any, zs: Any) -> float:
+        def _values(v: Any) -> List[float]:
+            if isinstance(v, dict):
+                raw = [v[k] for k in sorted(v)]
+            else:
+                raw = list(v)
+            out: List[float] = []
+            for item in raw:
+                try:
+                    out.append(float(item))
+                except (TypeError, ValueError):
+                    out.append(0.0)
+            return out
+
+        xvals = _values(xs)
+        yvals = _values(ys)
+        zvals = _values(zs)
+        n = min(len(xvals), len(yvals), len(zvals))
+        if n == 0:
+            return 0.0
+        x_f = float(x)
+        y_f = float(y)
+        points = [(xvals[i], yvals[i], zvals[i]) for i in range(n)]
+        for px, py, pz in points:
+            if abs(px - x_f) <= 1e-15 and abs(py - y_f) <= 1e-15:
+                return pz
+
+        ux = sorted(set(xvals[:n]))
+        uy = sorted(set(yvals[:n]))
+        if len(ux) < 2 or len(uy) < 2:
+            return min(points, key=lambda p: (p[0] - x_f) ** 2 + (p[1] - y_f) ** 2)[2]
+
+        def _bracket(values: List[float], target: float) -> Tuple[float, float]:
+            if target <= values[0]:
+                return values[0], values[min(1, len(values) - 1)]
+            if target >= values[-1]:
+                return values[max(0, len(values) - 2)], values[-1]
+            for lo, hi in zip(values, values[1:]):
+                if lo <= target <= hi:
+                    return lo, hi
+            return values[-2], values[-1]
+
+        x0, x1 = _bracket(ux, x_f)
+        y0, y1 = _bracket(uy, y_f)
+        zmap = {(px, py): pz for px, py, pz in points}
+        corners = [
+            zmap.get((x0, y0)),
+            zmap.get((x1, y0)),
+            zmap.get((x0, y1)),
+            zmap.get((x1, y1)),
+        ]
+        if any(c is None for c in corners):
+            return min(points, key=lambda p: (p[0] - x_f) ** 2 + (p[1] - y_f) ** 2)[2]
+        z00, z10, z01, z11 = [float(c) for c in corners]
+        ax = 0.0 if x1 == x0 else (x_f - x0) / (x1 - x0)
+        ay = 0.0 if y1 == y0 else (y_f - y0) / (y1 - y0)
+        return (
+            z00 * (1.0 - ax) * (1.0 - ay)
+            + z10 * ax * (1.0 - ay)
+            + z01 * (1.0 - ax) * ay
+            + z11 * ax * ay
+        )
+
     def _cleanup_files(self):
         for f in self._file_handles.values():
             f.close()
@@ -5293,6 +5418,7 @@ class _ModuleCompiler:
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
         self._port_disciplines = {p.name: p.discipline for p in module.port_decls}
+        self._branch_decl_by_name = {b.name: b for b in getattr(module, "branches", [])}
         self._evaluate_ir_static_param_values: Dict[str, Any] = {}
         self._evaluate_ir_static_loop_values: Dict[str, int] = {}
         self._event_lfsr_shift_ir_ops: Dict[str, tuple] = {}
@@ -5544,6 +5670,12 @@ class _ModuleCompiler:
             child_var = f"_child_{inst.instance_name}"
             lines.append(f"        _entry = self._module_registry.get({inst.module_name!r})")
             lines.append("        if _entry is None:")
+            lines.append(f"            if {inst.module_name!r} in {{'resistor', 'isource', 'vsource', 'capacitor', 'inductor'}}:")
+            lines.append(
+                f"                raise CompilationError('Unsupported analog primitive instance: "
+                f"{inst.module_name} in {mod.name}.{inst.instance_name}; "
+                "EVAS behavioral mode does not implement conservative analog primitives')"
+            )
             lines.append(f"            raise CompilationError('Unknown child module: {inst.module_name} in {mod.name}.{inst.instance_name}')")
             lines.append("        _child_cls, _child_mod = _entry")
             lines.append(f"        {child_var} = _child_cls()")
@@ -11305,6 +11437,9 @@ class _ModuleCompiler:
         lines: List[str] = []
 
         if stmt.name == '$analog_node_alias':
+            local_node = self._compile_node_name_arg(stmt.args[0]) if stmt.args else "''"
+            target_path = self._compile_alias_target_arg(stmt.args[1]) if len(stmt.args) > 1 else "''"
+            lines.append(f"{prefix}self._analog_node_alias({local_node}, {target_path})")
             return lines
 
         if stmt.name in ('$strobe', '$display'):
@@ -13374,12 +13509,21 @@ class _ModuleCompiler:
                     val = f"self._to_integer({val})"
                 return [f"{prefix}{self._local_name_by_var[name]} = {val}"]
             if self._is_logic_or_wreal_port(name):
+                tmp = self._alloc_temp_var("port_assign")
+                lines = [f"{prefix}{tmp} = {val}"]
                 if self._port_disciplines.get(name) == "logic":
-                    val = f"self._to_integer({val})"
-                return [
-                    f"{prefix}self._state_set({name!r}, {val})",
-                    f"{prefix}self._set_output({name!r}, {val}, nv)",
-                ]
+                    lines.append(f"{prefix}{tmp} = self._to_integer({tmp})")
+                lines.append(f"{prefix}self._state_set({name!r}, {tmp})")
+                if self._is_array_port_name(name) and self._port_disciplines.get(name) == "logic":
+                    for idx in self._port_indices(name):
+                        node_name = f"{name}[{idx}]"
+                        lines.append(
+                            f"{prefix}self._set_output({node_name!r}, "
+                            f"self._bit_select({tmp}, {idx}), nv)"
+                        )
+                else:
+                    lines.append(f"{prefix}self._set_output({name!r}, {tmp}, nv)")
+                return lines
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
             if name == self._in_loop_var:
@@ -13617,6 +13761,21 @@ class _ModuleCompiler:
             if port.name == name:
                 return port.direction
         return None
+
+    def _port_decl(self, name: str) -> Optional[PortDecl]:
+        for port in self.module.port_decls:
+            if port.name == name:
+                return port
+        return None
+
+    def _port_indices(self, name: str) -> List[int]:
+        port = self._port_decl(name)
+        if port is None or not port.is_array or port.array_hi is None:
+            return []
+        hi = int(port.array_hi)
+        lo = int(port.array_lo if port.array_lo is not None else 0)
+        step = 1 if lo <= hi else -1
+        return list(range(lo, hi + step, step))
 
     def _is_integer_decl(self, variable) -> bool:
         return (
@@ -14250,7 +14409,11 @@ class _ModuleCompiler:
             return f"self._port_connected({port_name})"
         if name == "$mfactor":
             return "self._mfactor()"
-        if name in {"$analog_node_alias", "$cds_get_mc_trial_number"}:
+        if name == "$analog_node_alias":
+            local_node = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            target_path = self._compile_alias_target_arg(expr.args[1]) if len(expr.args) > 1 else "''"
+            return f"self._analog_node_alias({local_node}, {target_path})"
+        if name in {"$cds_get_mc_trial_number"}:
             return "0.0"
         if name == "$table_model":
             return "0.0"
@@ -14294,6 +14457,27 @@ class _ModuleCompiler:
 
     def _is_array_name(self, name: str) -> bool:
         return any(v.name == name and v.is_array for v in self.module.variables)
+
+    def _is_array_port_name(self, name: str) -> bool:
+        port = self._port_decl(name)
+        return bool(port is not None and port.is_array)
+
+    def _is_string_param_name(self, name: str) -> bool:
+        return self._param_types.get(name) == ParamType.STRING
+
+    def _compile_port_vector_value(self, name: str) -> str:
+        terms = []
+        for idx in self._port_indices(name):
+            bit = self._compile_node_voltage(name, NumberLiteral(idx))
+            terms.append(f"((1 if ({bit}) >= 0.5 else 0) << {idx})")
+        if not terms:
+            return self._compile_node_voltage(name)
+        return "(" + " | ".join(terms) + ")"
+
+    def _compile_table_model_arg(self, expr: Expr) -> str:
+        if isinstance(expr, Identifier) and self._is_array_name(expr.name):
+            return f"self._table_array_values({expr.name!r})"
+        return self._compile_expr(expr)
 
     def _declared_bit_width(self, name: str) -> int:
         for variable in self.module.variables:
@@ -14394,6 +14578,8 @@ class _ModuleCompiler:
             if self._is_logic_or_wreal_port(name):
                 direction = self._port_direction(name)
                 if direction in {Direction.INPUT, Direction.INOUT}:
+                    if self._is_array_port_name(name) and self._port_disciplines.get(name) == "logic":
+                        return self._compile_port_vector_value(name)
                     return self._compile_node_voltage(name)
                 return f"self.state.get({name!r}, 0.0)"
             # Check if it's a special constant
@@ -14414,6 +14600,10 @@ class _ModuleCompiler:
                     idx2 = self._compile_expr(expr.index2)
                     return f"self._array_get_2d({expr.name!r}, int({idx}), int({idx2}))"
                 return f"self._array_get({expr.name!r}, int({idx}))"
+            if self._is_array_port_name(expr.name):
+                direction = self._port_direction(expr.name)
+                if direction in {Direction.INPUT, Direction.INOUT}:
+                    return self._compile_node_voltage(expr.name, expr.index, getattr(expr, "index2", None))
             base = self._compile_expr(Identifier(expr.name))
             return f"self._bit_select({base}, {idx})"
 
@@ -14492,6 +14682,11 @@ class _ModuleCompiler:
                 if expr.access_type == 'V':
                     return f"({n1} - {n2})"
                 return "0.0"  # I() not fully supported yet
+            branch = self._branch_decl_by_name.get(node)
+            if branch is not None and expr.access_type == 'V':
+                n1 = self._compile_node_voltage(branch.node1)
+                n2 = self._compile_node_voltage(branch.node2)
+                return f"({n1} - {n2})"
             if expr.access_type == 'V':
                 return self._compile_node_voltage(node, expr.node1_index, expr.node1_index2)
             return "0.0"
@@ -14570,6 +14765,9 @@ class _ModuleCompiler:
 
     def _compile_node_voltage(self, node: str, index_expr=None, index_expr2=None) -> str:
         """Compile a node voltage reference."""
+        if index_expr is None and (self._is_string_param_name(node) or self._is_string_variable(node)):
+            target = self._compile_expr(Identifier(node))
+            return f"self._get_voltage(self._resolve_oomr_node({target}), nv)"
         if index_expr is not None:
             idx = self._compile_expr(index_expr)
             if index_expr2 is not None:
@@ -14607,6 +14805,15 @@ class _ModuleCompiler:
                 return f"self._resolve_dynamic_node({expr.name!r}, {idx}, {idx2})"
             return f"self._resolve_dynamic_node({expr.name!r}, {idx})"
         return f"str({self._compile_expr(expr)})"
+
+    def _compile_alias_target_arg(self, expr: Expr) -> str:
+        if isinstance(expr, Identifier):
+            if self._is_string_param_name(expr.name) or self._is_string_variable(expr.name):
+                return self._compile_expr(expr)
+            return repr(expr.name)
+        if isinstance(expr, (StringLiteral, ArrayAccess)):
+            return self._compile_node_name_arg(expr)
+        return self._compile_expr(expr)
 
     def _node_ref_from_expr(self, expr: Expr) -> Optional[Tuple[str, Optional[Expr], Optional[Expr]]]:
         if isinstance(expr, Identifier):
@@ -14680,7 +14887,9 @@ class _ModuleCompiler:
         if name == '$mfactor':
             return "self._mfactor()"
         if name == '$analog_node_alias':
-            return "0.0"
+            local_node = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            target_path = self._compile_alias_target_arg(expr.args[1]) if len(expr.args) > 1 else "''"
+            return f"self._analog_node_alias({local_node}, {target_path})"
         if name == '$cds_get_mc_trial_number':
             return "0"
 
@@ -14888,7 +15097,8 @@ class _ModuleCompiler:
             fd = args[0] if len(args) > 0 else "0"
             return f"self._fgets({fd})"
         if name == '$table_model':
-            joined = ", ".join(args)
+            table_args = [self._compile_table_model_arg(a) for a in expr.args]
+            joined = ", ".join(table_args)
             return f"self._table_model({joined})" if joined else "0.0"
         if name == "analysis":
             analysis = args[0] if args else "''"

@@ -9304,3 +9304,149 @@ endmodule
 
         assert model.state["q"] == 1
         assert model.output_nodes["q"] == pytest.approx(1.0)
+
+    def test_event_or_self_referential_logic_assignment_updates_once(self):
+        src = """\
+module toggle_ff(input logic clk, input logic rst, input logic en, input logic d, output logic q);
+    always @(posedge clk or posedge rst) begin
+        if (rst) q = 1'b0;
+        else if (en & d) q = !q;
+        else q = q;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"clk": 0.0, "rst": 0.0, "en": 1.0, "d": 1.0}
+
+        model.evaluate(nv, 0.0)
+        nv["clk"] = 1.0
+        model.evaluate(nv, 1e-9)
+
+        assert model.state["q"] == 1
+        assert model.output_nodes["q"] == pytest.approx(1.0)
+
+        nv["clk"] = 0.0
+        model.evaluate(nv, 2e-9)
+        nv["clk"] = 1.0
+        model.evaluate(nv, 3e-9)
+
+        assert model.state["q"] == 0
+        assert model.output_nodes["q"] == pytest.approx(0.0)
+
+    def test_logic_vector_input_bit_select_and_output_drive(self):
+        src = """\
+module vector_mux(input logic [3:0] code, input logic sel, output logic y, output logic [1:0] q);
+    assign y = sel ? code[2] : code[0];
+    assign q = code[2:1];
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {
+            "code[0]": 1.0,
+            "code[1]": 0.0,
+            "code[2]": 1.0,
+            "code[3]": 0.0,
+            "sel": 0.0,
+        }
+
+        model.evaluate(nv, 0.0)
+        assert model.output_nodes["y"] == pytest.approx(1.0)
+        assert model.output_nodes["q[1]"] == pytest.approx(1.0)
+        assert model.output_nodes["q[0]"] == pytest.approx(0.0)
+
+        nv.update({"code[0]": 0.0, "code[2]": 1.0, "sel": 1.0})
+        model.evaluate(nv, 1e-9)
+        assert model.output_nodes["y"] == pytest.approx(1.0)
+
+    def test_named_branch_voltage_probe(self):
+        src = """\
+`include "disciplines.vams"
+module branch_probe(input electrical p, input electrical n, output electrical out);
+    branch (p, n) br;
+    analog begin
+        V(out) <+ V(br);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("p", dc(0.55))
+        sim.add_source("n", dc(0.15))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([0.4, 0.4])
+
+    def test_string_oomr_voltage_probe_and_alias_statement(self):
+        src = """\
+`include "disciplines.vams"
+module oomr_probe(output electrical out_a, output electrical out_b);
+    electrical aliased;
+    parameter string sigpath = "$root.vin";
+    analog initial begin
+        $analog_node_alias(aliased, sigpath);
+    end
+    analog begin
+        V(out_a) <+ V(sigpath);
+        V(out_b) <+ V(aliased);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("vin", dc(0.37))
+        sim.record("out_a")
+        sim.record("out_b")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out_a"].tolist() == pytest.approx([0.37, 0.37])
+        assert result.signals["out_b"].tolist() == pytest.approx([0.37, 0.37])
+
+    def test_table_model_2d_array_surface_interpolates(self):
+        src = """\
+`include "disciplines.vams"
+module table_surface(input electrical xnode, input electrical ynode, output electrical out);
+    real xs[0:3];
+    real ys[0:3];
+    real zs[0:3];
+    analog begin
+        @(initial_step) begin
+            xs[0] = 0.0; ys[0] = 0.0; zs[0] = 0.0;
+            xs[1] = 1.0; ys[1] = 0.0; zs[1] = 2.0;
+            xs[2] = 0.0; ys[2] = 1.0; zs[2] = 4.0;
+            xs[3] = 1.0; ys[3] = 1.0; zs[3] = 6.0;
+        end
+        V(out) <+ $table_model(V(xnode), V(ynode), xs, ys, zs, "1L,1L");
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("xnode", dc(0.5))
+        sim.add_source("ynode", dc(0.5))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([3.0, 3.0])
+
+    def test_analog_primitive_instance_reports_behavioral_boundary(self):
+        src = """\
+`include "disciplines.vams"
+module primitive_wrapper(inout electrical p, inout electrical n);
+    resistor r1 (p, n);
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        with pytest.raises(CompilationError, match="Unsupported analog primitive instance: resistor"):
+            ModelCls()

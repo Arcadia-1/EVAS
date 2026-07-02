@@ -120,6 +120,9 @@ outside the current simulator design.
 | `slew(x, maxrise, maxfall)` transient limiter | ✅ (behavioral approximation) |
 | `for`, `repeat`, `while`, `do while`, `if/else`, `case/endcase`, `begin/end` | ✅ |
 | arrays, including integer/real 1-D and 2-D state arrays | ✅ |
+| `branch (p,n) br; V(br)` named branch voltage probes | ✅ |
+| `$analog_node_alias()` and string OOMR voltage probes such as `V(sigpath)` | ✅ |
+| `$table_model()` 1-D file tables and simple 2-D array-backed surfaces | ✅ |
 | parameters and variables (real / integer / string) | ✅ |
 | user-defined functions/tasks, including bounded recursive functions | ✅ |
 | `module`, `connectmodule`, simple behavioral hierarchy | ✅ |
@@ -134,6 +137,9 @@ outside the current simulator design.
 | `analysis("ac")`, `ac_stim()` | ✅ (behavioral Python sweep helper) |
 | `white_noise()`, `flicker_noise()`, `noise_table()` | ✅ (behavioral PSD / integrated-noise helper) |
 | `ddt()`, `idt()`, `laplace_*()`, `zi_*()`, `limexp()` | ✅ (behavioral transient approximation) |
+| `generate` / `genvar`, `specify` / `specparam`, `connectrules` | not supported by design |
+| custom `nature` / `discipline` semantics beyond the bundled VAMS stubs | not supported by design |
+| analog primitive instances such as `resistor` / `isource` | not supported by design |
 | `I() <+`, `q() <+`, branch charge/current contributions | not supported by design |
 | SPICE-style AC/DC matrix solving, transistors | not supported by design |
 | Spectre `subckt` hierarchy | not yet implemented |

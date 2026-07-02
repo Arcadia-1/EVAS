@@ -516,6 +516,76 @@ class TestAhdlIncludePathFallback:
         assert data["out_ovr"][-1] == pytest.approx(0.2, abs=1e-9)
         assert data["metric_ovr"][-1] == pytest.approx(1.0, abs=1e-9)
 
+    def test_analog_node_alias_maps_internal_node_to_root_node(self, tmp_path):
+        va_file = tmp_path / "alias_probe.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module alias_probe(output electrical out);
+                electrical aliased;
+                integer ok;
+                parameter string target_path = "$root.vin";
+                analog initial begin
+                    ok = $analog_node_alias(aliased, target_path);
+                end
+                analog begin
+                    V(out) <+ V(aliased);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_alias_probe.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "alias_probe.va"
+
+            Vin (vin 0) vsource dc=0.35 type=dc
+            XDUT (out) alias_probe
+
+            tran tran stop=1n maxstep=100p
+            save vin out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(0.35, abs=1e-9)
+
+    def test_ahdl_include_registers_multiple_modules_from_one_file(self, tmp_path):
+        va_file = tmp_path / "hier.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module parent(input electrical vin, output electrical out);
+                child u1 (.vin(vin), .out(out));
+            endmodule
+
+            module child(input electrical vin, output electrical out);
+                analog begin
+                    V(out) <+ 0.8 * V(vin);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_hier.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "hier.va"
+
+            Vin (in 0) vsource dc=0.5 type=dc
+            XDUT (in out) parent
+
+            tran tran stop=1n maxstep=100p
+            save in out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(0.4, abs=1e-9)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance
