@@ -1,7 +1,7 @@
 """
 parser.py — Recursive descent parser for Verilog-A → AST
 """
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .ast_nodes import *
 from .lexer import Token, TokenType, tokenize
@@ -115,6 +115,7 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self._repeat_counter = 0
+        self._range_param_values: Dict[str, float] = {}
 
     def peek(self) -> Token:
         return self.tokens[self.pos]
@@ -244,6 +245,7 @@ class Parser:
         name_tok = self.expect(TokenType.IDENT)
         self._reject_reserved_identifier(name_tok, "module name")
         name = name_tok.value
+        self._range_param_values = {}
 
         # Parse port list
         self._ansi_warnings = []  # cleared by _parse_ansi_port_list if ANSI
@@ -371,11 +373,121 @@ class Parser:
     def _parse_range(self) -> Tuple[int, int]:
         """Parse [hi:lo] range."""
         self.expect(TokenType.LBRACKET)
-        hi = self._parse_const_expr()
+        hi_tokens = self._collect_range_expr_tokens(TokenType.COLON)
         self.expect(TokenType.COLON)
-        lo = self._parse_const_expr()
+        lo_tokens = self._collect_range_expr_tokens(TokenType.RBRACKET)
         self.expect(TokenType.RBRACKET)
-        return int(hi), int(lo)
+        return (
+            int(self._eval_range_const_tokens(hi_tokens)),
+            int(self._eval_range_const_tokens(lo_tokens)),
+        )
+
+    def _collect_range_expr_tokens(self, stop_type: TokenType) -> List[Token]:
+        tokens: List[Token] = []
+        paren_depth = 0
+        while not self.at(TokenType.EOF):
+            if paren_depth == 0 and self.at(stop_type):
+                break
+            token = self.advance()
+            if token.type == TokenType.LPAREN:
+                paren_depth += 1
+            elif token.type == TokenType.RPAREN and paren_depth > 0:
+                paren_depth -= 1
+            tokens.append(token)
+        return tokens
+
+    def _eval_range_const_tokens(self, tokens: List[Token]) -> float:
+        if not tokens:
+            return 0.0
+        pos = 0
+
+        def peek() -> Token:
+            if pos >= len(tokens):
+                return tokens[-1]
+            return tokens[pos]
+
+        def match(*types: TokenType) -> Optional[Token]:
+            nonlocal pos
+            if pos < len(tokens) and tokens[pos].type in types:
+                token = tokens[pos]
+                pos += 1
+                return token
+            return None
+
+        def expect(tt: TokenType) -> Token:
+            token = peek()
+            if not match(tt):
+                raise ParseError(
+                    f"Expected {tt.name} in range expression, got "
+                    f"{token.type.name} ({token.value!r})",
+                    token,
+                )
+            return token
+
+        def parse_additive() -> float:
+            value = parse_multiplicative()
+            while True:
+                if match(TokenType.PLUS):
+                    value += parse_multiplicative()
+                elif match(TokenType.MINUS):
+                    value -= parse_multiplicative()
+                else:
+                    return value
+
+        def parse_multiplicative() -> float:
+            value = parse_power()
+            while True:
+                if match(TokenType.STAR):
+                    value *= parse_power()
+                elif match(TokenType.SLASH):
+                    value /= parse_power()
+                elif match(TokenType.PERCENT):
+                    value %= parse_power()
+                else:
+                    return value
+
+        def parse_power() -> float:
+            value = parse_unary()
+            if match(TokenType.POWER):
+                value **= parse_power()
+            return value
+
+        def parse_unary() -> float:
+            if match(TokenType.PLUS):
+                return parse_unary()
+            if match(TokenType.MINUS):
+                return -parse_unary()
+            return parse_primary()
+
+        def parse_primary() -> float:
+            if token := match(TokenType.NUMBER):
+                return float(token.value)
+            if token := match(TokenType.IDENT):
+                if token.value in self._range_param_values:
+                    return float(self._range_param_values[token.value])
+                raise ParseError(
+                    "Expected numeric or parameter constant expression in "
+                    f"range; unknown identifier {token.value!r}",
+                    token,
+                )
+            if match(TokenType.LPAREN):
+                value = parse_additive()
+                expect(TokenType.RPAREN)
+                return value
+            token = peek()
+            raise ParseError(
+                "Expected numeric or parameter constant expression in range",
+                token,
+            )
+
+        value = parse_additive()
+        if pos != len(tokens):
+            token = peek()
+            raise ParseError(
+                f"Unexpected token in range expression: {token.value!r}",
+                token,
+            )
+        return value
 
     def _skip_range(self):
         """Skip over a [...] range."""
@@ -417,6 +529,40 @@ class Parser:
             self.expect(TokenType.RPAREN)
             return -val if neg else val
         return 0
+
+    def _eval_range_const_expr(self, expr: Expr) -> float:
+        """Evaluate numeric/parameter constant expressions used by ranges."""
+        if isinstance(expr, NumberLiteral):
+            return float(expr.value)
+        if isinstance(expr, Identifier):
+            if expr.name in self._range_param_values:
+                return float(self._range_param_values[expr.name])
+            raise ParseError(
+                "Expected numeric or parameter constant expression in range; "
+                f"unknown identifier {expr.name!r}"
+            )
+        if isinstance(expr, UnaryExpr):
+            value = self._eval_range_const_expr(expr.operand)
+            if expr.op == "-":
+                return -value
+            if expr.op == "+":
+                return value
+        if isinstance(expr, BinaryExpr):
+            left = self._eval_range_const_expr(expr.left)
+            right = self._eval_range_const_expr(expr.right)
+            if expr.op == "+":
+                return left + right
+            if expr.op == "-":
+                return left - right
+            if expr.op == "*":
+                return left * right
+            if expr.op == "/":
+                return left / right
+            if expr.op == "%":
+                return left % right
+            if expr.op == "**":
+                return left ** right
+        raise ParseError("Expected numeric or parameter constant expression in range")
 
     # ─── Module Items ───
 
@@ -881,6 +1027,11 @@ class Parser:
             range_lo=range_lo, range_hi=range_hi,
             range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
         ))
+        if param_type != ParamType.STRING:
+            try:
+                self._range_param_values[name] = self._eval_range_const_expr(default_val)
+            except (ArithmeticError, ParseError):
+                pass
 
     def _parse_decl_type(self, default: ParamType = ParamType.REAL) -> Tuple[ParamType, bool]:
         """Parse an optional scalar declaration type.

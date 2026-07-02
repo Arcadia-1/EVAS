@@ -340,7 +340,8 @@ def test_parameter_electrical_range_is_not_misclassified_as_vacomp_2446():
     diags = lint_source(source)
 
     assert "EVAS-COMP-E2446" not in _codes(diags)
-    assert "EVAS-COMP-EPARSE" in _codes(diags)
+    assert "EVAS-COMP-EPARSE" not in _codes(diags)
+    assert not has_compat_errors(diags)
 
 
 def test_constant_electrical_range_is_allowed():
