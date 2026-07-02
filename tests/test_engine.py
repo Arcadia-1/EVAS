@@ -7014,6 +7014,32 @@ endmodule
         y0 = self.model._idtmod("wrap_init2", time=0.0, x=1.0, ic=3.0, mod=1.0)
         assert y0 == pytest.approx(0.0, abs=1e-9)
 
+    def test_idtmod_near_wrap_but_not_boundary_does_not_snap(self):
+        """Near-boundary phases outside the snap epsilon remain observable.
+
+        The exact-wrap repair should only remove floating-point residue at the
+        modulus boundary; it must not erase a legitimate phase that is merely
+        close to the end of the cycle.
+        """
+        y0 = self.model._idtmod(
+            "near_wrap_init",
+            time=0.0,
+            x=0.0,
+            ic=1.0 - 2.0e-9,
+            mod=1.0,
+        )
+        assert y0 == pytest.approx(1.0 - 2.0e-9, abs=1e-12)
+
+        self.model._idtmod("near_wrap_update", time=0.0, x=1.0, ic=0.0, mod=1.0)
+        y1 = self.model._idtmod(
+            "near_wrap_update",
+            time=1.0 - 2.0e-9,
+            x=1.0,
+            ic=0.0,
+            mod=1.0,
+        )
+        assert y1 == pytest.approx(1.0 - 2.0e-9, abs=1e-12)
+
     def test_temperature_default(self):
         assert self.model._temperature == pytest.approx(27.0)
 

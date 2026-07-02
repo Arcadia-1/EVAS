@@ -721,8 +721,10 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
     else:
         # Fail loudly on unsupported source types instead of silently dropping
         # the source (which would leave the driven node stuck at its initial
-        # value and make any @cross on it never fire).  See EVAS defect D1.
-        warn.append(f"{src.name}: unsupported vsource type {stype!r} — ignored")
+        # value and make any @cross on it never fire).  This mirrors the
+        # isource path above and keeps unsupported Spectre constructs from
+        # producing misleading successful simulations.
+        raise ValueError(f"{src.name}: unsupported vsource type={stype!r}")
 
     return warn
 

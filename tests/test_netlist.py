@@ -1036,9 +1036,14 @@ class TestAddSpectreSourceSquareSource:
         assert w(1.9e-9) == pytest.approx(0.0)
         assert w(20e-9) == pytest.approx(1.8)
 
-    def test_unknown_source_type_warns_loudly(self):
-        """Unknown vsource types must be surfaced via a warning, not silently
-        dropped (the silent-drop class of bug behind defect D1)."""
+    def test_unknown_source_type_raises(self):
+        """Unknown vsource types must fail loudly, not be silently dropped.
+
+        Silent drop leaves the driven node stuck at its initial value and makes
+        any @cross on it appear never to fire.  Treating the source as invalid
+        keeps an unsupported Spectre construct from producing a misleading
+        successful simulation.
+        """
         src = SpectreSource(
             name="Vexp",
             node_pos="vin",
@@ -1047,11 +1052,32 @@ class TestAddSpectreSourceSquareSource:
             params={"type": "exp", "val0": 0.0, "val1": 1.0},
         )
         sim = self._sim()
-        warns = _add_spectre_source(sim, src, "0")
-        assert len(warns) == 1
-        assert "unsupported vsource type 'exp'" in warns[0]
+        with pytest.raises(ValueError, match="unsupported vsource type='exp'"):
+            _add_spectre_source(sim, src, "0")
         # The source was NOT registered.
         assert not any(s.node == "vin" for s in sim.sources)
+
+    def test_unknown_source_type_fails_netlist_simulation(self, tmp_path):
+        """The top-level runner must return False for unsupported vsource types."""
+        scs_file = tmp_path / "tb_unknown_source.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            Vexp (vin 0) vsource type=exp val0=0 val1=1
+            tran tran stop=1n maxstep=100p
+            save vin
+        """))
+
+        out_dir = tmp_path / "out"
+        ok = evas_simulate(
+            str(scs_file),
+            output_dir=str(out_dir),
+            log_path=str(out_dir / "evas.log"),
+        )
+        assert ok is False
+        assert not (out_dir / "tran.csv").exists()
+        log_text = (out_dir / "evas.log").read_text(encoding="utf-8")
+        assert "unsupported vsource type='exp'" in log_text
 
 
 # ===========================================================================
