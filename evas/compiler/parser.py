@@ -749,7 +749,7 @@ class Parser:
                         found = True
                         break
                 if not found:
-                    if effective_array_hi is not None:
+                    if effective_array_hi is not None and discipline in {"logic", "wreal"}:
                         var_type = ParamType.INTEGER if discipline in {"logic"} else ParamType.REAL
                         if discipline in {"logic"} and post_array_hi is None:
                             module.variables.append(VariableDecl(
