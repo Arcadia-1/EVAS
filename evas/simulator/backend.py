@@ -149,6 +149,7 @@ class CompiledModel:
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.digital_edge_states: Dict[str, int] = {}
         self.output_nodes: Dict[str, Any] = {}
+        self._declared_branch_currents: Dict[str, float] = {}
         self._output_nodes_version: int = 0
         self._analysis_mode: str = "tran"
         self._analysis_frequency: float = 0.0
@@ -3960,6 +3961,17 @@ class CompiledModel:
         ext2 = self._resolve_external_node(node2)
         return float(node_voltages.get(f"@I:{ext1}:{ext2}", 0.0))
 
+    def _add_declared_branch_current(self, branch_name: str, value: float) -> None:
+        """Accumulate current contributions for an explicit Verilog-A branch."""
+        self._declared_branch_currents[branch_name] = (
+            float(self._declared_branch_currents.get(branch_name, 0.0))
+            + float(value)
+        )
+
+    def _get_declared_branch_current(self, branch_name: str) -> float:
+        """Read the latest current contribution for an explicit Verilog-A branch."""
+        return float(self._declared_branch_currents.get(branch_name, 0.0))
+
     def _get_static_branch_voltage_by_slot(self, slot: int, node_voltages: Dict[str, float]) -> float:
         """Read a static branch node by run-installed node id when available."""
         try:
@@ -5830,6 +5842,7 @@ class _ModuleCompiler:
         # reset here is a no-op for the happy path.
         lines.append("        if self._transition_pending_count > 0:")
         lines.append("            self._reset_transition_pending()")
+        lines.append("        self._declared_branch_currents.clear()")
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.evaluate(nv, time)")
         loop_state_targets: set[str] = set()
@@ -13507,6 +13520,16 @@ class _ModuleCompiler:
         prefix = '    ' * indent
         branch = stmt.branch
         node = branch.node1
+        if (
+            branch.access_type == "I"
+            and branch.node2 is None
+            and branch.node1_index is None
+            and branch.node1_index2 is None
+        ):
+            expr = self._compile_expr(stmt.expr)
+            if node in self._branch_decl_by_name:
+                return [f"{prefix}self._add_declared_branch_current({node!r}, {expr})"]
+
         transition_affine = None
         if (
             branch.access_type == "V"
@@ -14784,6 +14807,8 @@ class _ModuleCompiler:
                     return f"self._get_branch_current({expr.node1!r}, {expr.node2!r}, nv)"
                 return "0.0"  # Dynamic-index I() is not supported yet.
             branch = self._branch_decl_by_name.get(node)
+            if branch is not None and expr.access_type == 'I':
+                return f"self._get_declared_branch_current({node!r})"
             if branch is not None and expr.access_type == 'V':
                 n1 = self._compile_node_voltage(branch.node1)
                 n2 = self._compile_node_voltage(branch.node2)

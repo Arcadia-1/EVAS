@@ -603,6 +603,33 @@ endmodule
         assert model.state["step"] == pytest.approx(6.125)
         assert result.signals["out"].tolist() == pytest.approx([6.125, 6.125])
 
+    def test_declared_branch_current_contribution_can_be_probed(self):
+        src = """\
+`include "disciplines.vams"
+module branch_current_probe(p, n, out);
+    input p, n;
+    output out;
+    electrical p, n, out;
+    branch (p, n) br;
+    analog begin
+        I(br) <+ V(p, n);
+        I(br) <+ 0.125;
+        V(out) <+ I(br);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("p", dc(0.75))
+        sim.add_source("n", dc(0.25))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([0.625, 0.625])
+
     def test_static_bitwise_variable_initializers_use_parameter_env(self):
         src = """\
 `include "disciplines.vams"
