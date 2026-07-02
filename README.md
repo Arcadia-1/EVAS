@@ -56,9 +56,13 @@ aliases.
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
 evas simulate path/to/tb.scs -o output/mydesign --engine evas-rust
+evas simulate path/to/tb.scs -o output/mydesign --ahdllint
 ```
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.
+`--ahdllint` runs EVAS lint as a non-blocking simulation preflight and writes
+diagnostics into the simulation log before model compilation. Netlists may also
+request this with `simulatorOptions options ahdllint=true`.
 
 Before a full simulation, you can run a Spectre/AHDL-style static lint pass:
 

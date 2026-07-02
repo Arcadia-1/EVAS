@@ -945,6 +945,26 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
     )
 
 
+def _log_ahdllint_diagnostics(
+    scs_path: Path,
+    log: "_Logger",
+    *,
+    min_transition: float,
+) -> int:
+    """Run EVAS lint during simulation and write diagnostics to the run log."""
+    from evas.compiler.linter import lint_file
+
+    diagnostics = lint_file(scs_path, min_transition=min_transition)
+    log.write("")
+    log.write("AHDL lint diagnostics:")
+    if not diagnostics:
+        log.write("    No EVAS lint diagnostics.")
+        return 0
+    for diagnostic in diagnostics:
+        log.write(f"    {diagnostic.format_text()}")
+    return len(diagnostics)
+
+
 # ---------------------------------------------------------------------------
 # Collect all nodes from the netlist
 # ---------------------------------------------------------------------------
@@ -967,7 +987,9 @@ def _collect_nodes(netlist: SpectreNetlist) -> set:
 
 def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 output_dir: str = './output',
-                strobe_log_path: Optional[str] = None) -> bool:
+                strobe_log_path: Optional[str] = None,
+                ahdllint: bool = False,
+                ahdllint_min_transition: float = 1e-12) -> bool:
     """Run an EVAS .scs netlist. Returns True on success.
 
     Args:
@@ -975,6 +997,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log_path:        Optional path for the simulation log. If None, log goes to stdout.
         output_dir:      Directory for output files (CSV, strobe log).
         strobe_log_path: Path for $strobe/$display output. Defaults to <output_dir>/strobe.txt.
+        ahdllint:        Run EVAS AHDL-style lint before compiling models.
+        ahdllint_min_transition:
+                         Minimum transition rise/fall time for lint warnings.
     """
     scs_path = Path(scs_file).resolve()
     out_dir = Path(output_dir)
@@ -1016,6 +1041,18 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         return False
 
     simopt = netlist.simulator_options or {}
+    ahdllint_enabled = (
+        ahdllint
+        or _simopt_bool(simopt, 'ahdllint', False)
+        or _simopt_bool(simopt, 'evas_ahdllint', False)
+    )
+    if ahdllint_enabled:
+        warnings += _log_ahdllint_diagnostics(
+            scs_path,
+            log,
+            min_transition=ahdllint_min_transition,
+        )
+
     static_branch_fastpath = _simopt_bool(
         simopt,
         'evas_static_branch_fastpath',
