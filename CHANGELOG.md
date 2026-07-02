@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.6.0] — 2026-07-02
+
+### Added — Lint Diagnostics
+- Added `evas lint` for static EVAS compatibility and AHDL-style model-quality
+  diagnostics without changing normal simulation pass/fail behavior.
+- Added rule metadata, text/JSON diagnostic output, and source line/column
+  anchors for repair-loop friendly lint reports.
+- Added public distilled lint oracle fixtures for Spectre/AHDL warning classes
+  without committing proprietary simulator logs.
+
+### Added — Verilog-A Compatibility
+- Added support for numeric-parameter constant expressions in Verilog-A
+  discipline/vector range declarations, while keeping runtime-variable ranges
+  rejected with compatibility diagnostics.
+
+### Fixed — Engine Selection
+- Let the legacy `evas2`/`evas-rust` engine alias fall back to the Python engine
+  when the optional Rust backend is unavailable, unless Rust was explicitly
+  required.
+
 ## [0.5.2] — 2026-07-01
 
 ### Fixed — Publishing
