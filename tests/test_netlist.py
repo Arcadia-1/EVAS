@@ -403,6 +403,88 @@ class TestAhdlIncludePathFallback:
             in log
         )
 
+    def test_evas_simulate_ahdllint_logs_nonblocking_diagnostics(self, tmp_path):
+        va_file = tmp_path / "lint_transition.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module lint_transition(out);
+                output out;
+                electrical out;
+
+                analog begin
+                    V(out) <+ transition(1.0, 0);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_lint_transition.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "lint_transition.va"
+
+            XDUT (out) lint_transition
+
+            tran tran stop=1n maxstep=100p
+            save out
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+            ahdllint=True,
+        )
+
+        assert ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "AHDL lint diagnostics:" in log
+        assert "EVAS-AHDL-W5003" in log
+        assert "transition() has no explicit rise time" in log
+        assert "evas completes with 0 errors" in log
+
+    def test_evas_simulate_ahdllint_can_be_enabled_from_netlist(self, tmp_path):
+        va_file = tmp_path / "lint_transition.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module lint_transition(out);
+                output out;
+                electrical out;
+
+                analog begin
+                    V(out) <+ transition(1.0, 0);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_lint_transition.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "lint_transition.va"
+
+            XDUT (out) lint_transition
+
+            simulatorOptions options ahdllint=true
+            tran tran stop=1n maxstep=100p
+            save out
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "AHDL lint diagnostics:" in log
+        assert "EVAS-AHDL-W5003" in log
+
     def test_user_defined_function_call_allowed_by_netlist_runner(self, tmp_path):
         va_file = tmp_path / "fn_clamp.va"
         va_file.write_text(textwrap.dedent("""\

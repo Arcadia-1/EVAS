@@ -65,7 +65,13 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     if args.engine:
         os.environ["EVAS_ENGINE"] = args.engine
     try:
-        ok = evas_simulate(args.input, log_path=args.log, output_dir=args.output)
+        ok = evas_simulate(
+            args.input,
+            log_path=args.log,
+            output_dir=args.output,
+            ahdllint=args.ahdllint,
+            ahdllint_min_transition=args.ahdllint_min_transition,
+        )
     finally:
         if args.engine:
             if previous_engine is None:
@@ -183,6 +189,17 @@ def main() -> None:
         "--engine",
         choices=["python", "evas-rust", "evas2", "rust2"],
         help="Engine override. The default is python; evas-rust requires the Rust backend.",
+    )
+    p_sim.add_argument(
+        "--ahdllint",
+        action="store_true",
+        help="Run EVAS AHDL-style lint diagnostics before simulation",
+    )
+    p_sim.add_argument(
+        "--ahdllint-min-transition",
+        type=float,
+        default=1e-12,
+        help="Minimum transition rise/fall time used by --ahdllint (default: 1e-12)",
     )
     p_sim.set_defaults(func=cmd_simulate)
 
