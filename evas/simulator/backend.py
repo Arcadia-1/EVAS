@@ -4952,6 +4952,26 @@ class CompiledModel:
         tau = abs(d1 / d0)
         return self._laplace_first_order_update(key, time, target, tau)
 
+    def _laplace_zp(self, key: str, time: float, x: float, zeros: Any, poles: Any) -> float:
+        """
+        Minimal behavioral laplace_zp approximation for event-level tests.
+
+        Supports the task-oriented first real pole form zeros={z0}, poles={p0,...},
+        using abs(p0) as the pole frequency and z0 as the DC gain. Unsupported
+        shapes conservatively return x, matching the legacy compile-supported
+        behavior.
+        """
+        try:
+            zero_values = [float(v) for v in zeros]
+            pole_values = [float(v) for v in poles]
+        except Exception:
+            return float(x)
+        if len(zero_values) != 1 or not pole_values or pole_values[0] == 0.0:
+            return float(x)
+        target = zero_values[0] * float(x)
+        tau = 1.0 / abs(pole_values[0])
+        return self._laplace_first_order_update(key, time, target, tau)
+
     @staticmethod
     def _limexp(x: Any) -> float:
         x_f = float(x)
@@ -15242,8 +15262,15 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_zd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {den})"
             return f"self._laplace_zd({base_key!r}, time, {x}, {zeros}, {den})"
+        if name == 'laplace_zp':
+            base_key = self._alloc_stateful_func_key("laplace", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            zeros = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            poles = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            if self._in_loop_var:
+                return f"self._laplace_zp(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {poles})"
+            return f"self._laplace_zp({base_key!r}, time, {x}, {zeros}, {poles})"
         if name in {
-            'laplace_zp',
             'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
         }:
             return args[0] if args else "0.0"

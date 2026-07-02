@@ -7764,6 +7764,28 @@ endmodule
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
 
+    def test_laplace_zp_first_real_pole_advances_state(self):
+        src = """\
+`include "disciplines.vams"
+module laplace_zp_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ laplace_zp(V(vin), {1.0}, {1.0, 1.0});
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        nv0 = {"vin": 0.0}
+        model.evaluate(nv0, 0.0)
+        assert nv0["out"] == pytest.approx(0.0)
+
+        nv1 = {"vin": 1.0}
+        model.evaluate(nv1, 1.0)
+        assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
+
 
 class TestConnectmoduleAndMultidimensionalArrays:
 
