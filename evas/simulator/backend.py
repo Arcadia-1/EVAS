@@ -11797,7 +11797,7 @@ class _ModuleCompiler:
 
     def _compile_task_call(self, stmt: TaskCall, indent: int) -> List[str]:
         if stmt.name == "$indirect_branch":
-            return []
+            return self._compile_indirect_branch_task(stmt, indent)
         if stmt.name not in self._user_task_by_name:
             raise CompilationError(
                 f"Unsupported Verilog-A task call: {stmt.name}()"
@@ -11812,6 +11812,150 @@ class _ModuleCompiler:
         if args:
             return [f"{prefix}self.{method}(nv, time, {args})"]
         return [f"{prefix}self.{method}(nv, time)"]
+
+    def _compile_indirect_branch_task(self, stmt: TaskCall, indent: int) -> List[str]:
+        if len(stmt.args) < 3:
+            return []
+        target, lhs, rhs = stmt.args[:3]
+        if not isinstance(target, BranchAccess) or target.access_type != "V":
+            return []
+
+        value_expr = self._indirect_branch_voltage_solution(target, lhs, rhs)
+        if value_expr is not None:
+            return self._compile_indirect_branch_voltage_write(target, value_expr, indent)
+
+        derivative_expr = self._indirect_branch_ddt_rhs(target, lhs, rhs)
+        if derivative_expr is not None:
+            key = self._alloc_stateful_func_key("idt", stmt)
+            value_expr = f"self._idt({key!r}, time, {derivative_expr}, 0.0)"
+            return self._compile_indirect_branch_voltage_write(target, value_expr, indent)
+
+        return []
+
+    def _same_indirect_voltage_target(self, expr: Expr, target: BranchAccess) -> bool:
+        return (
+            isinstance(expr, BranchAccess)
+            and expr.access_type == "V"
+            and expr.node1 == target.node1
+            and expr.node2 == target.node2
+            and expr.node1_index is None
+            and expr.node2_index is None
+            and expr.node1_index2 is None
+            and expr.node2_index2 is None
+            and target.node1_index is None
+            and target.node2_index is None
+            and target.node1_index2 is None
+            and target.node2_index2 is None
+        )
+
+    def _same_indirect_ddt_target(self, expr: Expr, target: BranchAccess) -> bool:
+        return (
+            isinstance(expr, FunctionCall)
+            and expr.name == "ddt"
+            and len(expr.args) == 1
+            and self._same_indirect_voltage_target(expr.args[0], target)
+        )
+
+    def _solve_simple_indirect_form(
+        self,
+        target,
+        lhs: Expr,
+        rhs: Expr,
+        *,
+        target_match,
+    ) -> Optional[str]:
+        rhs_expr = self._compile_expr(rhs)
+        if target_match(lhs, target):
+            return rhs_expr
+        if isinstance(lhs, BinaryExpr):
+            left_is_target = target_match(lhs.left, target)
+            right_is_target = target_match(lhs.right, target)
+            if lhs.op == "-" and left_is_target:
+                other = self._compile_expr(lhs.right)
+                return f"(({rhs_expr}) + ({other}))"
+            if lhs.op == "-" and right_is_target:
+                other = self._compile_expr(lhs.left)
+                return f"(({other}) - ({rhs_expr}))"
+            if lhs.op == "+" and left_is_target:
+                other = self._compile_expr(lhs.right)
+                return f"(({rhs_expr}) - ({other}))"
+            if lhs.op == "+" and right_is_target:
+                other = self._compile_expr(lhs.left)
+                return f"(({rhs_expr}) - ({other}))"
+        return None
+
+    def _indirect_branch_voltage_solution(
+        self,
+        target: BranchAccess,
+        lhs: Expr,
+        rhs: Expr,
+    ) -> Optional[str]:
+        value = self._solve_simple_indirect_form(
+            target,
+            lhs,
+            rhs,
+            target_match=self._same_indirect_voltage_target,
+        )
+        if value is not None:
+            return value
+        return self._solve_simple_indirect_form(
+            target,
+            rhs,
+            lhs,
+            target_match=self._same_indirect_voltage_target,
+        )
+
+    def _indirect_branch_ddt_rhs(
+        self,
+        target: BranchAccess,
+        lhs: Expr,
+        rhs: Expr,
+    ) -> Optional[str]:
+        value = self._solve_simple_indirect_form(
+            target,
+            lhs,
+            rhs,
+            target_match=self._same_indirect_ddt_target,
+        )
+        if value is not None:
+            return value
+        return self._solve_simple_indirect_form(
+            target,
+            rhs,
+            lhs,
+            target_match=self._same_indirect_ddt_target,
+        )
+
+    def _compile_indirect_branch_voltage_write(
+        self,
+        target: BranchAccess,
+        value_expr: str,
+        indent: int,
+    ) -> List[str]:
+        prefix = '    ' * indent
+        node = target.node1
+        expr = value_expr
+        if target.node2 is not None:
+            node2_expr = self._compile_node_voltage(
+                target.node2,
+                target.node2_index,
+                target.node2_index2,
+            )
+            expr = f"(({node2_expr}) + ({expr}))"
+        if target.node1_index is not None:
+            idx_expr = self._compile_expr(target.node1_index)
+            if target.node1_index2 is not None:
+                idx_expr2 = self._compile_expr(target.node1_index2)
+                node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr}, {idx_expr2})"
+                return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
+            node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr})"
+            return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
+        if self.static_branch_fastpath_codegen:
+            slot = self._static_branch_write_slot_by_node.get(node)
+            if slot is not None:
+                return [f"{prefix}self._set_static_branch_output_by_slot({slot}, {expr}, nv)"]
+            return [f"{prefix}self._set_static_branch_output({node!r}, {expr}, nv)"]
+        return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
 
     def _compile_statement(self, stmt, indent) -> List[str]:
         """Compile a statement to Python code lines."""

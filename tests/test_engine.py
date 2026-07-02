@@ -8736,6 +8736,53 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(0.500001000001)
 
+    def test_indirect_branch_voltage_equation_drives_target(self):
+        src = """\
+`include "disciplines.vams"
+module indirect_voltage_eq(out, inp);
+    output voltage out;
+    input voltage inp;
+    analog begin
+        V(out) : V(out) - V(inp) == 0;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("inp", pwl([0.0, 1e-9, 3e-9], [0.0, 1.0, 0.5]))
+        sim.record("inp")
+        sim.record("out")
+        result = sim.run(tstop=3e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx(
+            result.signals["inp"].tolist()
+        )
+
+    def test_indirect_branch_ddt_equation_integrates_target(self):
+        src = """\
+`include "disciplines.vams"
+module indirect_ddt_eq(out, inp);
+    output voltage out;
+    input voltage inp;
+    analog begin
+        V(out) : ddt(V(out)) == V(inp);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("inp", dc(1.0e9))
+        sim.record("out")
+        result = sim.run(tstop=3e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(3.0)
+
     def test_cadence_generic_potential_and_extended_table_model_compile(self):
         src = """\
 `include "disciplines.vams"
