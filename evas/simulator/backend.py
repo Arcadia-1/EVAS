@@ -336,9 +336,10 @@ class CompiledModel:
             "rust_body_ir_production_node_writes": 0,
             "rust_body_ir_production_state_writes": 0,
         }
-        # Lazy-allocated integrator states (only used when idt/idtmod appears)
+        # Lazy-allocated dynamic operator states.
         self._ddt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
+        self._laplace_states: Optional[Dict[str, Dict[str, float]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
         self._next_fd: int = 1
         self._child_models: List["CompiledModel"] = []
@@ -475,6 +476,7 @@ class CompiledModel:
             "timer_kinds": copy.deepcopy(self.timer_kinds),
             "ddt_states": copy.deepcopy(self._ddt_states),
             "idt_states": copy.deepcopy(self._idt_states),
+            "laplace_states": copy.deepcopy(self._laplace_states),
             "initial_step_done": self._initial_step_done,
             "bound_step": self._bound_step,
             "event_time": self._event_time,
@@ -501,6 +503,7 @@ class CompiledModel:
         self.timer_kinds = snapshot["timer_kinds"]
         self._ddt_states = snapshot["ddt_states"]
         self._idt_states = snapshot["idt_states"]
+        self._laplace_states = snapshot["laplace_states"]
         self._initial_step_done = snapshot["initial_step_done"]
         self._bound_step = snapshot["bound_step"]
         self._event_time = snapshot["event_time"]
@@ -4849,6 +4852,49 @@ class CompiledModel:
             st["y"] = float(ic)
             st["last_t"] = t
             st["last_x"] = x_f
+        st["last_eval_t"] = t
+        return float(st["y"])
+
+    def _laplace_nd(self, key: str, time: float, x: float, num: Any, den: Any) -> float:
+        """
+        Minimal behavioral laplace_nd approximation.
+
+        Supports the first-order low-pass form num={n0}, den={d0,d1},
+        interpreted as n0 / (d0 + d1*s). Unsupported coefficient shapes
+        conservatively return x, matching the legacy compile-supported
+        behavior.
+        """
+        try:
+            num_values = [float(v) for v in num]
+            den_values = [float(v) for v in den]
+        except Exception:
+            return float(x)
+        if len(num_values) != 1 or len(den_values) != 2:
+            return float(x)
+        d0 = den_values[0]
+        d1 = den_values[1]
+        if d0 == 0.0 or d1 == 0.0:
+            return float(x)
+
+        if self._laplace_states is None:
+            self._laplace_states = {}
+        t = float(time)
+        target = (num_values[0] / d0) * float(x)
+        tau = abs(d1 / d0)
+        if key not in self._laplace_states:
+            self._laplace_states[key] = {"last_t": t, "y": target, "last_eval_t": t}
+            return target
+        st = self._laplace_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        dt = t - float(st["last_t"])
+        if dt > 0.0 and tau > 0.0:
+            alpha = 1.0 - math.exp(-dt / tau)
+            st["y"] = float(st["y"]) + alpha * (target - float(st["y"]))
+            st["last_t"] = t
+        elif dt < 0.0:
+            st["y"] = target
+            st["last_t"] = t
         st["last_eval_t"] = t
         return float(st["y"])
 
@@ -12991,6 +13037,9 @@ class _ModuleCompiler:
         elif kind == "idtmod":
             key = f"idtmod_{self._idt_counter}"
             self._idt_counter += 1
+        elif kind == "laplace":
+            key = f"laplace_{self._idt_counter}"
+            self._idt_counter += 1
         else:
             raise ValueError(f"unknown stateful func key kind: {kind}")
         self._stateful_func_key_cache[cache_key] = key
@@ -14909,6 +14958,11 @@ class _ModuleCompiler:
             return f"self._get_static_branch_voltage({node!r}, nv)"
         return f"self._get_voltage({node!r}, nv)"
 
+    def _compile_coeff_vector(self, expr: Expr) -> str:
+        if isinstance(expr, ConcatExpr):
+            return "[" + ", ".join(self._compile_expr(part) for part in expr.parts) + "]"
+        return f"[{self._compile_expr(expr)}]"
+
     def _compile_instance_target(self, expr: Expr) -> str:
         """Compile instance connection target into a node-name string expression."""
         if isinstance(expr, Identifier):
@@ -15110,8 +15164,16 @@ class _ModuleCompiler:
         if name == 'limexp':
             x = args[0] if args else "0.0"
             return f"self._limexp({x})"
+        if name == 'laplace_nd':
+            base_key = self._alloc_stateful_func_key("laplace", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            den = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            if self._in_loop_var:
+                return f"self._laplace_nd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {den})"
+            return f"self._laplace_nd({base_key!r}, time, {x}, {num}, {den})"
         if name in {
-            'laplace_nd', 'laplace_np', 'laplace_zd', 'laplace_zp',
+            'laplace_np', 'laplace_zd', 'laplace_zp',
             'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
         }:
             return args[0] if args else "0.0"
