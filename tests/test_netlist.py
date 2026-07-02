@@ -448,6 +448,36 @@ class TestAhdlIncludePathFallback:
         assert float(low_row["out"]) == pytest.approx(0.1, abs=1e-6)
         assert float(high_row["out"]) == pytest.approx(0.8, abs=1e-6)
 
+    def test_mfactor_reads_spectre_instance_m_parameter(self, tmp_path):
+        va_file = tmp_path / "mfactor_gain.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module mfactor_gain(input electrical in, output electrical out);
+                analog begin
+                    V(out) <+ $mfactor() * V(in);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_mfactor_gain.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "mfactor_gain.va"
+
+            Vin (in 0) vsource dc=0.4 type=dc
+            XDUT (in out) mfactor_gain m=2.5
+
+            tran tran stop=1n maxstep=100p
+            save in out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(1.0, abs=1e-9)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance

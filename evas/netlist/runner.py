@@ -240,7 +240,7 @@ _SUPPORTED_FUNCTION_CALLS = {
     '$sin', '$cos', '$tan', '$tanh', '$floor', '$ceil',
     '$temperature', '$vt', '$simparam', '$attribute',
     'potential', 'flow',
-    '$rtoi', '$param_given', '$port_connected',
+    '$rtoi', '$param_given', '$port_connected', '$mfactor',
     '$analog_node_alias', '$analog_port_alias',
     '$cds_get_mc_trial_number', '$cds_set_rf_source_info',
     '$cds_violation',
@@ -1101,6 +1101,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             errors += 1
             continue
         model.node_map = node_map
+        model._mfactor_value = float(inst.params.get("m", 1.0))
         # Case-insensitive param update: netlist keys are lowercased, model keys
         # preserve the original VA case. Match by lowercase to update correctly.
         lower_to_model_key = {k.lower(): k for k in model.params}

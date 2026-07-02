@@ -160,6 +160,7 @@ class CompiledModel:
         self._table_model_cache: Dict[str, Tuple[Tuple[float, float], ...]] = {}
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
+        self._mfactor_value: float = 1.0
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
         self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
@@ -538,6 +539,9 @@ class CompiledModel:
         if port in getattr(self.__class__, "_module_ports", ()):
             return 1.0
         return 0.0
+
+    def _mfactor(self) -> float:
+        return float(getattr(self, "_mfactor_value", 1.0))
 
     def _attribute_value(self, path: Any) -> float:
         key = str(path).strip().lower()
@@ -14237,6 +14241,8 @@ class _ModuleCompiler:
         if name == "$port_connected":
             port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._port_connected({port_name})"
+        if name == "$mfactor":
+            return "self._mfactor()"
         if name in {"$analog_node_alias", "$cds_get_mc_trial_number"}:
             return "0.0"
         if name == "$table_model":
@@ -14663,6 +14669,8 @@ class _ModuleCompiler:
         if name == '$port_connected':
             port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._port_connected({port_name})"
+        if name == '$mfactor':
+            return "self._mfactor()"
         if name == '$analog_node_alias':
             return "0.0"
         if name == '$cds_get_mc_trial_number':
@@ -15072,6 +15080,8 @@ class _ModuleCompiler:
             }:
                 return 0.0
             if expr.name == '$port_connected':
+                return 1.0
+            if expr.name == '$mfactor':
                 return 1.0
             funcs = {
                 'abs': abs,
