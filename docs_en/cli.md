@@ -87,6 +87,10 @@ front-end failures when possible. Current examples include conditionally
 executed analog operators such as `transition`, `slew`, and `idt`, plus
 discipline vector ranges that use runtime variables instead of numeric or
 parameter constant expressions.
+The repository keeps small public oracle fixtures in
+`tests/fixtures/lint_oracle_cases` for lint regression tests. These fixtures
+store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre
+reports or generated certification output.
 
 | Option | Default | Description |
 |--------|---------|-------------|

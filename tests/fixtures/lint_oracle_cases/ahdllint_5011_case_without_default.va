@@ -1,0 +1,13 @@
+module case_without_default(out);
+    output out;
+    electrical out;
+    integer mode;
+
+    analog begin
+        mode = 1;
+        case (mode)
+            1: mode = 2;
+        endcase
+        V(out) <+ transition(mode, 0, 1n, 1n);
+    end
+endmodule

@@ -87,6 +87,10 @@ Compatibility diagnostics include Cadence/Spectre-aligned cases such as
 conditionally executed analog operators (`transition`, `slew`, `idt`) and
 discipline vector ranges that depend on runtime variables instead of numeric or
 parameter constant expressions.
+The lint regression suite also keeps a small set of public oracle fixtures under
+`tests/fixtures/lint_oracle_cases`. These cases record distilled expected EVAS
+diagnostic codes only; raw Cadence/Spectre logs and generated certification
+reports are not committed.
 
 **Minimal testbench template** (`.scs`):
 

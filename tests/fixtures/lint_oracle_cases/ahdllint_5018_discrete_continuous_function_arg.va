@@ -1,0 +1,10 @@
+module discrete_continuous_function_arg(out);
+    output out;
+    electrical out;
+    integer mode;
+
+    analog begin
+        mode = 1;
+        V(out) <+ exp(mode);
+    end
+endmodule

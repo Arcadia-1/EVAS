@@ -1,0 +1,11 @@
+module event_local_contribution(clk, out);
+    input clk;
+    output out;
+    electrical clk, out;
+
+    analog begin
+        @(cross(V(clk) - 0.5, +1)) begin
+            V(out) <+ 1.0;
+        end
+    end
+endmodule

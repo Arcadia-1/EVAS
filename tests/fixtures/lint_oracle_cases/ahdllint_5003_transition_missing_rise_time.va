@@ -1,0 +1,10 @@
+module transition_missing_rise_time(out);
+    output out;
+    electrical out;
+    integer code;
+
+    analog begin
+        code = 1;
+        V(out) <+ transition(code, 0);
+    end
+endmodule
