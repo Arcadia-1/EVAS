@@ -312,6 +312,13 @@ class ModuleInstance:
     parameter_overrides: List[InstanceParameterOverride] = field(default_factory=list)
 
 @dataclass
+class SpecifyPathDelay:
+    """Simple specify path delay: (source => target) = delay."""
+    source: str
+    target: str
+    delay: float
+
+@dataclass
 class Module:
     name: str
     ports: List[str]
@@ -325,6 +332,7 @@ class Module:
     instances: List[ModuleInstance] = field(default_factory=list)
     continuous_assigns: List[Assignment] = field(default_factory=list)
     always_blocks: List[EventStatement] = field(default_factory=list)
+    specify_path_delays: List[SpecifyPathDelay] = field(default_factory=list)
     default_transition: Optional[float] = None
     defines: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)

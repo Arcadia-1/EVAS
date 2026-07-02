@@ -184,6 +184,8 @@ class CompiledModel:
         self._step_future_node_voltages: Dict[str, float] = {}
         self._step_prev_time: float = 0.0
         self._step_time: float = 0.0
+        self._specify_delay_histories: Dict[str, List[Tuple[float, float]]] = {}
+        self._specify_delay_pending_times: Dict[str, List[float]] = {}
         self._step_latest_cross_event_time: float = -math.inf
         self._step_event_fired: bool = False
         self._needs_future_node_voltages = bool(
@@ -2271,6 +2273,9 @@ class CompiledModel:
 
     def next_breakpoint(self, time: float) -> Optional[float]:
         best: Optional[float] = None
+        bp = self._next_specify_delay_breakpoint(time)
+        if bp is not None and (best is None or bp < best):
+            best = bp
         min_ramp = getattr(self, "_transition_breakpoint_min_ramp", 0.0)
         if self._transition_active_keys_known:
             transition_keys = tuple(self._active_transition_keys)
@@ -2365,6 +2370,48 @@ class CompiledModel:
             if bp is not None and (best is None or bp < best):
                 best = bp
         return best
+
+    def _next_specify_delay_breakpoint(self, time: float) -> Optional[float]:
+        best: Optional[float] = None
+        eps = 1e-18
+        for key, pending in list(self._specify_delay_pending_times.items()):
+            kept: List[float] = []
+            for candidate in pending:
+                if candidate > time + eps:
+                    kept.append(candidate)
+                    if best is None or candidate < best:
+                        best = candidate
+            self._specify_delay_pending_times[key] = kept
+        return best
+
+    def _specify_path_delay(self, key: str, value: Any, time: float, delay: float) -> float:
+        current = float(value)
+        t = float(time)
+        d = max(0.0, float(delay))
+        history = self._specify_delay_histories.setdefault(key, [])
+        eps = 1e-18
+        if not history:
+            history.append((t, current))
+        elif abs(history[-1][0] - t) <= eps:
+            if abs(history[-1][1] - current) > 1e-15:
+                history[-1] = (t, current)
+        elif abs(history[-1][1] - current) > 1e-15:
+            history.append((t, current))
+            if d > 0.0:
+                self._specify_delay_pending_times.setdefault(key, []).append(t + d)
+
+        target_t = t - d
+        delayed = history[0][1]
+        keep_from = 0
+        for idx, (sample_t, sample_v) in enumerate(history):
+            if sample_t <= target_t + eps:
+                delayed = sample_v
+                keep_from = max(0, idx - 1)
+            else:
+                break
+        if keep_from > 0:
+            del history[:keep_from]
+        return float(delayed)
 
     def _has_transition_target_probes_tree(self) -> bool:
         own = int(getattr(self.__class__, "_transition_target_probe_count", 0)) > 0
@@ -13510,6 +13557,13 @@ class _ModuleCompiler:
 
         if isinstance(stmt.target, Identifier):
             name = stmt.target.name
+            specify_path = self._specify_path_for_assignment(stmt)
+            if specify_path is not None:
+                key = f"{specify_path.source}->{specify_path.target}"
+                val = (
+                    f"self._specify_path_delay({key!r}, {val}, time, "
+                    f"{float(specify_path.delay)!r})"
+                )
             if name in self._local_name_by_var:
                 if self._is_integer_name(name):
                     val = f"self._to_integer({val})"
@@ -13563,6 +13617,18 @@ class _ModuleCompiler:
             f"Module {self.module.name} has invalid assignment target "
             f"{type(stmt.target).__name__}; Spectre requires a variable or array element"
         )
+
+    def _specify_path_for_assignment(self, stmt: Assignment) -> Optional[SpecifyPathDelay]:
+        if not isinstance(stmt.target, Identifier):
+            return None
+        if not isinstance(stmt.value, Identifier):
+            return None
+        target = stmt.target.name
+        source = stmt.value.name
+        for path in getattr(self.module, "specify_path_delays", []):
+            if path.source == source and path.target == target:
+                return path
+        return None
 
     def _transition_affine_expr(
         self,

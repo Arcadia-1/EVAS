@@ -9458,6 +9458,38 @@ endmodule
 
         assert model.output_nodes["y"] == pytest.approx(1.0)
 
+    def test_specify_specparam_path_delay_drives_logic_output_late(self):
+        src = """\
+module specify_delay(input a, output y);
+    logic a, y;
+    assign y = a;
+    specify
+        specparam tpd = 1n;
+        (a => y) = tpd;
+    endspecify
+endmodule
+"""
+        module = parse(src)
+        assert len(module.specify_path_delays) == 1
+        assert module.specify_path_delays[0].source == "a"
+        assert module.specify_path_delays[0].target == "y"
+        assert module.specify_path_delays[0].delay == pytest.approx(1e-9)
+
+        ModelCls = compile_module(module)
+        model = ModelCls()
+        nv = {"a": 0.0}
+
+        model.evaluate(nv, 0.0)
+        assert model.output_nodes["y"] == pytest.approx(0.0)
+
+        nv["a"] = 1.0
+        model.evaluate(nv, 1e-9)
+        assert model.output_nodes["y"] == pytest.approx(0.0)
+        assert model.next_breakpoint(1e-9) == pytest.approx(2e-9)
+
+        model.evaluate(nv, 2e-9)
+        assert model.output_nodes["y"] == pytest.approx(1.0)
+
     def test_named_branch_voltage_probe(self):
         src = """\
 `include "disciplines.vams"

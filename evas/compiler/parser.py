@@ -430,7 +430,7 @@ class Parser:
             return
 
         if tok.type == TokenType.IDENT and tok.value == "specify":
-            self._skip_specify_block()
+            module.specify_path_delays.extend(self._parse_specify_block())
             return
 
         if tok.type == TokenType.IDENT and tok.value == "branch":
@@ -635,21 +635,69 @@ class Parser:
             self.advance()
         return assignments
 
-    def _skip_specify_block(self) -> None:
-        """Skip specify/specparam timing metadata.
+    def _parse_specify_block(self) -> List[SpecifyPathDelay]:
+        """Parse the supported specify/specparam path-delay subset.
 
-        The current behavioral engine does not model digital path delays. It
-        can still compile modules whose executable behavior is carried by
-        regular assignments outside the specify block.
+        Supported form:
+            specify
+                specparam tpd = 1n;
+                (a => y) = tpd;
+            endspecify
+
+        Unknown timing checks/items are skipped so executable behavior outside
+        the timing block can still compile.
         """
+        paths: List[SpecifyPathDelay] = []
+        specparams: dict[str, float] = {}
         self.expect(TokenType.IDENT)  # specify
         while not self.at(TokenType.EOF):
             tok = self.peek()
             if tok.type == TokenType.IDENT and tok.value == "endspecify":
                 self.advance()
                 self.match(TokenType.SEMI)
-                return
+                return paths
+            if tok.type == TokenType.IDENT and tok.value == "specparam":
+                self.advance()
+                while not self.at(TokenType.EOF, TokenType.SEMI):
+                    if not self.at(TokenType.IDENT):
+                        self.advance()
+                        continue
+                    name = self._expect_identifier_name("specparam declaration")
+                    if self.match(TokenType.ASSIGN):
+                        specparams[name] = float(self._parse_const_expr())
+                    if not self.match(TokenType.COMMA):
+                        break
+                self.match(TokenType.SEMI)
+                continue
+            if tok.type == TokenType.LPAREN:
+                saved_pos = self.pos
+                parsed = self._try_parse_specify_path_delay(specparams)
+                if parsed is not None:
+                    paths.append(parsed)
+                    continue
+                self.pos = saved_pos
             self.advance()
+        return paths
+
+    def _try_parse_specify_path_delay(self, specparams: dict[str, float]) -> Optional[SpecifyPathDelay]:
+        self.expect(TokenType.LPAREN)
+        if not self.at(TokenType.IDENT):
+            return None
+        source = self._expect_identifier_name("specify path source")
+        if not (self.match(TokenType.ASSIGN) and self.match(TokenType.GT)):
+            return None
+        if not self.at(TokenType.IDENT):
+            return None
+        target = self._expect_identifier_name("specify path target")
+        self.expect(TokenType.RPAREN)
+        self.expect(TokenType.ASSIGN)
+        delay = 0.0
+        if self.at(TokenType.IDENT):
+            delay = float(specparams.get(self._expect_identifier_name("specify path delay"), 0.0))
+        else:
+            delay = float(self._parse_const_expr())
+        self.match(TokenType.SEMI)
+        return SpecifyPathDelay(source=source, target=target, delay=delay)
 
     def _parse_continuous_assign(self) -> Assignment:
         self.expect(TokenType.ASSIGN_KW)
