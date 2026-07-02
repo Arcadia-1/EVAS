@@ -75,6 +75,9 @@ transition timing, conditional potential contributions, case defaults, exact
 branch equality tests, floor/ceil contribution discontinuities, `gnd` node
 portability, discrete function arguments, implicit integer casts, and
 simulator-stop tasks inside loops.
+The implementation keeps diagnostic metadata in a rule registry, including the
+EVAS code, severity, rule name, lint phase, source category, and related
+Cadence/Spectre identifiers when known.
 
 Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
 front-end failures when possible. Current examples include conditionally

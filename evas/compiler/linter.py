@@ -22,6 +22,17 @@ STATIC_WARNING = "static-warning"
 DYNAMIC_WARNING = "dynamic-warning"
 
 
+@dataclass(frozen=True)
+class RuleSpec:
+    code: str
+    severity: str
+    rule: str
+    spectre_ids: tuple[str, ...] = ()
+    category: str = "cadence-ahdl"
+    phase: str = "static-ast"
+    oracle_status: str = "oracle-title-confirmed"
+
+
 @dataclass
 class Diagnostic:
     code: str
@@ -50,6 +61,111 @@ class Diagnostic:
         return f"{loc}: {self.severity} {self.code}{ids}{module}: {self.message}"
 
 
+def _rule(
+    code: str,
+    severity: str,
+    rule: str,
+    *,
+    spectre_ids: tuple[str, ...] = (),
+    category: str = "cadence-ahdl",
+    phase: str = "static-ast",
+    oracle_status: str = "oracle-title-confirmed",
+) -> RuleSpec:
+    return RuleSpec(
+        code=code,
+        severity=severity,
+        rule=rule,
+        spectre_ids=spectre_ids,
+        category=category,
+        phase=phase,
+        oracle_status=oracle_status,
+    )
+
+
+LINT_RULE_SPECS: Dict[str, RuleSpec] = {
+    spec.code: spec for spec in (
+        _rule("EVAS-COMP-ENETLIST", COMPAT_ERROR, "netlist-parse", category="evas-compat", phase="netlist", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-EINCLUDE", COMPAT_ERROR, "ahdl-include", category="evas-compat", phase="netlist", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-EFILE", COMPAT_ERROR, "file-read", category="evas-compat", phase="file", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-EPREPROC", COMPAT_ERROR, "preprocess", category="evas-compat", phase="preprocess", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-E2174", COMPAT_ERROR, "reserved-identifier", spectre_ids=("VACOMP-2174",), category="spectre-compat", phase="parse"),
+        _rule("EVAS-COMP-EPARSE", COMPAT_ERROR, "parse", category="evas-compat", phase="parse", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-WPARSE", STATIC_WARNING, "spectre-parse-compat", category="spectre-compat", phase="parse"),
+        _rule("EVAS-COMP-E1519", COMPAT_ERROR, "nested-ddt", spectre_ids=("VACOMP-1519",), category="spectre-compat"),
+        _rule("EVAS-COMP-E2143", COMPAT_ERROR, "conditional-analog-operator", spectre_ids=("VACOMP-2143",), category="spectre-compat"),
+        _rule("EVAS-COMP-E2151", COMPAT_ERROR, "conditional-analog-operator", spectre_ids=("VACOMP-2151",), category="spectre-compat"),
+        _rule("EVAS-COMP-E2154", COMPAT_ERROR, "conditional-analog-operator", spectre_ids=("VACOMP-2154",), category="spectre-compat"),
+        _rule("EVAS-COMP-E2157", COMPAT_ERROR, "event-body-contribution", spectre_ids=("VACOMP-2157",), category="spectre-compat"),
+        _rule("EVAS-COMP-E2446", COMPAT_ERROR, "nonconstant-discipline-range", spectre_ids=("VACOMP-2446",), category="spectre-compat", phase="static-token"),
+        _rule("EVAS-COMP-EUNSUPPORTED", COMPAT_ERROR, "unsupported-function", category="evas-compat", oracle_status="evas-specific"),
+        _rule("EVAS-AHDL-W5003", STATIC_WARNING, "transition-missing-rise-time", spectre_ids=("AHDLLINT-5003",)),
+        _rule(
+            "EVAS-AHDL-W5004",
+            DYNAMIC_WARNING,
+            "tiny-transition-time",
+            spectre_ids=(
+                "AHDLLINT-5004",
+                "AHDLLINT-5005",
+                "AHDLLINT-8001",
+                "AHDLLINT-8002",
+                "AHDLLINT-8007",
+            ),
+            phase="static-numeric",
+        ),
+        _rule(
+            "EVAS-AHDL-W5005",
+            DYNAMIC_WARNING,
+            "tiny-transition-time",
+            spectre_ids=(
+                "AHDLLINT-5004",
+                "AHDLLINT-5005",
+                "AHDLLINT-8001",
+                "AHDLLINT-8002",
+                "AHDLLINT-8007",
+            ),
+            phase="static-numeric",
+        ),
+        _rule("EVAS-AHDL-W5006", STATIC_WARNING, "tiny-transition-delay", spectre_ids=("AHDLLINT-5006",), phase="static-numeric"),
+        _rule("EVAS-AHDL-W5007", STATIC_WARNING, "transition-continuous-input", spectre_ids=("AHDLLINT-5007", "AHDLLINT-8004")),
+        _rule("EVAS-AHDL-W5008", STATIC_WARNING, "discrete-contribution-transition", spectre_ids=("AHDLLINT-5008",)),
+        _rule("EVAS-AHDL-W5010", STATIC_WARNING, "conditional-potential-contribution", spectre_ids=("AHDLLINT-5010",)),
+        _rule("EVAS-AHDL-W5011", STATIC_WARNING, "case-without-default", spectre_ids=("AHDLLINT-5011",)),
+        _rule("EVAS-AHDL-W5012", STATIC_WARNING, "abstime-exact-equality", spectre_ids=("AHDLLINT-5012",)),
+        _rule("EVAS-AHDL-W5013", STATIC_WARNING, "access-function-exact-equality", spectre_ids=("AHDLLINT-5013",)),
+        _rule("EVAS-AHDL-W5014", STATIC_WARNING, "floor-ceil-contribution", spectre_ids=("AHDLLINT-5014",)),
+        _rule("EVAS-AHDL-W5017", STATIC_WARNING, "electrical-gnd-name", spectre_ids=("AHDLLINT-5017",)),
+        _rule("EVAS-AHDL-W5018", STATIC_WARNING, "discrete-function-argument", spectre_ids=("AHDLLINT-5018",)),
+        _rule("EVAS-AHDL-W5023", STATIC_WARNING, "implicit-real-to-integer-conversion", spectre_ids=("AHDLLINT-5023",)),
+        _rule("EVAS-AHDL-W5024", STATIC_WARNING, "stop-finish-in-loop", spectre_ids=("AHDLLINT-5024",)),
+        _rule("EVAS-AHDL-W8007", DYNAMIC_WARNING, "conditional-timer", spectre_ids=("AHDLLINT-8007",), phase="static-scheduling"),
+    )
+}
+
+
+def _diag(
+    code: str,
+    message: str,
+    file: str,
+    *,
+    line: Optional[int] = None,
+    column: Optional[int] = None,
+    module: Optional[str] = None,
+    spectre_ids: Optional[Sequence[str]] = None,
+) -> Diagnostic:
+    spec = LINT_RULE_SPECS[code]
+    return Diagnostic(
+        code=spec.code,
+        severity=spec.severity,
+        message=message,
+        file=file,
+        line=line,
+        column=column,
+        module=module,
+        rule=spec.rule,
+        spectre_ids=list(spec.spectre_ids if spectre_ids is None else spectre_ids),
+    )
+
+
 def lint_file(path: str | Path, *, min_transition: float = 1e-12) -> List[Diagnostic]:
     """Lint a Verilog-A file or a Spectre netlist with ahdl_include entries."""
     src_path = Path(path).resolve()
@@ -68,12 +184,10 @@ def lint_spectre_netlist(
         netlist = parse_spectre(str(scs_path))
     except Exception as exc:
         return [
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-ENETLIST",
-                severity=COMPAT_ERROR,
                 message=f"failed to parse Spectre netlist: {exc}",
                 file=str(scs_path),
-                rule="netlist-parse",
             )
         ]
 
@@ -83,12 +197,10 @@ def lint_spectre_netlist(
         va_path = _resolve_ahdl_include(inc.path, scs_dir)
         if va_path is None:
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-COMP-EINCLUDE",
-                    severity=COMPAT_ERROR,
                     message=f"cannot resolve ahdl_include {inc.path!r}",
                     file=str(scs_path),
-                    rule="ahdl-include",
                 )
             )
             continue
@@ -108,12 +220,10 @@ def lint_veriloga_file(
         source = va_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return [
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-EFILE",
-                severity=COMPAT_ERROR,
                 message=f"cannot read Verilog-A file: {exc}",
                 file=str(va_path),
-                rule="file-read",
             )
         ]
     return lint_source(
@@ -138,25 +248,21 @@ def lint_source(
         modules = parse_all(pp_src)
     except PreprocessorError as exc:
         return [
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-EPREPROC",
-                severity=COMPAT_ERROR,
                 message=str(exc),
                 file=filename,
-                rule="preprocess",
             )
         ]
     except SpectreReservedIdentifierError as exc:
         token = getattr(exc, "token", None)
         return [
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-E2174",
-                severity=COMPAT_ERROR,
                 message=str(exc),
                 file=filename,
                 line=getattr(token, "line", None),
                 column=getattr(token, "col", None),
-                rule="reserved-identifier",
                 spectre_ids=[getattr(exc, "spectre_code", "VACOMP-2174")],
             )
         ]
@@ -170,14 +276,12 @@ def lint_source(
         if any(d.code == "EVAS-COMP-E2446" for d in range_diagnostics):
             return range_diagnostics
         return [
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-EPARSE",
-                severity=COMPAT_ERROR,
                 message=str(exc),
                 file=filename,
                 line=getattr(token, "line", None),
                 column=getattr(token, "col", None),
-                rule="parse",
             )
         ]
 
@@ -213,13 +317,11 @@ def _lint_module(
     diagnostics: List[Diagnostic] = []
     for warning in module.warnings:
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code="EVAS-COMP-WPARSE",
-                severity=STATIC_WARNING,
                 message=warning,
                 file=filename,
                 module=module.name,
-                rule="spectre-parse-compat",
             )
         )
 
@@ -319,9 +421,8 @@ def _lint_module_declarations(
             and port.discipline.lower() in {"electrical", "voltage", "current"}
         ):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5017",
-                    severity=STATIC_WARNING,
                     message=(
                         '"gnd" is declared as an electrical node rather than a '
                         "ground reference; Cadence AHDL lint treats this as a "
@@ -329,8 +430,6 @@ def _lint_module_declarations(
                     ),
                     file=filename,
                     module=module.name,
-                    rule="electrical-gnd-name",
-                    spectre_ids=["AHDLLINT-5017"],
                 )
             )
     return diagnostics
@@ -367,25 +466,21 @@ def _lint_statement(
     if isinstance(stmt, va_ast.Contribution):
         if in_event:
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-COMP-E2157",
-                    severity=COMPAT_ERROR,
                     message=(
                         "contribution statement is embedded in an analog event "
                         "body; Spectre VACOMP rejects event-local contributions"
                     ),
                     file=filename,
                     module=module,
-                    rule="event-body-contribution",
-                    spectre_ids=["VACOMP-2157"],
                 )
             )
         if conditional_depth > 0:
             if stmt.branch.access_type.upper() == "V":
                 diagnostics.append(
-                    Diagnostic(
+                    _diag(
                         code="EVAS-AHDL-W5010",
-                        severity=STATIC_WARNING,
                         message=(
                             "potential contribution is switched by runtime "
                             "control flow; prefer a continuous contribution "
@@ -393,8 +488,6 @@ def _lint_statement(
                         ),
                         file=filename,
                         module=module,
-                        rule="conditional-potential-contribution",
-                        spectre_ids=["AHDLLINT-5010"],
                     )
                 )
             diagnostics.extend(
@@ -409,9 +502,8 @@ def _lint_statement(
             and _expr_has_discrete_behavior(stmt.expr, discrete_vars)
         ):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5008",
-                    severity=STATIC_WARNING,
                     message=(
                         "discrete-valued expression directly drives an analog "
                         "contribution; use transition() on the discrete target "
@@ -419,15 +511,12 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
-                    rule="discrete-contribution-transition",
-                    spectre_ids=["AHDLLINT-5008"],
                 )
             )
         if _expr_has_any_call(stmt.expr, {"floor", "$floor", "ceil", "$ceil"}):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5014",
-                    severity=STATIC_WARNING,
                     message=(
                         "floor()/ceil() appears on the right-hand side of an "
                         "analog contribution; this can introduce discontinuous "
@@ -435,8 +524,6 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
-                    rule="floor-ceil-contribution",
-                    spectre_ids=["AHDLLINT-5014"],
                 )
             )
         _lint_expr(
@@ -468,17 +555,14 @@ def _lint_statement(
     if isinstance(stmt, va_ast.EventStatement):
         if _event_has_timer(stmt.event) and conditional_depth > 0:
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W8007",
-                    severity=DYNAMIC_WARNING,
                     message=(
                         "timer() event is inside runtime-controlled statement "
                         "flow; Cadence AHDL lint reports this as a scheduling risk"
                     ),
                     file=filename,
                     module=module,
-                    rule="conditional-timer",
-                    spectre_ids=["AHDLLINT-8007"],
                 )
             )
         _lint_event_expr(
@@ -573,17 +657,14 @@ def _lint_statement(
     if isinstance(stmt, va_ast.CaseStatement):
         if not any(len(item.values) == 0 for item in stmt.items):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5011",
-                    severity=STATIC_WARNING,
                     message=(
                         "case statement has no default branch; Cadence AHDL "
                         "lint recommends a default to keep behavior defined"
                     ),
                     file=filename,
                     module=module,
-                    rule="case-without-default",
-                    spectre_ids=["AHDLLINT-5011"],
                 )
             )
         _lint_expr(
@@ -607,17 +688,14 @@ def _lint_statement(
     if isinstance(stmt, va_ast.SystemTask):
         if loop_depth > 0 and stmt.name.lower() in {"$stop", "$finish"}:
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5024",
-                    severity=STATIC_WARNING,
                     message=(
                         f"{stmt.name} appears inside a loop; Cadence AHDL lint "
                         "flags simulator-stop tasks in looping statements"
                     ),
                     file=filename,
                     module=module,
-                    rule="stop-finish-in-loop",
-                    spectre_ids=["AHDLLINT-5024"],
                 )
             )
         for arg in stmt.args:
@@ -685,17 +763,14 @@ def _lint_expr(
             _is_abstime_expr(expr.left) or _is_abstime_expr(expr.right)
         ):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5012",
-                    severity=STATIC_WARNING,
                     message=(
                         "$abstime is compared for exact equality; use an event, "
                         "timer(), or a tolerance/windowed comparison instead"
                     ),
                     file=filename,
                     module=module,
-                    rule="abstime-exact-equality",
-                    spectre_ids=["AHDLLINT-5012"],
                 )
             )
         _lint_expr(
@@ -807,23 +882,19 @@ def _lint_expr(
             )
         elif name == "ddt" and any(_expr_has_call(arg, "ddt") for arg in expr.args):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-COMP-E1519",
-                    severity=COMPAT_ERROR,
                     message="nested ddt(ddt(...)) is not a Spectre-compatible analog operator form",
                     file=filename,
                     module=module,
-                    rule="nested-ddt",
-                    spectre_ids=["VACOMP-1519"],
                 )
             )
         if name in _DISCRETE_ARGUMENT_FUNCTIONS and any(
             _expr_has_discrete_behavior(arg, discrete_vars) for arg in expr.args
         ):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5018",
-                    severity=STATIC_WARNING,
                     message=(
                         f"{expr.name}() receives a discrete-valued argument; "
                         "Cadence AHDL lint flags discrete values inside "
@@ -831,19 +902,15 @@ def _lint_expr(
                     ),
                     file=filename,
                     module=module,
-                    rule="discrete-function-argument",
-                    spectre_ids=["AHDLLINT-5018"],
                 )
             )
         if not _is_supported_function(expr.name, user_function_names):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-COMP-EUNSUPPORTED",
-                    severity=COMPAT_ERROR,
                     message=f"unsupported Verilog-A function/operator call: {expr.name}()",
                     file=filename,
                     module=module,
-                    rule="unsupported-function",
                 )
             )
         for arg in expr.args:
@@ -862,9 +929,8 @@ def _lint_transition_call(
 ) -> None:
     if expr.args and _expr_contains_branch_access(expr.args[0]):
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code="EVAS-AHDL-W5007",
-                severity=STATIC_WARNING,
                 message=(
                     "transition() input depends on a continuous branch value; "
                     "Cadence AHDL lint recommends feeding transition() with a "
@@ -872,24 +938,19 @@ def _lint_transition_call(
                 ),
                 file=filename,
                 module=module,
-                rule="transition-continuous-input",
-                spectre_ids=["AHDLLINT-5007", "AHDLLINT-8004"],
             )
         )
 
     if len(expr.args) < 3:
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code="EVAS-AHDL-W5003",
-                severity=STATIC_WARNING,
                 message=(
                     "transition() has no explicit rise time; provide an "
                     "implementation rise time rather than relying on defaults"
                 ),
                 file=filename,
                 module=module,
-                rule="transition-missing-rise-time",
-                spectre_ids=["AHDLLINT-5003"],
             )
         )
 
@@ -899,17 +960,14 @@ def _lint_transition_call(
             delay_value < 0.0 or 0.0 < delay_value < min_transition
         ):
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code="EVAS-AHDL-W5006",
-                    severity=STATIC_WARNING,
                     message=(
                         "transition() delay is negative or smaller than "
                         f"the lint minimum {min_transition:g}s"
                     ),
                     file=filename,
                     module=module,
-                    rule="tiny-transition-delay",
-                    spectre_ids=["AHDLLINT-5006"],
                 )
             )
 
@@ -921,23 +979,14 @@ def _lint_transition_call(
             continue
         if value <= 0.0 or value < min_transition:
             diagnostics.append(
-                Diagnostic(
+                _diag(
                     code=code,
-                    severity=DYNAMIC_WARNING,
                     message=(
                         "transition() rise/fall time is zero or smaller than "
                         f"the lint minimum {min_transition:g}s"
                     ),
                     file=filename,
                     module=module,
-                    rule="tiny-transition-time",
-                    spectre_ids=[
-                        "AHDLLINT-5004",
-                        "AHDLLINT-5005",
-                        "AHDLLINT-8001",
-                        "AHDLLINT-8002",
-                        "AHDLLINT-8007",
-                    ],
                 )
             )
 
@@ -950,9 +999,8 @@ def _lint_condition_expr(
 ) -> None:
     if _expr_has_branch_access_equality(expr):
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code="EVAS-AHDL-W5013",
-                severity=STATIC_WARNING,
                 message=(
                     "branch access value is compared for exact equality inside "
                     "a conditional expression; use a tolerance or event-driven "
@@ -960,8 +1008,6 @@ def _lint_condition_expr(
                 ),
                 file=filename,
                 module=module,
-                rule="access-function-exact-equality",
-                spectre_ids=["AHDLLINT-5013"],
             )
         )
 
@@ -979,9 +1025,8 @@ def _lint_assignment_type_conversion(
     compatibility = _expr_integer_compatibility(stmt.value, symbol_types)
     if compatibility is False:
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code="EVAS-AHDL-W5023",
-                severity=STATIC_WARNING,
                 message=(
                     "real-valued expression is assigned to an integer target; "
                     "use an explicit conversion such as $rtoi() when precision "
@@ -989,8 +1034,6 @@ def _lint_assignment_type_conversion(
                 ),
                 file=filename,
                 module=module,
-                rule="implicit-real-to-integer-conversion",
-                spectre_ids=["AHDLLINT-5023"],
             )
         )
 
@@ -1092,16 +1135,14 @@ def _conditional_analog_operator_diagnostics(
             continue
         code, spectre_id = spec
         diagnostics.append(
-            Diagnostic(
+            _diag(
                 code=code,
-                severity=COMPAT_ERROR,
                 message=(
                     f"{call.name}() analog operator is inside a runtime "
                     "conditional/event/loop/case statement"
                 ),
                 file=filename,
                 module=module,
-                rule="conditional-analog-operator",
                 spectre_ids=[spectre_id],
             )
         )
@@ -1303,9 +1344,8 @@ def _lint_nonconstant_discipline_ranges(
                 if _range_uses_nonconstant_identifier(range_tokens, parameter_names):
                     emitted.add(key)
                     diagnostics.append(
-                        Diagnostic(
+                        _diag(
                             code="EVAS-COMP-E2446",
-                            severity=COMPAT_ERROR,
                             message=(
                                 "discipline vector range uses a non-constant "
                                 "identifier; Spectre requires numeric or "
@@ -1314,8 +1354,6 @@ def _lint_nonconstant_discipline_ranges(
                             file=filename,
                             line=lbracket.line,
                             column=lbracket.col,
-                            rule="nonconstant-discipline-range",
-                            spectre_ids=["VACOMP-2446"],
                         )
                     )
     return diagnostics

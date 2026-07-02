@@ -77,6 +77,9 @@ transition timing, conditional potential contributions, case defaults, exact
 branch equality tests, floor/ceil contribution discontinuities, `gnd` node
 portability, discrete function arguments, implicit integer casts, and
 simulator-stop tasks inside loops.
+Each lint diagnostic is backed by a small rule registry that records its code,
+severity, canonical rule name, phase, source category, and related
+Cadence/Spectre identifiers when known.
 Compatibility diagnostics include Cadence/Spectre-aligned cases such as
 conditionally executed analog operators (`transition`, `slew`, `idt`) and
 discipline vector ranges that depend on runtime variables instead of numeric or

@@ -7,11 +7,82 @@ import textwrap
 
 import pytest
 
-from evas.compiler.linter import has_compat_errors, lint_file, lint_source
+from evas.compiler.linter import (
+    LINT_RULE_SPECS,
+    has_compat_errors,
+    lint_file,
+    lint_source,
+)
 
 
 def _codes(diags):
     return {diag.code for diag in diags}
+
+
+def test_lint_rule_registry_covers_current_diagnostics():
+    expected_codes = {
+        "EVAS-COMP-ENETLIST",
+        "EVAS-COMP-EINCLUDE",
+        "EVAS-COMP-EFILE",
+        "EVAS-COMP-EPREPROC",
+        "EVAS-COMP-E2174",
+        "EVAS-COMP-EPARSE",
+        "EVAS-COMP-WPARSE",
+        "EVAS-COMP-E1519",
+        "EVAS-COMP-E2143",
+        "EVAS-COMP-E2151",
+        "EVAS-COMP-E2154",
+        "EVAS-COMP-E2157",
+        "EVAS-COMP-E2446",
+        "EVAS-COMP-EUNSUPPORTED",
+        "EVAS-AHDL-W5003",
+        "EVAS-AHDL-W5004",
+        "EVAS-AHDL-W5005",
+        "EVAS-AHDL-W5006",
+        "EVAS-AHDL-W5007",
+        "EVAS-AHDL-W5008",
+        "EVAS-AHDL-W5010",
+        "EVAS-AHDL-W5011",
+        "EVAS-AHDL-W5012",
+        "EVAS-AHDL-W5013",
+        "EVAS-AHDL-W5014",
+        "EVAS-AHDL-W5017",
+        "EVAS-AHDL-W5018",
+        "EVAS-AHDL-W5023",
+        "EVAS-AHDL-W5024",
+        "EVAS-AHDL-W8007",
+    }
+
+    assert expected_codes == set(LINT_RULE_SPECS)
+    assert LINT_RULE_SPECS["EVAS-COMP-E2143"].severity == "compat-error"
+    assert LINT_RULE_SPECS["EVAS-AHDL-W5011"].category == "cadence-ahdl"
+    assert LINT_RULE_SPECS["EVAS-COMP-EUNSUPPORTED"].oracle_status == "evas-specific"
+
+
+def test_diagnostics_use_registered_rule_metadata():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module registry_metadata(out);
+            output out;
+            electrical out;
+            integer mode;
+            analog begin
+                mode = 1;
+                case (mode)
+                    1: V(out) <+ transition(exp(mode), 100f);
+                endcase
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert {"EVAS-AHDL-W5003", "EVAS-AHDL-W5006", "EVAS-AHDL-W5011", "EVAS-AHDL-W5018"} <= _codes(diags)
+    for diag in diags:
+        spec = LINT_RULE_SPECS[diag.code]
+        assert diag.severity == spec.severity
+        assert diag.rule == spec.rule
+        assert diag.spectre_ids == list(spec.spectre_ids)
 
 
 def test_discrete_contribution_warns_like_ahdllint_5008():
