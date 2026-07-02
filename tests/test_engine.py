@@ -8453,6 +8453,31 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([5.0, 5.0])
 
+    def test_table_model_1d_accepts_control_string_after_filename(self, tmp_path):
+        table = tmp_path / "gain_table.txt"
+        table.write_text("0, 0.1\n0.5, 0.6\n1.0, 1.1\n", encoding="utf-8")
+        table_s = str(table).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module table_model_control_probe(out);
+    output voltage out;
+    parameter string table_file = "{table_s}";
+    analog begin
+        V(out) <+ $table_model(0.5, table_file, "1L");
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([0.6, 0.6])
+
     def test_cadence_environment_gap_fill_helpers_compile_and_run(self):
         src = """\
 `include "disciplines.vams"

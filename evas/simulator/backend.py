@@ -558,11 +558,13 @@ class CompiledModel:
         return 0.0
 
     def _table_model(self, *args: Any) -> float:
-        if len(args) >= 2 and isinstance(args[-1], str):
-            try:
-                return self._table_model_1d(args[0], args[-1])
-            except OSError:
-                return 0.0
+        if len(args) >= 2:
+            filename = args[1] if isinstance(args[1], str) else args[-1]
+            if isinstance(filename, str):
+                try:
+                    return self._table_model_1d(args[0], filename)
+                except OSError:
+                    return 0.0
         return 0.0
 
     def _ac_stim(self, *args: Any) -> Any:
