@@ -5348,6 +5348,12 @@ class CompiledModel:
             return int(bin(int(bits)).count("1") & 1)
         return 0
 
+    @staticmethod
+    def _bit_not(value: Any, width: int) -> int:
+        width_i = max(1, int(width))
+        mask = (1 << width_i) - 1
+        return (~CompiledModel._to_integer(value)) & mask
+
 
 def compile_module(
     module: Module,
@@ -14652,7 +14658,8 @@ class _ModuleCompiler:
             if expr.op == '!':
                 return f"(not ({operand}))"
             if expr.op == '~':
-                return f"(~int({operand}))"
+                width = self._expr_bit_width(expr.operand)
+                return f"self._bit_not({operand}, {width})"
             return f"({expr.op}{operand})"
 
         if isinstance(expr, TernaryExpr):

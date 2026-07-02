@@ -9334,6 +9334,29 @@ endmodule
         assert model.state["q"] == 0
         assert model.output_nodes["q"] == pytest.approx(0.0)
 
+    def test_bitwise_not_masks_logic_width(self):
+        src = """\
+module logic_not_width(input logic clk, output logic q, output logic [1:0] bus);
+    always @(posedge clk) begin
+        q = ~q;
+        bus = ~bus;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"clk": 0.0}
+
+        model.evaluate(nv, 0.0)
+        nv["clk"] = 1.0
+        model.evaluate(nv, 1e-9)
+
+        assert model.state["q"] == 1
+        assert model.output_nodes["q"] == pytest.approx(1.0)
+        assert model.state["bus"] == 3
+        assert model.output_nodes["bus[0]"] == pytest.approx(1.0)
+        assert model.output_nodes["bus[1]"] == pytest.approx(1.0)
+
     def test_logic_vector_input_bit_select_and_output_drive(self):
         src = """\
 module vector_mux(input logic [3:0] code, input logic sel, output logic y, output logic [1:0] q);
