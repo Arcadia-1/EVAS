@@ -584,6 +584,27 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
     stype = src.source_type
     warn: List[str] = []
 
+    if getattr(src, "kind", "voltage") == "current":
+        if stype in ('dc', ''):
+            sim.add_current_source(src.node_pos, src.node_neg, dc(float(params.get('dc', 0.0))))
+            return warn
+        if stype == 'pwl':
+            wave = params.get('wave', '')
+            if isinstance(wave, list):
+                vals = wave
+            elif isinstance(wave, str) and wave:
+                vals = [_parse_suffix_number(t) for t in wave.split()]
+                vals = [v for v in vals if v is not None]
+            else:
+                vals = []
+            if not vals:
+                raise ValueError(f"{src.name}: PWL wave must contain at least one time/value pair")
+            if len(vals) % 2 != 0:
+                raise ValueError(f"{src.name}: PWL wave must contain an even number of values")
+            sim.add_current_source(src.node_pos, src.node_neg, pwl(vals[0::2], vals[1::2]))
+            return warn
+        raise ValueError(f"{src.name}: unsupported isource type={stype!r}")
+
     if stype in ('dc', ''):
         sim.add_source(node, dc(float(params.get('dc', 0.0))))
 

@@ -968,6 +968,23 @@ class TestPwlParserRegressions:
         assert source.source_type == "pwl"
         assert source.params["wave"] == pytest.approx([0.0, 0.0, 10e-9, 1.0, 20e-9, 0.0])
 
+    def test_instance_style_isource_pwl_wave_is_parsed(self, tmp_path):
+        scs = tmp_path / "tb_current_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            Istep (p 0) isource type=pwl wave=[0 0.0 20n 0.0 21n 1u 80n 1u]
+            tran tran stop=80n
+            save p
+        """))
+
+        netlist = parse_spectre(str(scs))
+        source = netlist.sources[0]
+
+        assert source.kind == "current"
+        assert source.source_type == "pwl"
+        assert source.params["wave"] == pytest.approx(
+            [0.0, 0.0, 20e-9, 0.0, 21e-9, 1e-6, 80e-9, 1e-6]
+        )
+
     def test_inline_arithmetic_in_pwl_wave_is_rejected_like_spectre(self, tmp_path):
         scs = tmp_path / "tb_expr_pwl.scs"
         scs.write_text(textwrap.dedent("""\
@@ -2350,3 +2367,35 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         """))
 
         assert evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+
+    def test_isource_branch_current_probe_feeds_idt_voltage_contribution(self, tmp_path):
+        va_file = tmp_path / "branch_current_integrator.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module branch_current_integrator(p, n);
+                inout p, n;
+                electrical p, n;
+                parameter real l = 1.0;
+                analog begin
+                    V(p, n) <+ l * idt(I(p, n), 0.0);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_current_integrator.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "branch_current_integrator.va"
+            Istep (p 0) isource type=pwl wave=[0 0 1n 1u 10n 1u]
+            XDUT (p 0) branch_current_integrator l=1
+            tran tran stop=10n
+            save p
+        """))
+
+        out_dir = tmp_path / "out_current_integrator"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+        final_p = float(rows[-1]["p"])
+
+        assert final_p == pytest.approx(9.5e-15, rel=0.02)

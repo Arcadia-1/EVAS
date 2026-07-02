@@ -32,12 +32,13 @@ class AhdlInclude:
 
 @dataclass
 class SpectreSource:
-    """A voltage source parsed from Spectre syntax."""
+    """A voltage/current source parsed from Spectre syntax."""
     name: str
     node_pos: str
     node_neg: str
     source_type: str  # 'dc', 'pulse', 'pwl', 'sin'
     params: Dict[str, Any] = field(default_factory=dict)
+    kind: str = "voltage"
 
 
 @dataclass
@@ -465,14 +466,20 @@ def _is_inline_wave_arithmetic(tok: str) -> bool:
     return False
 
 
-def _build_source(name: str, node_pos: str, node_neg: str,
-                  params: Dict[str, Any]) -> SpectreSource:
+def _build_source(
+    name: str,
+    node_pos: str,
+    node_neg: str,
+    params: Dict[str, Any],
+    *,
+    kind: str = "voltage",
+) -> SpectreSource:
     """Build a SpectreSource from parsed named parameters."""
     stype = str(params.get('type', 'dc')).lower()
 
     src = SpectreSource(
         name=name, node_pos=node_pos, node_neg=node_neg,
-        source_type=stype, params=params,
+        source_type=stype, params=params, kind=kind,
     )
     return src
 
@@ -802,8 +809,36 @@ def _parse_instance(line: str, netlist: SpectreNetlist,
     if model_name is None:
         return
 
-    # If model_name is "vsource", this is a voltage source, not an instance
+    # If model_name is a primitive source, this is a source, not an instance.
     if model_name.lower() == 'vsource':
+        _parse_vsource(line, netlist, variables)
+        return
+    if model_name.lower() == 'isource':
+        param_str = ' '.join(param_tokens)
+        wave_data = None
+        wave_match = re.search(r'wave\s*=\s*\[([^\]]*)\]', param_str)
+        if wave_match:
+            wave_data = wave_match.group(1)
+            param_str = param_str[:wave_match.start()] + param_str[wave_match.end():]
+        params = _parse_named_params(param_str.split(), 0, variables)
+        if wave_data is not None:
+            wave_vals = []
+            for tok in wave_data.replace(',', ' ').split():
+                tok = tok.strip()
+                if not tok:
+                    continue
+                val = _parse_suffix_number(tok)
+                if val is None:
+                    try:
+                        val = evaluate_expr(tok, variables)
+                    except (ValueError, ZeroDivisionError):
+                        raise ValueError(f"Invalid PWL wave token {tok!r} in source {name}")
+                wave_vals.append(val)
+            params['wave'] = wave_vals
+        if len(nodes) >= 2:
+            netlist.sources.append(
+                _build_source(name, nodes[0], nodes[1], params, kind="current")
+            )
         return
 
     params = _parse_named_params(param_tokens, 0, variables)

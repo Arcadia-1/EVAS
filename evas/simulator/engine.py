@@ -406,6 +406,7 @@ class Simulator:
 
     def __init__(self):
         self.sources: List[Source] = []
+        self.current_sources: List[Tuple[str, str, Source]] = []
         self.node_voltages: Dict[str, float] = {}
         self.models: List = []  # compiled model instances
         self.recorded_signals: Dict[str, List[float]] = {}
@@ -415,6 +416,10 @@ class Simulator:
     def add_source(self, node: str, waveform: Callable[[float], float]):
         """Add a voltage source to the simulation."""
         self.sources.append(Source(node=node, waveform=waveform))
+
+    def add_current_source(self, node_pos: str, node_neg: str, waveform: Callable[[float], float]):
+        """Add an independent current source for branch-current probes."""
+        self.current_sources.append((node_pos, node_neg, Source(node=node_pos, waveform=waveform)))
 
     def add_model(self, model):
         """Add a compiled Verilog-A model instance."""
@@ -5002,6 +5007,9 @@ class Simulator:
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
         source_breakpoint_sources = [src for src in self.sources if src.breakpoint_fn is not None]
+        source_breakpoint_sources.extend(
+            src for _pos, _neg, src in self.current_sources if src.breakpoint_fn is not None
+        )
         self._generic_executor_enabled = bool(generic_executor)
         if rust_full_model_fastpath:
             sim_program_result = self._try_rust_sim_program_fastpath(
@@ -5128,9 +5136,16 @@ class Simulator:
             if hasattr(model, "_set_initial_condition_mode"):
                 model._set_initial_condition_mode(enabled)
 
+        def _set_current_source_values(nv: Dict[str, float], t: float) -> None:
+            for pos, neg, src in self.current_sources:
+                value = src.waveform(t)
+                nv[f"@I:{pos}:{neg}"] = value
+                nv[f"@I:{neg}:{pos}"] = -value
+
         # Initialize node voltages
         for src in self.sources:
             self.node_voltages[src.node] = src.waveform(0.0)
+        _set_current_source_values(self.node_voltages, 0.0)
         for model in self.models:
             model._prepare_step(self.node_voltages, self.node_voltages, 0.0, 0.0)
 
@@ -6677,6 +6692,7 @@ class Simulator:
                     indexed_array.set(src.node, value)
                     _mark_indexed_dirty_node(src.node)
                     self._perf_stats["indexed_array_source_updates"] += 1
+            _set_current_source_values(self.node_voltages, time)
             if indexed_array is not None:
                 _refresh_indexed_array_stats()
             if profile_clock is not None:

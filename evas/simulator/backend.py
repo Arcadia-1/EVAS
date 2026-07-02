@@ -3954,6 +3954,12 @@ class CompiledModel:
             self._indexed_voltage_probe(node, ext, 0.0, False)
         return 0.0
 
+    def _get_branch_current(self, node1: str, node2: str, node_voltages: Dict[str, float]) -> float:
+        """Read an independent current-source branch value when available."""
+        ext1 = self._resolve_external_node(node1)
+        ext2 = self._resolve_external_node(node2)
+        return float(node_voltages.get(f"@I:{ext1}:{ext2}", 0.0))
+
     def _get_static_branch_voltage_by_slot(self, slot: int, node_voltages: Dict[str, float]) -> float:
         """Read a static branch node by run-installed node id when available."""
         try:
@@ -14769,7 +14775,14 @@ class _ModuleCompiler:
                 n2 = self._compile_node_voltage(expr.node2, expr.node2_index, expr.node2_index2)
                 if expr.access_type == 'V':
                     return f"({n1} - {n2})"
-                return "0.0"  # I() not fully supported yet
+                if (
+                    expr.node1_index is None
+                    and expr.node1_index2 is None
+                    and expr.node2_index is None
+                    and expr.node2_index2 is None
+                ):
+                    return f"self._get_branch_current({expr.node1!r}, {expr.node2!r}, nv)"
+                return "0.0"  # Dynamic-index I() is not supported yet.
             branch = self._branch_decl_by_name.get(node)
             if branch is not None and expr.access_type == 'V':
                 n1 = self._compile_node_voltage(branch.node1)
