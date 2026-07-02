@@ -151,8 +151,14 @@ def _diag(
     column: Optional[int] = None,
     module: Optional[str] = None,
     spectre_ids: Optional[Sequence[str]] = None,
+    node: object = None,
 ) -> Diagnostic:
     spec = LINT_RULE_SPECS[code]
+    if node is not None:
+        if line is None:
+            line = getattr(node, "line", None)
+        if column is None:
+            column = getattr(node, "column", None)
     return Diagnostic(
         code=spec.code,
         severity=spec.severity,
@@ -430,6 +436,7 @@ def _lint_module_declarations(
                     ),
                     file=filename,
                     module=module.name,
+                    node=port,
                 )
             )
     return diagnostics
@@ -474,6 +481,7 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=stmt,
                 )
             )
         if conditional_depth > 0:
@@ -488,6 +496,7 @@ def _lint_statement(
                         ),
                         file=filename,
                         module=module,
+                        node=stmt,
                     )
                 )
             diagnostics.extend(
@@ -511,9 +520,11 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=stmt,
                 )
             )
-        if _expr_has_any_call(stmt.expr, {"floor", "$floor", "ceil", "$ceil"}):
+        floor_ceil_call = _first_function_call(stmt.expr, {"floor", "$floor", "ceil", "$ceil"})
+        if floor_ceil_call is not None:
             diagnostics.append(
                 _diag(
                     code="EVAS-AHDL-W5014",
@@ -524,6 +535,7 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=floor_ceil_call,
                 )
             )
         _lint_expr(
@@ -563,6 +575,7 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=stmt.event,
                 )
             )
         _lint_event_expr(
@@ -665,6 +678,7 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=stmt,
                 )
             )
         _lint_expr(
@@ -696,6 +710,7 @@ def _lint_statement(
                     ),
                     file=filename,
                     module=module,
+                    node=stmt,
                 )
             )
         for arg in stmt.args:
@@ -771,6 +786,7 @@ def _lint_expr(
                     ),
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
         _lint_expr(
@@ -887,6 +903,7 @@ def _lint_expr(
                     message="nested ddt(ddt(...)) is not a Spectre-compatible analog operator form",
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
         if name in _DISCRETE_ARGUMENT_FUNCTIONS and any(
@@ -902,6 +919,7 @@ def _lint_expr(
                     ),
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
         if not _is_supported_function(expr.name, user_function_names):
@@ -911,6 +929,7 @@ def _lint_expr(
                     message=f"unsupported Verilog-A function/operator call: {expr.name}()",
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
         for arg in expr.args:
@@ -938,6 +957,7 @@ def _lint_transition_call(
                 ),
                 file=filename,
                 module=module,
+                node=expr,
             )
         )
 
@@ -951,6 +971,7 @@ def _lint_transition_call(
                 ),
                 file=filename,
                 module=module,
+                node=expr,
             )
         )
 
@@ -968,6 +989,7 @@ def _lint_transition_call(
                     ),
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
 
@@ -987,6 +1009,7 @@ def _lint_transition_call(
                     ),
                     file=filename,
                     module=module,
+                    node=expr,
                 )
             )
 
@@ -997,7 +1020,8 @@ def _lint_condition_expr(
     filename: str,
     module: str,
 ) -> None:
-    if _expr_has_branch_access_equality(expr):
+    equality_expr = _expr_branch_access_equality(expr)
+    if equality_expr is not None:
         diagnostics.append(
             _diag(
                 code="EVAS-AHDL-W5013",
@@ -1008,6 +1032,7 @@ def _lint_condition_expr(
                 ),
                 file=filename,
                 module=module,
+                node=equality_expr,
             )
         )
 
@@ -1034,6 +1059,7 @@ def _lint_assignment_type_conversion(
                 ),
                 file=filename,
                 module=module,
+                node=stmt,
             )
         )
 
@@ -1144,6 +1170,7 @@ def _conditional_analog_operator_diagnostics(
                 file=filename,
                 module=module,
                 spectre_ids=[spectre_id],
+                node=call,
             )
         )
     return diagnostics
@@ -1180,6 +1207,27 @@ def _expr_has_any_call(expr: Optional[va_ast.Expr], call_names: Set[str]) -> boo
     return any(_expr_has_any_call(child, targets) for child in _expr_children(expr))
 
 
+def _first_function_call(
+    expr: Optional[va_ast.Expr],
+    call_names: Set[str],
+) -> Optional[va_ast.FunctionCall]:
+    if expr is None:
+        return None
+    targets = {name.lower() for name in call_names}
+    if isinstance(expr, va_ast.FunctionCall):
+        if expr.name.lower() in targets:
+            return expr
+        for arg in expr.args:
+            match = _first_function_call(arg, targets)
+            if match is not None:
+                return match
+    for child in _expr_children(expr):
+        match = _first_function_call(child, targets)
+        if match is not None:
+            return match
+    return None
+
+
 def _expr_contains_branch_access(expr: Optional[va_ast.Expr]) -> bool:
     if expr is None:
         return False
@@ -1188,16 +1236,21 @@ def _expr_contains_branch_access(expr: Optional[va_ast.Expr]) -> bool:
     return any(_expr_contains_branch_access(child) for child in _expr_children(expr))
 
 
-def _expr_has_branch_access_equality(expr: Optional[va_ast.Expr]) -> bool:
+def _expr_branch_access_equality(
+    expr: Optional[va_ast.Expr],
+) -> Optional[va_ast.BinaryExpr]:
     if expr is None:
-        return False
+        return None
     if isinstance(expr, va_ast.BinaryExpr) and expr.op in {"==", "!="}:
-        return _expr_contains_branch_access(expr.left) or _expr_contains_branch_access(
+        if _expr_contains_branch_access(expr.left) or _expr_contains_branch_access(
             expr.right
-        )
-    return any(
-        _expr_has_branch_access_equality(child) for child in _expr_children(expr)
-    )
+        ):
+            return expr
+    for child in _expr_children(expr):
+        match = _expr_branch_access_equality(child)
+        if match is not None:
+            return match
+    return None
 
 
 def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[str]) -> bool:

@@ -145,6 +145,16 @@ class Parser:
     def at(self, *types) -> bool:
         return self.peek().type in types
 
+    def _with_location(self, node, token: Token):
+        """Attach parser source coordinates without changing AST constructors."""
+        line = getattr(token, "line", None)
+        column = getattr(token, "col", getattr(token, "column", None))
+        if line is not None:
+            setattr(node, "line", line)
+        if column is not None:
+            setattr(node, "column", column)
+        return node
+
     def _reject_reserved_identifier(self, token: Token, context: str) -> None:
         if token.value in _SPECTRE_RESERVED_IDENTIFIERS:
             raise ParseError(
@@ -1226,9 +1236,10 @@ class Parser:
         """Parse an analog item, including Spectre's ``analog initial`` form."""
         tok = self.peek()
         if tok.type == TokenType.IDENT and tok.value == "initial":
-            self.advance()
+            initial_tok = self.advance()
             body = self._parse_block_or_statement()
-            return EventStatement(event=EventExpr(EventType.INITIAL_STEP), body=body)
+            event = self._with_location(EventExpr(EventType.INITIAL_STEP), initial_tok)
+            return self._with_location(EventStatement(event=event, body=body), initial_tok)
         return self._parse_block_or_statement()
 
     def _append_analog_block(self, module: Module, stmt: Statement) -> None:
@@ -1248,12 +1259,12 @@ class Parser:
         return self._parse_statement()
 
     def _parse_block(self) -> Block:
-        self.expect(TokenType.BEGIN)
+        begin_tok = self.expect(TokenType.BEGIN)
         stmts = []
         while not self.at(TokenType.END, TokenType.EOF):
             stmts.append(self._parse_statement())
         self.expect(TokenType.END)
-        return Block(statements=stmts)
+        return self._with_location(Block(statements=stmts), begin_tok)
 
     def _parse_statement(self) -> Statement:
         """Parse a single statement."""
@@ -1329,7 +1340,7 @@ class Parser:
 
     def _parse_event_statement(self) -> EventStatement:
         """Parse @(event) statement"""
-        self.expect(TokenType.AT)
+        at_tok = self.expect(TokenType.AT)
         self.expect(TokenType.LPAREN)
 
         events = []
@@ -1346,7 +1357,7 @@ class Parser:
             event = CombinedEvent(events=events)
 
         body = self._parse_block_or_statement()
-        return EventStatement(event=event, body=body)
+        return self._with_location(EventStatement(event=event, body=body), at_tok)
 
     def _parse_single_event(self) -> EventExpr:
         """Parse event expressions.
@@ -1372,11 +1383,11 @@ class Parser:
                 if edge_tok.type == TokenType.POSEDGE
                 else EventType.NEGEDGE
             )
-            return EventExpr(event_type, [signal])
+            return self._with_location(EventExpr(event_type, [signal]), edge_tok)
 
         if tok.type == TokenType.IDENT:
             if tok.value == 'cross':
-                self.advance()
+                event_tok = self.advance()
                 self.expect(TokenType.LPAREN)
                 expr = self._parse_expression()
                 direction = None
@@ -1390,13 +1401,19 @@ class Parser:
                         if self.match(TokenType.COMMA):
                             expr_tol_expr = self._parse_expression()
                 self.expect(TokenType.RPAREN)
-                return EventExpr(EventType.CROSS, [expr],
-                                 direction=direction,
-                                 time_tol_expr=time_tol_expr,
-                                 expr_tol_expr=expr_tol_expr)
+                return self._with_location(
+                    EventExpr(
+                        EventType.CROSS,
+                        [expr],
+                        direction=direction,
+                        time_tol_expr=time_tol_expr,
+                        expr_tol_expr=expr_tol_expr,
+                    ),
+                    event_tok,
+                )
 
             elif tok.value == 'above':
-                self.advance()
+                event_tok = self.advance()
                 self.expect(TokenType.LPAREN)
                 expr = self._parse_expression()
                 direction = None
@@ -1404,32 +1421,40 @@ class Parser:
                     dir_expr = self._parse_expression()
                     direction = self._coerce_event_direction(dir_expr)
                 self.expect(TokenType.RPAREN)
-                return EventExpr(EventType.ABOVE, [expr],
-                                 direction=direction)
+                return self._with_location(
+                    EventExpr(EventType.ABOVE, [expr], direction=direction),
+                    event_tok,
+                )
 
             elif tok.value == 'initial_step':
-                self.advance()
-                return EventExpr(EventType.INITIAL_STEP)
+                event_tok = self.advance()
+                return self._with_location(EventExpr(EventType.INITIAL_STEP), event_tok)
 
             elif tok.value == 'timer':
-                self.advance()
+                event_tok = self.advance()
                 self.expect(TokenType.LPAREN)
                 first_expr = self._parse_expression()
                 if self.match(TokenType.COMMA):
                     period_expr = self._parse_expression()
                     self.expect(TokenType.RPAREN)
-                    return EventExpr(EventType.TIMER, [first_expr, period_expr])
+                    return self._with_location(
+                        EventExpr(EventType.TIMER, [first_expr, period_expr]),
+                        event_tok,
+                    )
                 self.expect(TokenType.RPAREN)
-                return EventExpr(EventType.TIMER, [first_expr])
+                return self._with_location(
+                    EventExpr(EventType.TIMER, [first_expr]),
+                    event_tok,
+                )
 
             elif tok.value == 'final_step':
-                self.advance()
-                return EventExpr(EventType.FINAL_STEP)
+                event_tok = self.advance()
+                return self._with_location(EventExpr(EventType.FINAL_STEP), event_tok)
 
         raise ParseError(f"Expected event expression, got {tok.value!r}", tok)
 
     def _parse_if_statement(self) -> IfStatement:
-        self.expect(TokenType.IF)
+        if_tok = self.expect(TokenType.IF)
         self.expect(TokenType.LPAREN)
         cond = self._parse_expression()
         self.expect(TokenType.RPAREN)
@@ -1437,10 +1462,13 @@ class Parser:
         else_body = None
         if self.match(TokenType.ELSE):
             else_body = self._parse_block_or_statement()
-        return IfStatement(cond=cond, then_body=then_body, else_body=else_body)
+        return self._with_location(
+            IfStatement(cond=cond, then_body=then_body, else_body=else_body),
+            if_tok,
+        )
 
     def _parse_for_statement(self) -> ForStatement:
-        self.expect(TokenType.FOR)
+        for_tok = self.expect(TokenType.FOR)
         self.expect(TokenType.LPAREN)
         init = self._parse_simple_assignment()
         self.expect(TokenType.SEMI)
@@ -1449,10 +1477,13 @@ class Parser:
         update = self._parse_simple_assignment()
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
-        return ForStatement(init=init, cond=cond, update=update, body=body)
+        return self._with_location(
+            ForStatement(init=init, cond=cond, update=update, body=body),
+            for_tok,
+        )
 
     def _parse_repeat_statement(self) -> Block:
-        self.expect(TokenType.REPEAT)
+        repeat_tok = self.expect(TokenType.REPEAT)
         self.expect(TokenType.LPAREN)
         count = self._parse_expression()
         self.expect(TokenType.RPAREN)
@@ -1461,39 +1492,63 @@ class Parser:
         loop_var = f"__evas_repeat_{self._repeat_counter}"
         limit_var = f"__evas_repeat_limit_{self._repeat_counter}"
         self._repeat_counter += 1
-        limit = Assignment(Identifier(limit_var), count)
-        init = Assignment(Identifier(loop_var), NumberLiteral(0.0))
-        cond = BinaryExpr("<", Identifier(loop_var), Identifier(limit_var))
-        update = Assignment(
-            Identifier(loop_var),
-            BinaryExpr("+", Identifier(loop_var), NumberLiteral(1.0)),
+        limit = self._with_location(Assignment(Identifier(limit_var), count), repeat_tok)
+        init = self._with_location(
+            Assignment(Identifier(loop_var), NumberLiteral(0.0)),
+            repeat_tok,
         )
-        return Block(statements=[
-            limit,
-            ForStatement(init=init, cond=cond, update=update, body=body),
-        ])
+        cond = self._with_location(
+            BinaryExpr("<", Identifier(loop_var), Identifier(limit_var)),
+            repeat_tok,
+        )
+        update = self._with_location(
+            Assignment(
+                Identifier(loop_var),
+                self._with_location(
+                    BinaryExpr("+", Identifier(loop_var), NumberLiteral(1.0)),
+                    repeat_tok,
+                ),
+            ),
+            repeat_tok,
+        )
+        return self._with_location(
+            Block(statements=[
+                limit,
+                self._with_location(
+                    ForStatement(init=init, cond=cond, update=update, body=body),
+                    repeat_tok,
+                ),
+            ]),
+            repeat_tok,
+        )
 
     def _parse_while_statement(self) -> WhileStatement:
-        self.expect(TokenType.WHILE)
+        while_tok = self.expect(TokenType.WHILE)
         self.expect(TokenType.LPAREN)
         cond = self._parse_expression()
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
-        return WhileStatement(cond=cond, body=body)
+        return self._with_location(WhileStatement(cond=cond, body=body), while_tok)
 
     def _parse_do_while_statement(self) -> Block:
-        self.expect(TokenType.DO)
+        do_tok = self.expect(TokenType.DO)
         body = self._parse_block_or_statement()
-        self.expect(TokenType.WHILE)
+        while_tok = self.expect(TokenType.WHILE)
         self.expect(TokenType.LPAREN)
         cond = self._parse_expression()
         self.expect(TokenType.RPAREN)
         self.match(TokenType.SEMI)
-        return Block(statements=[body, WhileStatement(cond=cond, body=body)])
+        return self._with_location(
+            Block(statements=[
+                body,
+                self._with_location(WhileStatement(cond=cond, body=body), while_tok),
+            ]),
+            do_tok,
+        )
 
     def _parse_case_statement(self) -> CaseStatement:
         """Parse: case (expr) value: stmt ... default: stmt endcase"""
-        self.expect(TokenType.CASE)
+        case_tok = self.expect(TokenType.CASE)
         self.expect(TokenType.LPAREN)
         sel_expr = self._parse_expression()
         self.expect(TokenType.RPAREN)
@@ -1502,20 +1557,21 @@ class Parser:
         while not self.at(TokenType.ENDCASE, TokenType.EOF):
             # Check for 'default'
             if self.at(TokenType.IDENT) and self.peek().value == 'default':
-                self.advance()
+                item_tok = self.advance()
                 self.expect(TokenType.COLON)
                 body = self._parse_block_or_statement()
-                items.append(CaseItem(values=[], body=body))
+                items.append(self._with_location(CaseItem(values=[], body=body), item_tok))
             else:
                 # Parse comma-separated value expressions before ':'
+                item_tok = self.peek()
                 values = [self._parse_expression()]
                 while self.match(TokenType.COMMA):
                     values.append(self._parse_expression())
                 self.expect(TokenType.COLON)
                 body = self._parse_block_or_statement()
-                items.append(CaseItem(values=values, body=body))
+                items.append(self._with_location(CaseItem(values=values, body=body), item_tok))
         self.expect(TokenType.ENDCASE)
-        return CaseStatement(expr=sel_expr, items=items)
+        return self._with_location(CaseStatement(expr=sel_expr, items=items), case_tok)
 
     def _parse_simple_assignment(self) -> Assignment:
         """Parse: target = expr"""
@@ -1523,10 +1579,11 @@ class Parser:
         assign_tok = self.expect(TokenType.ASSIGN)
         self._validate_assignment_target(target, assign_tok)
         value = self._parse_expression()
-        return Assignment(target=target, value=value)
+        return self._with_location(Assignment(target=target, value=value), assign_tok)
 
     def _parse_system_task(self) -> SystemTask:
-        name = self.advance().value
+        task_tok = self.advance()
+        name = task_tok.value
         args = []
         if self.match(TokenType.LPAREN):
             while not self.at(TokenType.RPAREN, TokenType.EOF):
@@ -1535,7 +1592,7 @@ class Parser:
                     break
             self.expect(TokenType.RPAREN)
         self.match(TokenType.SEMI)
-        return SystemTask(name=name, args=args)
+        return self._with_location(SystemTask(name=name, args=args), task_tok)
 
     def _parse_expr_statement(self) -> Statement:
         """Parse assignment or contribution statement."""
@@ -1554,17 +1611,27 @@ class Parser:
                 self.expect(TokenType.EQ)
                 rhs = self._parse_expression()
             self.match(TokenType.SEMI)
-            return TaskCall(name="$indirect_branch", args=[expr, lhs, rhs])
+            return self._with_location(
+                TaskCall(name="$indirect_branch", args=[expr, lhs, rhs]),
+                expr,
+            )
 
         # Contribution: V(a,b) <+ expr
-        if self.match(TokenType.CONTRIB):
+        contrib_tok = self.match(TokenType.CONTRIB)
+        if contrib_tok:
             rhs = self._parse_expression()
             self.match(TokenType.SEMI)
             if isinstance(expr, BranchAccess):
-                return Contribution(branch=expr, expr=rhs)
+                return self._with_location(
+                    Contribution(branch=expr, expr=rhs),
+                    contrib_tok,
+                )
             branch = self._generic_access_to_branch(expr)
             if branch is not None:
-                return Contribution(branch=branch, expr=rhs)
+                return self._with_location(
+                    Contribution(branch=branch, expr=rhs),
+                    contrib_tok,
+                )
             raise ParseError("Left side of <+ must be a branch access (V/I)")
 
         # Assignment: ident = expr
@@ -1573,11 +1640,14 @@ class Parser:
             self._validate_assignment_target(expr, assign_tok)
             rhs = self._parse_expression()
             self.match(TokenType.SEMI)
-            return Assignment(target=expr, value=rhs)
+            return self._with_location(Assignment(target=expr, value=rhs), assign_tok)
 
         if self.match(TokenType.SEMI):
             if isinstance(expr, FunctionCall):
-                return TaskCall(name=expr.name, args=expr.args)
+                return self._with_location(
+                    TaskCall(name=expr.name, args=expr.args),
+                    expr,
+                )
             raise ParseError(
                 "Spectre-incompatible expression statement: use an assignment, "
                 "contribution, event control, or system task",
@@ -1612,14 +1682,17 @@ class Parser:
                 return None
             node2, idx2, idx2_2 = second
         access_type = "V" if expr.name == "potential" else "I"
-        return BranchAccess(
-            access_type=access_type,
-            node1=node1,
-            node2=node2,
-            node1_index=idx1,
-            node2_index=idx2,
-            node1_index2=idx1_2,
-            node2_index2=idx2_2,
+        return self._with_location(
+            BranchAccess(
+                access_type=access_type,
+                node1=node1,
+                node2=node2,
+                node1_index=idx1,
+                node2_index=idx2,
+                node1_index2=idx1_2,
+                node2_index2=idx2_2,
+            ),
+            expr,
         )
 
     # ─── Expressions (precedence climbing) ───
@@ -1629,57 +1702,61 @@ class Parser:
 
     def _parse_ternary(self) -> Expr:
         expr = self._parse_lor()
-        if self.match(TokenType.QUESTION):
+        question_tok = self.match(TokenType.QUESTION)
+        if question_tok:
             true_expr = self._parse_expression()
             self.expect(TokenType.COLON)
             false_expr = self._parse_expression()
-            return TernaryExpr(cond=expr, true_expr=true_expr, false_expr=false_expr)
+            return self._with_location(
+                TernaryExpr(cond=expr, true_expr=true_expr, false_expr=false_expr),
+                question_tok,
+            )
         return expr
 
     def _parse_lor(self) -> Expr:
         left = self._parse_land()
-        while self.match(TokenType.LOR):
+        while op_tok := self.match(TokenType.LOR):
             right = self._parse_land()
-            left = BinaryExpr('||', left, right)
+            left = self._with_location(BinaryExpr('||', left, right), op_tok)
         return left
 
     def _parse_land(self) -> Expr:
         left = self._parse_bitor()
-        while self.match(TokenType.LAND):
+        while op_tok := self.match(TokenType.LAND):
             right = self._parse_bitor()
-            left = BinaryExpr('&&', left, right)
+            left = self._with_location(BinaryExpr('&&', left, right), op_tok)
         return left
 
     def _parse_bitor(self) -> Expr:
         left = self._parse_bitxor()
-        while self.match(TokenType.PIPE):
+        while op_tok := self.match(TokenType.PIPE):
             right = self._parse_bitxor()
-            left = BinaryExpr('|', left, right)
+            left = self._with_location(BinaryExpr('|', left, right), op_tok)
         return left
 
     def _parse_bitxor(self) -> Expr:
         left = self._parse_bitand()
-        while self.match(TokenType.CARET):
+        while op_tok := self.match(TokenType.CARET):
             right = self._parse_bitand()
-            left = BinaryExpr('^', left, right)
+            left = self._with_location(BinaryExpr('^', left, right), op_tok)
         return left
 
     def _parse_bitand(self) -> Expr:
         left = self._parse_equality()
-        while self.match(TokenType.AMP):
+        while op_tok := self.match(TokenType.AMP):
             right = self._parse_equality()
-            left = BinaryExpr('&', left, right)
+            left = self._with_location(BinaryExpr('&', left, right), op_tok)
         return left
 
     def _parse_equality(self) -> Expr:
         left = self._parse_relational()
         while True:
-            if self.match(TokenType.EQ):
+            if op_tok := self.match(TokenType.EQ):
                 right = self._parse_relational()
-                left = BinaryExpr('==', left, right)
-            elif self.match(TokenType.NE):
+                left = self._with_location(BinaryExpr('==', left, right), op_tok)
+            elif op_tok := self.match(TokenType.NE):
                 right = self._parse_relational()
-                left = BinaryExpr('!=', left, right)
+                left = self._with_location(BinaryExpr('!=', left, right), op_tok)
             else:
                 break
         return left
@@ -1687,18 +1764,18 @@ class Parser:
     def _parse_relational(self) -> Expr:
         left = self._parse_shift()
         while True:
-            if self.match(TokenType.GT):
+            if op_tok := self.match(TokenType.GT):
                 right = self._parse_shift()
-                left = BinaryExpr('>', left, right)
-            elif self.match(TokenType.LT):
+                left = self._with_location(BinaryExpr('>', left, right), op_tok)
+            elif op_tok := self.match(TokenType.LT):
                 right = self._parse_shift()
-                left = BinaryExpr('<', left, right)
-            elif self.match(TokenType.GE):
+                left = self._with_location(BinaryExpr('<', left, right), op_tok)
+            elif op_tok := self.match(TokenType.GE):
                 right = self._parse_shift()
-                left = BinaryExpr('>=', left, right)
-            elif self.match(TokenType.LE):
+                left = self._with_location(BinaryExpr('>=', left, right), op_tok)
+            elif op_tok := self.match(TokenType.LE):
                 right = self._parse_shift()
-                left = BinaryExpr('<=', left, right)
+                left = self._with_location(BinaryExpr('<=', left, right), op_tok)
             else:
                 break
         return left
@@ -1706,12 +1783,12 @@ class Parser:
     def _parse_shift(self) -> Expr:
         left = self._parse_additive()
         while True:
-            if self.match(TokenType.LSHIFT):
+            if op_tok := self.match(TokenType.LSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr('<<', left, right)
-            elif self.match(TokenType.RSHIFT):
+                left = self._with_location(BinaryExpr('<<', left, right), op_tok)
+            elif op_tok := self.match(TokenType.RSHIFT):
                 right = self._parse_additive()
-                left = BinaryExpr('>>', left, right)
+                left = self._with_location(BinaryExpr('>>', left, right), op_tok)
             else:
                 break
         return left
@@ -1719,12 +1796,12 @@ class Parser:
     def _parse_additive(self) -> Expr:
         left = self._parse_multiplicative()
         while True:
-            if self.match(TokenType.PLUS):
+            if op_tok := self.match(TokenType.PLUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr('+', left, right)
-            elif self.match(TokenType.MINUS):
+                left = self._with_location(BinaryExpr('+', left, right), op_tok)
+            elif op_tok := self.match(TokenType.MINUS):
                 right = self._parse_multiplicative()
-                left = BinaryExpr('-', left, right)
+                left = self._with_location(BinaryExpr('-', left, right), op_tok)
             else:
                 break
         return left
@@ -1732,49 +1809,49 @@ class Parser:
     def _parse_multiplicative(self) -> Expr:
         left = self._parse_power()
         while True:
-            if self.match(TokenType.STAR):
+            if op_tok := self.match(TokenType.STAR):
                 right = self._parse_power()
-                left = BinaryExpr('*', left, right)
-            elif self.match(TokenType.SLASH):
+                left = self._with_location(BinaryExpr('*', left, right), op_tok)
+            elif op_tok := self.match(TokenType.SLASH):
                 right = self._parse_power()
-                left = BinaryExpr('/', left, right)
-            elif self.match(TokenType.PERCENT):
+                left = self._with_location(BinaryExpr('/', left, right), op_tok)
+            elif op_tok := self.match(TokenType.PERCENT):
                 right = self._parse_power()
-                left = BinaryExpr('%', left, right)
+                left = self._with_location(BinaryExpr('%', left, right), op_tok)
             else:
                 break
         return left
 
     def _parse_power(self) -> Expr:
         left = self._parse_unary()
-        if self.match(TokenType.POWER):
+        if op_tok := self.match(TokenType.POWER):
             right = self._parse_power()
-            return BinaryExpr('**', left, right)
+            return self._with_location(BinaryExpr('**', left, right), op_tok)
         return left
 
     def _parse_unary(self) -> Expr:
-        if self.match(TokenType.MINUS):
+        if op_tok := self.match(TokenType.MINUS):
             operand = self._parse_unary()
             # Optimize: -number → NumberLiteral(-value)
             if isinstance(operand, NumberLiteral):
                 raw = f"-{operand.raw}" if operand.raw else None
-                return NumberLiteral(-operand.value, raw)
-            return UnaryExpr('-', operand)
-        if self.match(TokenType.BANG):
+                return self._with_location(NumberLiteral(-operand.value, raw), op_tok)
+            return self._with_location(UnaryExpr('-', operand), op_tok)
+        if op_tok := self.match(TokenType.BANG):
             operand = self._parse_unary()
-            return UnaryExpr('!', operand)
-        if self.match(TokenType.TILDE):
+            return self._with_location(UnaryExpr('!', operand), op_tok)
+        if op_tok := self.match(TokenType.TILDE):
             operand = self._parse_unary()
-            return UnaryExpr('~', operand)
-        if self.match(TokenType.AMP):
+            return self._with_location(UnaryExpr('~', operand), op_tok)
+        if op_tok := self.match(TokenType.AMP):
             operand = self._parse_unary()
-            return UnaryExpr('&', operand)
-        if self.match(TokenType.PIPE):
+            return self._with_location(UnaryExpr('&', operand), op_tok)
+        if op_tok := self.match(TokenType.PIPE):
             operand = self._parse_unary()
-            return UnaryExpr('|', operand)
-        if self.match(TokenType.CARET):
+            return self._with_location(UnaryExpr('|', operand), op_tok)
+        if op_tok := self.match(TokenType.CARET):
             operand = self._parse_unary()
-            return UnaryExpr('^', operand)
+            return self._with_location(UnaryExpr('^', operand), op_tok)
         if self.match(TokenType.PLUS):
             return self._parse_unary()
         return self._parse_primary()
@@ -1785,12 +1862,12 @@ class Parser:
         # Number literal
         if tok.type == TokenType.NUMBER:
             self.advance()
-            return NumberLiteral(float(tok.value), tok.raw or tok.value)
+            return self._with_location(NumberLiteral(float(tok.value), tok.raw or tok.value), tok)
 
         # String literal
         if tok.type == TokenType.STRING:
             self.advance()
-            return StringLiteral(tok.value)
+            return self._with_location(StringLiteral(tok.value), tok)
 
         # Parenthesized expression
         if tok.type == TokenType.LPAREN:
@@ -1801,36 +1878,49 @@ class Parser:
 
         # Concatenation and replication: {a, b} or {3{a}}
         if tok.type == TokenType.LBRACE:
-            self.advance()
+            brace_tok = self.advance()
             first = self._parse_expression()
             if self.match(TokenType.LBRACE):
                 replicated = self._parse_expression()
                 self.expect(TokenType.RBRACE)
                 self.expect(TokenType.RBRACE)
-                return ReplicateExpr(count=first, expr=replicated)
+                return self._with_location(
+                    ReplicateExpr(count=first, expr=replicated),
+                    brace_tok,
+                )
             parts = [first]
             while self.match(TokenType.COMMA):
                 parts.append(self._parse_expression())
             self.expect(TokenType.RBRACE)
-            return ConcatExpr(parts=parts)
+            return self._with_location(ConcatExpr(parts=parts), brace_tok)
 
         # V(...) or I(...) branch access
         if tok.type == TokenType.IDENT and tok.value in ('V', 'I'):
             access_type = tok.value
-            self.advance()
+            access_tok = self.advance()
             self.expect(TokenType.LPAREN)
             name1, idx1, idx1_2 = self._parse_node_ref()
             name2, idx2, idx2_2 = None, None, None
             if self.match(TokenType.COMMA):
                 name2, idx2, idx2_2 = self._parse_node_ref()
             self.expect(TokenType.RPAREN)
-            return BranchAccess(access_type=access_type, node1=name1, node2=name2,
-                                node1_index=idx1, node2_index=idx2,
-                                node1_index2=idx1_2, node2_index2=idx2_2)
+            return self._with_location(
+                BranchAccess(
+                    access_type=access_type,
+                    node1=name1,
+                    node2=name2,
+                    node1_index=idx1,
+                    node2_index=idx2,
+                    node1_index2=idx1_2,
+                    node2_index2=idx2_2,
+                ),
+                access_tok,
+            )
 
         # Identifier (variable, parameter, function call)
         if tok.type == TokenType.IDENT:
-            name = self.advance().value
+            name_tok = self.advance()
+            name = name_tok.value
 
             # Method call: name.method(args), or node/branch attribute path
             # such as in.potential.abstol.
@@ -1845,16 +1935,28 @@ class Parser:
                     args = self._parse_arg_list()
                     self.expect(TokenType.RPAREN)
                     if len(parts) == 2:
-                        return MethodCall(obj=parts[0], method=parts[1], args=args)
-                    return FunctionCall(name=".".join(parts), args=args)
-                return FunctionCall(name="$attribute", args=[StringLiteral(".".join(parts))])
+                        return self._with_location(
+                            MethodCall(obj=parts[0], method=parts[1], args=args),
+                            name_tok,
+                        )
+                    return self._with_location(
+                        FunctionCall(name=".".join(parts), args=args),
+                        name_tok,
+                    )
+                return self._with_location(
+                    FunctionCall(
+                        name="$attribute",
+                        args=[self._with_location(StringLiteral(".".join(parts)), name_tok)],
+                    ),
+                    name_tok,
+                )
 
             # Function call: name(args)
             if self.at(TokenType.LPAREN):
                 self.advance()
                 args = self._parse_arg_list()
                 self.expect(TokenType.RPAREN)
-                return FunctionCall(name=name, args=args)
+                return self._with_location(FunctionCall(name=name, args=args), name_tok)
 
             self._reject_reserved_identifier(tok, "expression identifier")
 
@@ -1865,25 +1967,31 @@ class Parser:
                 if self.match(TokenType.COLON):
                     lsb = self._parse_expression()
                     self.expect(TokenType.RBRACKET)
-                    return PartSelect(name=name, msb=first, lsb=lsb)
+                    return self._with_location(
+                        PartSelect(name=name, msb=first, lsb=lsb),
+                        name_tok,
+                    )
                 self.expect(TokenType.RBRACKET)
                 if self.at(TokenType.LBRACKET):
                     self.advance()
                     second = self._parse_expression()
                     self.expect(TokenType.RBRACKET)
-                    return ArrayAccess(name=name, index=first, index2=second)
-                return ArrayAccess(name=name, index=first)
+                    return self._with_location(
+                        ArrayAccess(name=name, index=first, index2=second),
+                        name_tok,
+                    )
+                return self._with_location(ArrayAccess(name=name, index=first), name_tok)
 
-            return Identifier(name)
+            return self._with_location(Identifier(name), name_tok)
 
         # Inf keyword (used in parameter ranges)
         if tok.type == TokenType.IDENT and tok.value == 'inf':
             self.advance()
-            return NumberLiteral(float('inf'))
+            return self._with_location(NumberLiteral(float('inf')), tok)
 
         # Fallback
         self.advance()
-        return NumberLiteral(0)
+        return self._with_location(NumberLiteral(0), tok)
 
     def _parse_node_ref(self):
         """Parse a node reference which may be 1-D or 2-D array-indexed.

@@ -78,6 +78,9 @@ simulator-stop tasks inside loops.
 The implementation keeps diagnostic metadata in a rule registry, including the
 EVAS code, severity, rule name, lint phase, source category, and related
 Cadence/Spectre identifiers when known.
+Diagnostics emitted from parsed Verilog-A nodes include line and column
+coordinates when available, which makes CLI output and JSON reports usable as
+repair-loop anchors.
 
 Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
 front-end failures when possible. Current examples include conditionally

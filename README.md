@@ -80,6 +80,9 @@ simulator-stop tasks inside loops.
 Each lint diagnostic is backed by a small rule registry that records its code,
 severity, canonical rule name, phase, source category, and related
 Cadence/Spectre identifiers when known.
+Diagnostics produced from parsed Verilog-A nodes include source line and column
+coordinates when available, so repair tools can point users back to the
+triggering statement or expression.
 Compatibility diagnostics include Cadence/Spectre-aligned cases such as
 conditionally executed analog operators (`transition`, `slew`, `idt`) and
 discipline vector ranges that depend on runtime variables instead of numeric or

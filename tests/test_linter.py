@@ -85,6 +85,34 @@ def test_diagnostics_use_registered_rule_metadata():
         assert diag.spectre_ids == list(spec.spectre_ids)
 
 
+def test_lint_diagnostics_include_source_locations():
+    source = textwrap.dedent("""\
+        module loc(out);
+            output out;
+            electrical out;
+            integer mode;
+            analog begin
+                mode = 1;
+                case (mode)
+                    1: V(out) <+ transition(exp(mode), 100f);
+                endcase
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source, filename="loc.va")
+    by_code = {diag.code: diag for diag in diags}
+
+    assert by_code["EVAS-AHDL-W5011"].line == 7
+    assert by_code["EVAS-AHDL-W5011"].column == 9
+    assert by_code["EVAS-AHDL-W5003"].line == 8
+    assert by_code["EVAS-AHDL-W5003"].column == 26
+    assert by_code["EVAS-AHDL-W5018"].line == 8
+    assert by_code["EVAS-AHDL-W5018"].column == 37
+    assert by_code["EVAS-AHDL-W5003"].to_dict()["line"] == 8
+    assert "loc.va:8:26" in by_code["EVAS-AHDL-W5003"].format_text()
+
+
 def test_discrete_contribution_warns_like_ahdllint_5008():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
