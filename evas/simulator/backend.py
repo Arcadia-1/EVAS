@@ -340,6 +340,7 @@ class CompiledModel:
         self._ddt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._laplace_states: Optional[Dict[str, Dict[str, float]]] = None
+        self._zi_states: Optional[Dict[str, Dict[str, Any]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
         self._next_fd: int = 1
         self._child_models: List["CompiledModel"] = []
@@ -477,6 +478,7 @@ class CompiledModel:
             "ddt_states": copy.deepcopy(self._ddt_states),
             "idt_states": copy.deepcopy(self._idt_states),
             "laplace_states": copy.deepcopy(self._laplace_states),
+            "zi_states": copy.deepcopy(self._zi_states),
             "initial_step_done": self._initial_step_done,
             "bound_step": self._bound_step,
             "event_time": self._event_time,
@@ -504,6 +506,7 @@ class CompiledModel:
         self._ddt_states = snapshot["ddt_states"]
         self._idt_states = snapshot["idt_states"]
         self._laplace_states = snapshot["laplace_states"]
+        self._zi_states = snapshot["zi_states"]
         self._initial_step_done = snapshot["initial_step_done"]
         self._bound_step = snapshot["bound_step"]
         self._event_time = snapshot["event_time"]
@@ -4971,6 +4974,63 @@ class CompiledModel:
         target = zero_values[0] * float(x)
         tau = 1.0 / abs(pole_values[0])
         return self._laplace_first_order_update(key, time, target, tau)
+
+    def _zi_nd(self, key: str, time: float, x: float, num: Any, den: Any, interval: Any) -> float:
+        """
+        Minimal sampled-data zi_nd approximation.
+
+        Implements a direct-form real-coefficient difference equation. Calls
+        before the next sample interval hold the previous output; calls after a
+        sample interval advance one step using the current input value.
+        """
+        try:
+            num_values = [float(v) for v in num]
+            den_values = [float(v) for v in den]
+            interval_f = float(interval)
+        except Exception:
+            return float(x)
+        if not num_values or not den_values or den_values[0] == 0.0:
+            return float(x)
+        if interval_f <= 0.0:
+            interval_f = 0.0
+        if self._zi_states is None:
+            self._zi_states = {}
+
+        t = float(time)
+        x_f = float(x)
+        if key not in self._zi_states:
+            self._zi_states[key] = {
+                "last_sample_t": float("-inf"),
+                "last_eval_t": None,
+                "x_hist": [0.0] * len(num_values),
+                "y_hist": [0.0] * max(0, len(den_values) - 1),
+                "y": 0.0,
+            }
+        st = self._zi_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        if t < float(st["last_sample_t"]):
+            st["last_sample_t"] = t
+            st["x_hist"] = [0.0] * len(num_values)
+            st["y_hist"] = [0.0] * max(0, len(den_values) - 1)
+            st["y"] = 0.0
+        elif interval_f > 0.0 and (t - float(st["last_sample_t"])) < (interval_f * 0.999999):
+            st["last_eval_t"] = t
+            return float(st["y"])
+
+        x_hist = [x_f] + list(st["x_hist"])[: max(0, len(num_values) - 1)]
+        y = sum(b * x_hist[i] for i, b in enumerate(num_values))
+        for i, a in enumerate(den_values[1:]):
+            y -= a * float(st["y_hist"][i])
+        y /= den_values[0]
+        y_hist = [y] + list(st["y_hist"])[: max(0, len(den_values) - 2)]
+
+        st["x_hist"] = x_hist
+        st["y_hist"] = y_hist
+        st["y"] = y
+        st["last_sample_t"] = t
+        st["last_eval_t"] = t
+        return float(y)
 
     @staticmethod
     def _limexp(x: Any) -> float:
@@ -13114,6 +13174,9 @@ class _ModuleCompiler:
         elif kind == "laplace":
             key = f"laplace_{self._idt_counter}"
             self._idt_counter += 1
+        elif kind == "zi":
+            key = f"zi_{self._idt_counter}"
+            self._idt_counter += 1
         else:
             raise ValueError(f"unknown stateful func key kind: {kind}")
         self._stateful_func_key_cache[cache_key] = key
@@ -15270,8 +15333,17 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_zp(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {poles})"
             return f"self._laplace_zp({base_key!r}, time, {x}, {zeros}, {poles})"
+        if name == 'zi_nd':
+            base_key = self._alloc_stateful_func_key("zi", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            den = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            interval = args[3] if len(args) > 3 else "0.0"
+            if self._in_loop_var:
+                return f"self._zi_nd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {den}, {interval})"
+            return f"self._zi_nd({base_key!r}, time, {x}, {num}, {den}, {interval})"
         if name in {
-            'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
+            'zi_np', 'zi_zd', 'zi_zp',
         }:
             return args[0] if args else "0.0"
         if name == '$rdist_normal':

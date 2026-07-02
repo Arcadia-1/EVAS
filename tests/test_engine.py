@@ -7786,6 +7786,28 @@ endmodule
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
 
+    def test_zi_nd_first_order_difference_equation_advances_state(self):
+        src = """\
+`include "disciplines.vams"
+module zi_nd_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ zi_nd(V(vin), {1.0}, {1.0, 1.0}, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        nv0 = {"vin": 0.7}
+        model.evaluate(nv0, 0.0)
+        assert nv0["out"] == pytest.approx(0.7)
+
+        nv1 = {"vin": 0.7}
+        model.evaluate(nv1, 1e-9)
+        assert nv1["out"] == pytest.approx(0.0)
+
 
 class TestConnectmoduleAndMultidimensionalArrays:
 
