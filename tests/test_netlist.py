@@ -478,6 +478,44 @@ class TestAhdlIncludePathFallback:
         data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
         assert data["out"][-1] == pytest.approx(1.0, abs=1e-9)
 
+    def test_param_given_tracks_explicit_instance_parameter(self, tmp_path):
+        va_file = tmp_path / "param_given_gain.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module param_given_gain(input electrical in,
+                                    output electrical out_def,
+                                    output electrical metric);
+                parameter real gain = 0.8;
+                analog begin
+                    V(out_def) <+ ($param_given(gain) ? gain : 1.0) * V(in);
+                    V(metric) <+ $param_given(gain);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_param_given_gain.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "param_given_gain.va"
+
+            Vin (in 0) vsource dc=0.4 type=dc
+            XDEF (in out_def metric_def) param_given_gain
+            XOVR (in out_ovr metric_ovr) param_given_gain gain=0.5
+
+            tran tran stop=1n maxstep=100p
+            save in out_def metric_def out_ovr metric_ovr
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out_def"][-1] == pytest.approx(0.4, abs=1e-9)
+        assert data["metric_def"][-1] == pytest.approx(0.0, abs=1e-9)
+        assert data["out_ovr"][-1] == pytest.approx(0.2, abs=1e-9)
+        assert data["metric_ovr"][-1] == pytest.approx(1.0, abs=1e-9)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance

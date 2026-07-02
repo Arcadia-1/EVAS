@@ -1102,6 +1102,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             continue
         model.node_map = node_map
         model._mfactor_value = float(inst.params.get("m", 1.0))
+        model._given_params = {str(k).lower() for k in inst.params}
         # Case-insensitive param update: netlist keys are lowercased, model keys
         # preserve the original VA case. Match by lowercase to update correctly.
         lower_to_model_key = {k.lower(): k for k in model.params}

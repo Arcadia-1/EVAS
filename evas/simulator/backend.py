@@ -161,6 +161,7 @@ class CompiledModel:
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
         self._mfactor_value: float = 1.0
+        self._given_params: set[str] = set()
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
         self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
@@ -542,6 +543,9 @@ class CompiledModel:
 
     def _mfactor(self) -> float:
         return float(getattr(self, "_mfactor_value", 1.0))
+
+    def _param_given(self, name: Any) -> float:
+        return 1.0 if str(name).strip().lower() in self._given_params else 0.0
 
     def _attribute_value(self, path: Any) -> float:
         key = str(path).strip().lower()
@@ -14237,7 +14241,8 @@ class _ModuleCompiler:
             value = args[0] if args else "0.0"
             return f"self._to_integer({value})"
         if name == "$param_given":
-            return "0.0"
+            param_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            return f"self._param_given({param_name})"
         if name == "$port_connected":
             port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._port_connected({port_name})"
@@ -14665,7 +14670,8 @@ class _ModuleCompiler:
             value = args[0] if args else "0.0"
             return f"self._to_integer({value})"
         if name == '$param_given':
-            return "0.0"
+            param_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            return f"self._param_given({param_name})"
         if name == '$port_connected':
             port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._port_connected({port_name})"
