@@ -70,6 +70,12 @@ Diagnostics use `compat-error` for EVAS/Spectre subset issues and warning
 severities for AHDL-style modeling risks. The command exits with `1` only when
 at least one `compat-error` is reported.
 
+Current warning diagnostics cover a Cadence AHDL-inspired static subset:
+transition timing, conditional potential contributions, case defaults, exact
+branch equality tests, floor/ceil contribution discontinuities, `gnd` node
+portability, discrete function arguments, implicit integer casts, and
+simulator-stop tasks inside loops.
+
 Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
 front-end failures when possible. Current examples include conditionally
 executed analog operators such as `transition`, `slew`, and `idt`, plus

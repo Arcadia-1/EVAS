@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from evas.netlist.spectre_parser import parse_spectre
 
@@ -232,6 +232,8 @@ def _lint_module(
         v.name for v in getattr(module, "variables", [])
         if getattr(v, "var_type", None) == va_ast.ParamType.INTEGER
     }
+    symbol_types = _module_symbol_types(module)
+    diagnostics.extend(_lint_module_declarations(module, filename))
     discrete_vars = set(integer_vars)
     if module.analog_block is not None:
         discrete_vars.update(_assigned_in_events(module.analog_block.body))
@@ -252,8 +254,10 @@ def _lint_module(
             discrete_vars,
             user_function_names,
             genvar_names,
+            symbol_types,
             conditional_depth=0,
             in_event=False,
+            loop_depth=0,
         )
 
     for function in getattr(module, "functions", []):
@@ -266,8 +270,10 @@ def _lint_module(
             discrete_vars,
             user_function_names,
             genvar_names,
+            symbol_types,
             conditional_depth=0,
             in_event=False,
+            loop_depth=0,
         )
     for task in getattr(module, "tasks", []):
         _lint_statement(
@@ -279,9 +285,54 @@ def _lint_module(
             discrete_vars,
             user_function_names,
             genvar_names,
+            symbol_types,
             conditional_depth=0,
             in_event=False,
+            loop_depth=0,
         )
+    return diagnostics
+
+
+def _module_symbol_types(module: va_ast.Module) -> Dict[str, va_ast.ParamType]:
+    symbol_types: Dict[str, va_ast.ParamType] = {}
+    for param in getattr(module, "parameters", []):
+        symbol_types[param.name] = param.param_type
+    for var in getattr(module, "variables", []):
+        symbol_types[var.name] = var.var_type
+    for port in getattr(module, "port_decls", []):
+        discipline = port.discipline.lower()
+        if discipline == "logic":
+            symbol_types[port.name] = va_ast.ParamType.INTEGER
+        elif discipline == "wreal":
+            symbol_types[port.name] = va_ast.ParamType.REAL
+    return symbol_types
+
+
+def _lint_module_declarations(
+    module: va_ast.Module,
+    filename: str,
+) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    for port in getattr(module, "port_decls", []):
+        if (
+            port.name.lower() == "gnd"
+            and port.discipline.lower() in {"electrical", "voltage", "current"}
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5017",
+                    severity=STATIC_WARNING,
+                    message=(
+                        '"gnd" is declared as an electrical node rather than a '
+                        "ground reference; Cadence AHDL lint treats this as a "
+                        "portability risk"
+                    ),
+                    file=filename,
+                    module=module.name,
+                    rule="electrical-gnd-name",
+                    spectre_ids=["AHDLLINT-5017"],
+                )
+            )
     return diagnostics
 
 
@@ -294,9 +345,11 @@ def _lint_statement(
     discrete_vars: Set[str],
     user_function_names: Set[str],
     genvar_names: Set[str],
+    symbol_types: Dict[str, va_ast.ParamType],
     *,
     conditional_depth: int,
     in_event: bool,
+    loop_depth: int,
 ) -> None:
     if stmt is None:
         return
@@ -305,7 +358,9 @@ def _lint_statement(
             _lint_statement(
                 child, diagnostics, filename, module, min_transition,
                 discrete_vars, user_function_names, genvar_names,
+                symbol_types,
                 conditional_depth=conditional_depth, in_event=in_event,
+                loop_depth=loop_depth,
             )
         return
 
@@ -326,6 +381,22 @@ def _lint_statement(
                 )
             )
         if conditional_depth > 0:
+            if stmt.branch.access_type.upper() == "V":
+                diagnostics.append(
+                    Diagnostic(
+                        code="EVAS-AHDL-W5010",
+                        severity=STATIC_WARNING,
+                        message=(
+                            "potential contribution is switched by runtime "
+                            "control flow; prefer a continuous contribution "
+                            "with a smoothly updated target when possible"
+                        ),
+                        file=filename,
+                        module=module,
+                        rule="conditional-potential-contribution",
+                        spectre_ids=["AHDLLINT-5010"],
+                    )
+                )
             diagnostics.extend(
                 _conditional_analog_operator_diagnostics(
                     stmt.expr,
@@ -352,9 +423,25 @@ def _lint_statement(
                     spectre_ids=["AHDLLINT-5008"],
                 )
             )
+        if _expr_has_any_call(stmt.expr, {"floor", "$floor", "ceil", "$ceil"}):
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5014",
+                    severity=STATIC_WARNING,
+                    message=(
+                        "floor()/ceil() appears on the right-hand side of an "
+                        "analog contribution; this can introduce discontinuous "
+                        "contribution levels"
+                    ),
+                    file=filename,
+                    module=module,
+                    rule="floor-ceil-contribution",
+                    spectre_ids=["AHDLLINT-5014"],
+                )
+            )
         _lint_expr(
             stmt.expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
@@ -367,13 +454,14 @@ def _lint_statement(
                     module,
                 )
             )
+        _lint_assignment_type_conversion(stmt, diagnostics, filename, module, symbol_types)
         _lint_expr(
             stmt.target, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             stmt.value, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
@@ -395,7 +483,7 @@ def _lint_statement(
             )
         _lint_event_expr(
             stmt.event, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         event_is_initial_step = (
             isinstance(stmt.event, va_ast.EventExpr)
@@ -410,87 +498,132 @@ def _lint_statement(
             discrete_vars,
             user_function_names,
             genvar_names,
+            symbol_types,
             conditional_depth=conditional_depth + 1,
             in_event=False if event_is_initial_step else True,
+            loop_depth=loop_depth,
         )
         return
 
     if isinstance(stmt, va_ast.IfStatement):
+        _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.then_body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
+            loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.else_body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
+            loop_depth=loop_depth,
         )
         return
 
     if isinstance(stmt, va_ast.ForStatement):
         loop_var = _assignment_target_name(stmt.init)
-        loop_depth = conditional_depth if loop_var in genvar_names else conditional_depth + 1
+        body_conditional_depth = (
+            conditional_depth if loop_var in genvar_names else conditional_depth + 1
+        )
+        body_loop_depth = loop_depth if loop_var in genvar_names else loop_depth + 1
         _lint_statement(
             stmt.init, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth, in_event=in_event,
+            loop_depth=loop_depth,
         )
+        _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.update, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth, in_event=in_event,
+            loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
-            conditional_depth=loop_depth, in_event=in_event,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
+            conditional_depth=body_conditional_depth, in_event=in_event,
+            loop_depth=body_loop_depth,
         )
         return
 
     if isinstance(stmt, va_ast.WhileStatement):
+        _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names,
+            discrete_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
+            loop_depth=loop_depth + 1,
         )
         return
 
     if isinstance(stmt, va_ast.CaseStatement):
+        if not any(len(item.values) == 0 for item in stmt.items):
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5011",
+                    severity=STATIC_WARNING,
+                    message=(
+                        "case statement has no default branch; Cadence AHDL "
+                        "lint recommends a default to keep behavior defined"
+                    ),
+                    file=filename,
+                    module=module,
+                    rule="case-without-default",
+                    spectre_ids=["AHDLLINT-5011"],
+                )
+            )
         _lint_expr(
             stmt.expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         for item in stmt.items:
             for value in item.values:
                 _lint_expr(
                     value, diagnostics, filename, module, min_transition,
-                    user_function_names,
+                    discrete_vars, user_function_names, symbol_types,
                 )
             _lint_statement(
                 item.body, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, genvar_names,
+                discrete_vars, user_function_names, genvar_names, symbol_types,
                 conditional_depth=conditional_depth + 1, in_event=in_event,
+                loop_depth=loop_depth,
             )
         return
 
     if isinstance(stmt, va_ast.SystemTask):
+        if loop_depth > 0 and stmt.name.lower() in {"$stop", "$finish"}:
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5024",
+                    severity=STATIC_WARNING,
+                    message=(
+                        f"{stmt.name} appears inside a loop; Cadence AHDL lint "
+                        "flags simulator-stop tasks in looping statements"
+                    ),
+                    file=filename,
+                    module=module,
+                    rule="stop-finish-in-loop",
+                    spectre_ids=["AHDLLINT-5024"],
+                )
+            )
         for arg in stmt.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
         return
 
@@ -498,7 +631,7 @@ def _lint_statement(
         for arg in stmt.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
 
 
@@ -508,27 +641,29 @@ def _lint_event_expr(
     filename: str,
     module: str,
     min_transition: float,
+    discrete_vars: Set[str],
     user_function_names: Set[str],
+    symbol_types: Dict[str, va_ast.ParamType],
 ) -> None:
     if isinstance(event, va_ast.CombinedEvent):
         for child in event.events:
             _lint_event_expr(
                 child, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
         return
     for expr in event.args:
         _lint_expr(
             expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
     _lint_expr(
         event.time_tol_expr, diagnostics, filename, module, min_transition,
-        user_function_names,
+        discrete_vars, user_function_names, symbol_types,
     )
     _lint_expr(
         event.expr_tol_expr, diagnostics, filename, module, min_transition,
-        user_function_names,
+        discrete_vars, user_function_names, symbol_types,
     )
 
 
@@ -538,7 +673,9 @@ def _lint_expr(
     filename: str,
     module: str,
     min_transition: float,
+    discrete_vars: Set[str],
     user_function_names: Set[str],
+    symbol_types: Dict[str, va_ast.ParamType],
 ) -> None:
     if expr is None:
         return
@@ -563,33 +700,34 @@ def _lint_expr(
             )
         _lint_expr(
             expr.left, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.right, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.UnaryExpr):
         _lint_expr(
             expr.operand, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.TernaryExpr):
+        _lint_condition_expr(expr.cond, diagnostics, filename, module)
         _lint_expr(
             expr.cond, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.true_expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.false_expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
@@ -597,59 +735,59 @@ def _lint_expr(
         for part in expr.parts:
             _lint_expr(
                 part, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
         return
 
     if isinstance(expr, va_ast.ReplicateExpr):
         _lint_expr(
             expr.count, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.expr, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.ArrayAccess):
         _lint_expr(
             expr.index, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.index2, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.PartSelect):
         _lint_expr(
             expr.msb, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.lsb, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.BranchAccess):
         _lint_expr(
             expr.node1_index, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node2_index, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node1_index2, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node2_index2, diagnostics, filename, module, min_transition,
-            user_function_names,
+            discrete_vars, user_function_names, symbol_types,
         )
         return
 
@@ -657,7 +795,7 @@ def _lint_expr(
         for arg in expr.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
         return
 
@@ -679,6 +817,24 @@ def _lint_expr(
                     spectre_ids=["VACOMP-1519"],
                 )
             )
+        if name in _DISCRETE_ARGUMENT_FUNCTIONS and any(
+            _expr_has_discrete_behavior(arg, discrete_vars) for arg in expr.args
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5018",
+                    severity=STATIC_WARNING,
+                    message=(
+                        f"{expr.name}() receives a discrete-valued argument; "
+                        "Cadence AHDL lint flags discrete values inside "
+                        "continuous function expressions"
+                    ),
+                    file=filename,
+                    module=module,
+                    rule="discrete-function-argument",
+                    spectre_ids=["AHDLLINT-5018"],
+                )
+            )
         if not _is_supported_function(expr.name, user_function_names):
             diagnostics.append(
                 Diagnostic(
@@ -693,7 +849,7 @@ def _lint_expr(
         for arg in expr.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                user_function_names,
+                discrete_vars, user_function_names, symbol_types,
             )
 
 
@@ -720,6 +876,42 @@ def _lint_transition_call(
                 spectre_ids=["AHDLLINT-5007", "AHDLLINT-8004"],
             )
         )
+
+    if len(expr.args) < 3:
+        diagnostics.append(
+            Diagnostic(
+                code="EVAS-AHDL-W5003",
+                severity=STATIC_WARNING,
+                message=(
+                    "transition() has no explicit rise time; provide an "
+                    "implementation rise time rather than relying on defaults"
+                ),
+                file=filename,
+                module=module,
+                rule="transition-missing-rise-time",
+                spectre_ids=["AHDLLINT-5003"],
+            )
+        )
+
+    if len(expr.args) > 1:
+        delay_value = _numeric_value(expr.args[1])
+        if delay_value is not None and (
+            delay_value < 0.0 or 0.0 < delay_value < min_transition
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    code="EVAS-AHDL-W5006",
+                    severity=STATIC_WARNING,
+                    message=(
+                        "transition() delay is negative or smaller than "
+                        f"the lint minimum {min_transition:g}s"
+                    ),
+                    file=filename,
+                    module=module,
+                    rule="tiny-transition-delay",
+                    spectre_ids=["AHDLLINT-5006"],
+                )
+            )
 
     for idx, code in ((2, "EVAS-AHDL-W5004"), (3, "EVAS-AHDL-W5005")):
         if len(expr.args) <= idx:
@@ -748,6 +940,59 @@ def _lint_transition_call(
                     ],
                 )
             )
+
+
+def _lint_condition_expr(
+    expr: Optional[va_ast.Expr],
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+) -> None:
+    if _expr_has_branch_access_equality(expr):
+        diagnostics.append(
+            Diagnostic(
+                code="EVAS-AHDL-W5013",
+                severity=STATIC_WARNING,
+                message=(
+                    "branch access value is compared for exact equality inside "
+                    "a conditional expression; use a tolerance or event-driven "
+                    "threshold crossing instead"
+                ),
+                file=filename,
+                module=module,
+                rule="access-function-exact-equality",
+                spectre_ids=["AHDLLINT-5013"],
+            )
+        )
+
+
+def _lint_assignment_type_conversion(
+    stmt: va_ast.Assignment,
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+    symbol_types: Dict[str, va_ast.ParamType],
+) -> None:
+    target_name = _assignment_target_name(stmt)
+    if target_name is None or symbol_types.get(target_name) != va_ast.ParamType.INTEGER:
+        return
+    compatibility = _expr_integer_compatibility(stmt.value, symbol_types)
+    if compatibility is False:
+        diagnostics.append(
+            Diagnostic(
+                code="EVAS-AHDL-W5023",
+                severity=STATIC_WARNING,
+                message=(
+                    "real-valued expression is assigned to an integer target; "
+                    "use an explicit conversion such as $rtoi() when precision "
+                    "loss is intended"
+                ),
+                file=filename,
+                module=module,
+                rule="implicit-real-to-integer-conversion",
+                spectre_ids=["AHDLLINT-5023"],
+            )
+        )
 
 
 def _assigned_in_events(stmt: va_ast.Statement, in_event: bool = False) -> Set[str]:
@@ -883,12 +1128,35 @@ def _expr_has_call(expr: Optional[va_ast.Expr], call_name: str) -> bool:
     return any(_expr_has_call(child, call_name) for child in _expr_children(expr))
 
 
+def _expr_has_any_call(expr: Optional[va_ast.Expr], call_names: Set[str]) -> bool:
+    if expr is None:
+        return False
+    targets = {name.lower() for name in call_names}
+    if isinstance(expr, va_ast.FunctionCall):
+        return expr.name.lower() in targets or any(
+            _expr_has_any_call(arg, targets) for arg in expr.args
+        )
+    return any(_expr_has_any_call(child, targets) for child in _expr_children(expr))
+
+
 def _expr_contains_branch_access(expr: Optional[va_ast.Expr]) -> bool:
     if expr is None:
         return False
     if isinstance(expr, va_ast.BranchAccess):
         return True
     return any(_expr_contains_branch_access(child) for child in _expr_children(expr))
+
+
+def _expr_has_branch_access_equality(expr: Optional[va_ast.Expr]) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, va_ast.BinaryExpr) and expr.op in {"==", "!="}:
+        return _expr_contains_branch_access(expr.left) or _expr_contains_branch_access(
+            expr.right
+        )
+    return any(
+        _expr_has_branch_access_equality(child) for child in _expr_children(expr)
+    )
 
 
 def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[str]) -> bool:
@@ -918,6 +1186,76 @@ def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[
         _expr_has_discrete_behavior(child, discrete_vars)
         for child in _expr_children(expr)
     )
+
+
+def _expr_integer_compatibility(
+    expr: Optional[va_ast.Expr],
+    symbol_types: Dict[str, va_ast.ParamType],
+) -> Optional[bool]:
+    if expr is None:
+        return None
+    if isinstance(expr, va_ast.NumberLiteral):
+        return float(expr.value).is_integer()
+    if isinstance(expr, va_ast.StringLiteral):
+        return None
+    if isinstance(expr, va_ast.Identifier):
+        symbol_type = symbol_types.get(expr.name)
+        if symbol_type is None:
+            return None
+        return symbol_type == va_ast.ParamType.INTEGER
+    if isinstance(expr, (va_ast.ArrayAccess, va_ast.PartSelect)):
+        symbol_type = symbol_types.get(expr.name)
+        if symbol_type is None:
+            return None
+        return symbol_type == va_ast.ParamType.INTEGER
+    if isinstance(expr, va_ast.BranchAccess):
+        return False
+    if isinstance(expr, va_ast.FunctionCall):
+        name = expr.name.lower()
+        if name in _INTEGER_RETURN_FUNCTIONS:
+            return True
+        if name in _REAL_RETURN_FUNCTIONS:
+            return False
+        return None
+    if isinstance(expr, va_ast.MethodCall):
+        return None
+    if isinstance(expr, va_ast.UnaryExpr):
+        if expr.op in {"!", "~"}:
+            return True
+        return _expr_integer_compatibility(expr.operand, symbol_types)
+    if isinstance(expr, va_ast.BinaryExpr):
+        if expr.op in {"==", "!=", ">", "<", ">=", "<=", "&&", "||"}:
+            return True
+        if expr.op in {"&", "|", "^", "<<", ">>", "%"}:
+            return _merge_integer_compatibility(
+                _expr_integer_compatibility(expr.left, symbol_types),
+                _expr_integer_compatibility(expr.right, symbol_types),
+            )
+        return _merge_integer_compatibility(
+            _expr_integer_compatibility(expr.left, symbol_types),
+            _expr_integer_compatibility(expr.right, symbol_types),
+        )
+    if isinstance(expr, va_ast.TernaryExpr):
+        return _merge_integer_compatibility(
+            _expr_integer_compatibility(expr.true_expr, symbol_types),
+            _expr_integer_compatibility(expr.false_expr, symbol_types),
+        )
+    if isinstance(expr, va_ast.ConcatExpr):
+        return True
+    if isinstance(expr, va_ast.ReplicateExpr):
+        return _expr_integer_compatibility(expr.expr, symbol_types)
+    return None
+
+
+def _merge_integer_compatibility(
+    lhs: Optional[bool],
+    rhs: Optional[bool],
+) -> Optional[bool]:
+    if lhs is False or rhs is False:
+        return False
+    if lhs is True and rhs is True:
+        return True
+    return None
 
 
 _DISCIPLINE_RANGE_TOKENS = {
@@ -1126,6 +1464,32 @@ def _is_abstime_expr(expr: va_ast.Expr) -> bool:
     if isinstance(expr, va_ast.Identifier):
         return expr.name == "$abstime"
     return isinstance(expr, va_ast.FunctionCall) and expr.name == "$abstime"
+
+
+_DISCRETE_ARGUMENT_FUNCTIONS = {
+    "ddt", "idt", "idtmod", "slew",
+    "laplace_nd", "laplace_np", "laplace_zd", "laplace_zp",
+    "zi_nd", "zi_np", "zi_zd", "zi_zp",
+    "limexp", "ln", "log", "exp", "sqrt", "pow",
+    "sin", "cos", "tan", "tanh",
+    "$ln", "$log", "$exp", "$sqrt", "$pow",
+    "$sin", "$cos", "$tan", "$tanh",
+}
+
+_INTEGER_RETURN_FUNCTIONS = {
+    "$rtoi", "floor", "$floor", "ceil", "$ceil", "$random",
+}
+
+_REAL_RETURN_FUNCTIONS = {
+    "transition", "slew", "ddt", "idt", "idtmod",
+    "limexp", "ln", "log", "exp", "sqrt", "abs", "pow", "min", "max",
+    "sin", "cos", "tan", "tanh",
+    "$ln", "$log", "$exp", "$sqrt", "$abs", "$pow", "$min", "$max",
+    "$sin", "$cos", "$tan", "$tanh", "$temperature", "$vt", "$realtime",
+    "white_noise", "flicker_noise", "noise_table",
+    "$rdist_normal", "$rdist_exponential", "$rdist_poisson",
+    "$rdist_chi_square", "$rdist_t", "$rdist_erlang",
+}
 
 
 _SUPPORTED_FUNCTIONS = {

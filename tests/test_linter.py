@@ -180,6 +180,7 @@ def test_conditional_direct_contribution_does_not_error():
 
     diags = lint_source(source)
 
+    assert "EVAS-AHDL-W5010" in _codes(diags)
     assert not has_compat_errors(diags)
 
 
@@ -220,6 +221,42 @@ def test_tiny_transition_times_warn():
     assert not has_compat_errors(diags)
 
 
+def test_transition_missing_rise_time_warns():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module implicit_transition(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ transition(1.0, 0);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5003" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_tiny_positive_transition_delay_warns():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module tiny_delay(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ transition(1.0, 100f, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5006" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
 def test_abstime_exact_equality_warns():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
@@ -235,6 +272,158 @@ def test_abstime_exact_equality_warns():
     diags = lint_source(source)
 
     assert "EVAS-AHDL-W5012" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_access_function_exact_equality_in_condition_warns():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module branch_eq(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            real target;
+            analog begin
+                if (V(inp) == 0.5)
+                    target = 1.0;
+                else
+                    target = 0.0;
+                V(out) <+ transition(target, 0, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5013" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_floor_in_contribution_warns_like_ahdllint_5014():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module floor_drive(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            analog begin
+                V(out) <+ floor(V(inp));
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5014" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_electrical_gnd_name_warns_like_ahdllint_5017():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module named_gnd(gnd, out);
+            input gnd;
+            output out;
+            electrical gnd, out;
+            analog begin
+                V(out, gnd) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5017" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_discrete_function_argument_warns_like_ahdllint_5018():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module discrete_function_arg(out);
+            output out;
+            electrical out;
+            integer mode;
+            analog begin
+                mode = 1;
+                V(out) <+ exp(mode);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5018" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_integer_assignment_from_real_warns_like_ahdllint_5023():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module implicit_integer_cast(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            integer code;
+            analog begin
+                code = V(inp);
+                V(out) <+ transition(code, 0, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5023" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_stop_finish_inside_loop_warns_like_ahdllint_5024():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module stop_in_loop(out);
+            output out;
+            electrical out;
+            integer i;
+            analog begin
+                i = 0;
+                while (i < 2) begin
+                    $finish;
+                    i = i + 1;
+                end
+                V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5024" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_case_without_default_warns_like_ahdllint_5011():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module case_no_default(out);
+            output out;
+            electrical out;
+            integer state;
+            real target;
+            analog begin
+                state = 1;
+                case (state)
+                    0: target = 0.0;
+                    1: target = 1.0;
+                endcase
+                V(out) <+ transition(target, 0, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5011" in _codes(diags)
     assert not has_compat_errors(diags)
 
 
