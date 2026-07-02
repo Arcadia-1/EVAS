@@ -1,0 +1,14 @@
+module branch_exact_equality(inp, out);
+    input inp;
+    output out;
+    electrical inp, out;
+    integer hit;
+
+    analog begin
+        if (V(inp) == 0.0)
+            hit = 1;
+        else
+            hit = 0;
+        V(out) <+ transition(hit, 0, 1n, 1n);
+    end
+endmodule

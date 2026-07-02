@@ -1,0 +1,50 @@
+[
+  {
+    "id": "ahdllint_5003_transition_missing_rise_time",
+    "file": "ahdllint_5003_transition_missing_rise_time.va",
+    "description": "Minimal public case for transition() without an explicit rise/fall time.",
+    "expected_codes": ["EVAS-AHDL-W5003"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5011_case_without_default",
+    "file": "ahdllint_5011_case_without_default.va",
+    "description": "Minimal public case for a runtime case statement without default behavior.",
+    "expected_codes": ["EVAS-AHDL-W5011"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "spectre_event_local_contribution",
+    "file": "spectre_event_local_contribution.va",
+    "description": "Minimal public case for a contribution placed inside an analog event body.",
+    "expected_codes": ["EVAS-COMP-E2157", "EVAS-AHDL-W5010"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Spectre front-end compatibility behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5013_branch_exact_equality",
+    "file": "ahdllint_5013_branch_exact_equality.va",
+    "description": "Minimal public case for exact equality against a branch access value.",
+    "expected_codes": ["EVAS-AHDL-W5013"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5018_discrete_continuous_function_arg",
+    "file": "ahdllint_5018_discrete_continuous_function_arg.va",
+    "description": "Minimal public case for feeding a discrete value to a continuous math function.",
+    "expected_codes": ["EVAS-AHDL-W5008", "EVAS-AHDL-W5018"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5007_transition_continuous_assignment",
+    "file": "ahdllint_5007_transition_continuous_assignment.va",
+    "description": "Minimal public case for transition() fed by a variable assigned from a continuous branch value.",
+    "expected_codes": ["EVAS-AHDL-W5007"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  }
+]

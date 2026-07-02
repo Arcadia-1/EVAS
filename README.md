@@ -60,6 +60,38 @@ evas simulate path/to/tb.scs -o output/mydesign --engine evas-rust
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.
 
+Before a full simulation, you can run a Spectre/AHDL-style static lint pass:
+
+```bash
+evas lint path/to/model.va
+evas lint path/to/tb.scs --format json
+```
+
+`evas lint` follows `ahdl_include` statements in `.scs` files and reports two
+classes of issues: `compat-error` for EVAS/Spectre subset problems that should
+block a candidate, and warning diagnostics for AHDL-style modeling risks such as
+discrete signals directly driving analog contributions or suspicious transition
+usage. Lint warnings do not change simulation pass/fail status.
+Current warning coverage includes a Cadence AHDL-inspired subset for
+transition timing and simple continuous-input dataflow, conditional potential
+contributions, case defaults, exact branch equality tests, floor/ceil
+contribution discontinuities, `gnd` node portability, discrete function
+arguments, implicit integer casts, and simulator-stop tasks inside loops.
+Each lint diagnostic is backed by a small rule registry that records its code,
+severity, canonical rule name, phase, source category, and related
+Cadence/Spectre identifiers when known.
+Diagnostics produced from parsed Verilog-A nodes include source line and column
+coordinates when available, so repair tools can point users back to the
+triggering statement or expression.
+Compatibility diagnostics include Cadence/Spectre-aligned cases such as
+conditionally executed analog operators (`transition`, `slew`, `idt`) and
+discipline vector ranges that depend on runtime variables instead of numeric or
+parameter constant expressions.
+The lint regression suite also keeps a small set of public oracle fixtures under
+`tests/fixtures/lint_oracle_cases`. These cases record distilled expected EVAS
+diagnostic codes only; raw Cadence/Spectre logs and generated certification
+reports are not committed.
+
 **Minimal testbench template** (`.scs`):
 
 ```spectre

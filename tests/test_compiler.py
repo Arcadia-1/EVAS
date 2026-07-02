@@ -591,6 +591,13 @@ class TestParserVariables:
         assert v.array_hi == 7
         assert v.array_lo == 0
 
+    def test_parameterized_array_variable(self):
+        m = _parse("module m(); parameter integer N = 4; integer arr[N-1:0]; endmodule")
+        v = next(v for v in m.variables if v.name == "arr")
+        assert v.is_array
+        assert v.array_hi == 3
+        assert v.array_lo == 0
+
     def test_two_dimensional_array_variable(self):
         m = _parse("module m(); integer arr[0:1][0:1]; endmodule")
         v = next(v for v in m.variables if v.name == "arr")
@@ -1444,6 +1451,39 @@ class TestParserPortDecls:
         pd = next(p for p in m.port_decls if p.name == "DOUT")
         assert pd.is_array
         assert pd.array_hi == 3
+        assert pd.array_lo == 0
+
+    def test_parameterized_electrical_array_range(self):
+        src = """
+        module m(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            parameter integer N = 4;
+            electrical [N-1:0] tmp;
+        endmodule
+        """
+        m = _parse(src)
+        pd = next(p for p in m.port_decls if p.name == "tmp")
+        assert pd.is_array
+        assert pd.array_hi == 3
+        assert pd.array_lo == 0
+
+    def test_parameterized_range_uses_previous_parameter_values(self):
+        src = """
+        module m(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            parameter integer N = 4;
+            parameter integer EXTRA = 2;
+            electrical [(N*EXTRA)-1:0] tmp;
+        endmodule
+        """
+        m = _parse(src)
+        pd = next(p for p in m.port_decls if p.name == "tmp")
+        assert pd.is_array
+        assert pd.array_hi == 7
         assert pd.array_lo == 0
 
 

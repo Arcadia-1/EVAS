@@ -1,6 +1,6 @@
 # CLI Reference
 
-EVAS provides three subcommands:
+EVAS provides four subcommands:
 
 ## `evas list`
 
@@ -55,3 +55,44 @@ evas simulate path/to/tb_mydesign.scs --engine evas-rust
 | `--engine` | `python` | Engine override: `python`, `evas-rust`, `evas2`, or `rust2` |
 
 Exit code is `0` on success, `1` on simulation error.
+
+## `evas lint <file.va|file.scs>`
+
+Run EVAS/Spectre-style static checks without simulating.
+
+```bash
+evas lint path/to/model.va
+evas lint path/to/tb_mydesign.scs --format json
+```
+
+For `.scs` inputs, EVAS parses the netlist and follows `ahdl_include` entries.
+Diagnostics use `compat-error` for EVAS/Spectre subset issues and warning
+severities for AHDL-style modeling risks. The command exits with `1` only when
+at least one `compat-error` is reported.
+
+Current warning diagnostics cover a Cadence AHDL-inspired static subset:
+transition timing and simple continuous-input dataflow, conditional potential
+contributions, case defaults, exact branch equality tests, floor/ceil
+contribution discontinuities, `gnd` node portability, discrete function
+arguments, implicit integer casts, and simulator-stop tasks inside loops.
+The implementation keeps diagnostic metadata in a rule registry, including the
+EVAS code, severity, rule name, lint phase, source category, and related
+Cadence/Spectre identifiers when known.
+Diagnostics emitted from parsed Verilog-A nodes include line and column
+coordinates when available, which makes CLI output and JSON reports usable as
+repair-loop anchors.
+
+Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
+front-end failures when possible. Current examples include conditionally
+executed analog operators such as `transition`, `slew`, and `idt`, plus
+discipline vector ranges that use runtime variables instead of numeric or
+parameter constant expressions.
+The repository keeps small public oracle fixtures in
+`tests/fixtures/lint_oracle_cases` for lint regression tests. These fixtures
+store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre
+reports or generated certification output.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--format` | `text` | Diagnostic output: `text` or `json` |
+| `--min-transition` | `1e-12` | Minimum transition rise/fall time used by lint warnings |

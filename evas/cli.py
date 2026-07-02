@@ -148,6 +148,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lint(args: argparse.Namespace) -> int:
+    import json
+
+    from evas.compiler.linter import has_compat_errors, lint_file
+
+    diagnostics = lint_file(args.input, min_transition=args.min_transition)
+    if args.format == "json":
+        print(json.dumps([d.to_dict() for d in diagnostics], indent=2, sort_keys=True))
+    else:
+        if diagnostics:
+            for diagnostic in diagnostics:
+                print(diagnostic.format_text())
+        else:
+            print("No EVAS lint diagnostics.")
+    return 1 if has_compat_errors(diagnostics) else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="evas",
@@ -184,6 +201,26 @@ def main() -> None:
     # evas list
     p_list = sub.add_parser("list", help="List all available examples")
     p_list.set_defaults(func=cmd_list)
+
+    # evas lint
+    p_lint = sub.add_parser(
+        "lint",
+        help="Run EVAS/Spectre-style static checks on .va or .scs inputs",
+    )
+    p_lint.add_argument("input", help="Verilog-A file or Spectre .scs netlist")
+    p_lint.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Diagnostic output format (default: text)",
+    )
+    p_lint.add_argument(
+        "--min-transition",
+        type=float,
+        default=1e-12,
+        help="Minimum transition rise/fall time used for lint warnings (default: 1e-12)",
+    )
+    p_lint.set_defaults(func=cmd_lint)
 
     args = parser.parse_args()
     sys.exit(args.func(args))

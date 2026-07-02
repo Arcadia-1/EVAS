@@ -1,0 +1,11 @@
+module transition_continuous_assignment(inp, out);
+    input inp;
+    output out;
+    electrical inp, out;
+    real target;
+
+    analog begin
+        target = V(inp);
+        V(out) <+ transition(target, 0, 1n, 1n);
+    end
+endmodule
