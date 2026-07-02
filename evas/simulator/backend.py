@@ -341,6 +341,7 @@ class CompiledModel:
         self._file_handles: Dict[int, Any] = {}  # fd → file object
         self._next_fd: int = 1
         self._child_models: List["CompiledModel"] = []
+        self._analog_primitives: List[Dict[str, Any]] = []
         self._parent_model: Optional["CompiledModel"] = None
         self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
@@ -5724,22 +5725,36 @@ class _ModuleCompiler:
             lines.append(f"        _entry = self._module_registry.get({inst.module_name!r})")
             lines.append("        if _entry is None:")
             lines.append(f"            if {inst.module_name!r} in {{'resistor', 'isource', 'vsource', 'capacitor', 'inductor'}}:")
+            lines.append("                _primitive_params = {}")
+            for override in inst.parameter_overrides:
+                value = self._compile_expr(override.expr)
+                lines.append(f"                _primitive_params[{override.param_name!r}] = {value}")
+            lines.append("                _primitive_connections = []")
+            for c in inst.connections:
+                target = self._compile_instance_target(c.expr)
+                lines.append(
+                    f"                _primitive_connections.append(({c.port_name!r}, {target}))"
+                )
             lines.append(
-                f"                raise CompilationError('Unsupported analog primitive instance: "
-                f"{inst.module_name} in {mod.name}.{inst.instance_name}; "
-                "EVAS behavioral mode does not implement conservative analog primitives')"
+                "                self._analog_primitives.append({"
+                f"'primitive': {inst.module_name!r}, "
+                f"'instance': {inst.instance_name!r}, "
+                "'parameters': _primitive_params, "
+                "'connections': _primitive_connections})"
             )
-            lines.append(f"            raise CompilationError('Unknown child module: {inst.module_name} in {mod.name}.{inst.instance_name}')")
-            lines.append("        _child_cls, _child_mod = _entry")
-            lines.append(f"        {child_var} = _child_cls()")
-            lines.append(f"        {child_var}._parent_model = self")
+            lines.append("            else:")
+            lines.append(f"                raise CompilationError('Unknown child module: {inst.module_name} in {mod.name}.{inst.instance_name}')")
+            lines.append("        else:")
+            lines.append("            _child_cls, _child_mod = _entry")
+            lines.append(f"            {child_var} = _child_cls()")
+            lines.append(f"            {child_var}._parent_model = self")
             for override in inst.parameter_overrides:
                 value = self._compile_expr(override.expr)
                 lines.append(
-                    f"        self._apply_child_param_override("
+                    f"            self._apply_child_param_override("
                     f"{child_var}, _child_mod, {override.param_name!r}, {value})"
                 )
-            lines.append(f"        {child_var}.node_map = {{}}")
+            lines.append(f"            {child_var}.node_map = {{}}")
             # Positional and named port connections.
             for ci, c in enumerate(inst.connections):
                 if c.port_name is not None:
@@ -5747,12 +5762,12 @@ class _ModuleCompiler:
                 else:
                     port_expr = f"_child_mod.ports[{ci}] if {ci} < len(_child_mod.ports) else None"
                 target = self._compile_instance_target(c.expr)
-                lines.append(f"        _pname = {port_expr!s}")
-                lines.append("        if _pname is not None:")
-                lines.append(f"            _target = {target}")
-                lines.append("            _mapped = f'@parent:{_target}'")
-                lines.append(f"            {child_var}.node_map[_pname] = _mapped")
-            lines.append(f"        self._child_models.append({child_var})")
+                lines.append(f"            _pname = {port_expr!s}")
+                lines.append("            if _pname is not None:")
+                lines.append(f"                _target = {target}")
+                lines.append("                _mapped = f'@parent:{_target}'")
+                lines.append(f"                {child_var}.node_map[_pname] = _mapped")
+            lines.append(f"            self._child_models.append({child_var})")
 
         lines.extend(self._compile_user_subprogram_methods())
 

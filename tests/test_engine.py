@@ -9570,13 +9570,43 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([3.0, 3.0])
 
-    def test_analog_primitive_instance_reports_behavioral_boundary(self):
+    def test_analog_primitive_instance_records_inert_metadata(self):
         src = """\
 `include "disciplines.vams"
 module primitive_wrapper(inout electrical p, inout electrical n);
-    resistor r1 (p, n);
+    parameter real rload = 1000.0;
+    resistor #(.r(rload)) r1 (p, n);
 endmodule
 """
         ModelCls = compile_module(parse(src))
-        with pytest.raises(CompilationError, match="Unsupported analog primitive instance: resistor"):
-            ModelCls()
+        model = ModelCls()
+
+        assert model._child_models == []
+        assert model._analog_primitives == [
+            {
+                "primitive": "resistor",
+                "instance": "r1",
+                "parameters": {"r": pytest.approx(1000.0)},
+                "connections": [(None, "p"), (None, "n")],
+            }
+        ]
+
+    def test_isource_primitive_instance_records_parameter_expression(self):
+        src = """\
+`include "disciplines.vams"
+module primitive_wrapper(inout electrical p, inout electrical n);
+    parameter real ibias = 1u;
+    isource #(.dc(ibias)) ib (n, p);
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model._analog_primitives == [
+            {
+                "primitive": "isource",
+                "instance": "ib",
+                "parameters": {"dc": pytest.approx(1e-6)},
+                "connections": [(None, "n"), (None, "p")],
+            }
+        ]
