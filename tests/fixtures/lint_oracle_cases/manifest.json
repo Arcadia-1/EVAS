@@ -38,5 +38,13 @@
     "expected_codes": ["EVAS-AHDL-W5008", "EVAS-AHDL-W5018"],
     "forbidden_codes": ["EVAS-COMP-EPARSE"],
     "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5007_transition_continuous_assignment",
+    "file": "ahdllint_5007_transition_continuous_assignment.va",
+    "description": "Minimal public case for transition() fed by a variable assigned from a continuous branch value.",
+    "expected_codes": ["EVAS-AHDL-W5007"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
   }
 ]

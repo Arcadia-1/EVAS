@@ -302,6 +302,49 @@ def test_transition_continuous_input_warns():
     assert not has_compat_errors(diags)
 
 
+def test_transition_continuous_input_warns_through_assignment():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module transition_continuous_assignment(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            real target;
+            analog begin
+                target = V(inp);
+                V(out) <+ transition(target, 0, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5007" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_transition_event_latched_target_does_not_warn_5007():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module transition_event_latched(clk, inp, out);
+            input clk, inp;
+            output out;
+            electrical clk, inp, out;
+            real target;
+            analog begin
+                @(cross(V(clk) - 0.5, +1))
+                    target = V(inp);
+                V(out) <+ transition(target, 0, 1n, 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5007" not in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
 def test_tiny_transition_times_warn():
     source = textwrap.dedent("""\
         `include "disciplines.vams"

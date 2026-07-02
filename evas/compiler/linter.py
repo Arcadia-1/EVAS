@@ -353,6 +353,17 @@ def _lint_module(
             if newly_discrete.issubset(discrete_vars):
                 break
             discrete_vars.update(newly_discrete)
+        continuous_vars: Set[str] = set()
+        for _ in range(8):
+            newly_continuous = _assigned_from_continuous_expr(
+                module.analog_block.body,
+                discrete_vars,
+                continuous_vars,
+            )
+            newly_continuous.difference_update(discrete_vars)
+            if newly_continuous.issubset(continuous_vars):
+                break
+            continuous_vars.update(newly_continuous)
         _lint_statement(
             module.analog_block.body,
             diagnostics,
@@ -360,6 +371,7 @@ def _lint_module(
             module.name,
             min_transition,
             discrete_vars,
+            continuous_vars,
             user_function_names,
             genvar_names,
             symbol_types,
@@ -376,6 +388,7 @@ def _lint_module(
             module.name,
             min_transition,
             discrete_vars,
+            set(),
             user_function_names,
             genvar_names,
             symbol_types,
@@ -391,6 +404,7 @@ def _lint_module(
             module.name,
             min_transition,
             discrete_vars,
+            set(),
             user_function_names,
             genvar_names,
             symbol_types,
@@ -449,6 +463,7 @@ def _lint_statement(
     module: str,
     min_transition: float,
     discrete_vars: Set[str],
+    continuous_vars: Set[str],
     user_function_names: Set[str],
     genvar_names: Set[str],
     symbol_types: Dict[str, va_ast.ParamType],
@@ -463,7 +478,7 @@ def _lint_statement(
         for child in stmt.statements:
             _lint_statement(
                 child, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, genvar_names,
+                discrete_vars, continuous_vars, user_function_names, genvar_names,
                 symbol_types,
                 conditional_depth=conditional_depth, in_event=in_event,
                 loop_depth=loop_depth,
@@ -540,7 +555,7 @@ def _lint_statement(
             )
         _lint_expr(
             stmt.expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
@@ -556,11 +571,11 @@ def _lint_statement(
         _lint_assignment_type_conversion(stmt, diagnostics, filename, module, symbol_types)
         _lint_expr(
             stmt.target, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             stmt.value, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
@@ -580,7 +595,7 @@ def _lint_statement(
             )
         _lint_event_expr(
             stmt.event, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         event_is_initial_step = (
             isinstance(stmt.event, va_ast.EventExpr)
@@ -593,6 +608,7 @@ def _lint_statement(
             module,
             min_transition,
             discrete_vars,
+            continuous_vars,
             user_function_names,
             genvar_names,
             symbol_types,
@@ -606,17 +622,17 @@ def _lint_statement(
         _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.then_body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.else_body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth,
         )
@@ -630,24 +646,24 @@ def _lint_statement(
         body_loop_depth = loop_depth if loop_var in genvar_names else loop_depth + 1
         _lint_statement(
             stmt.init, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth, in_event=in_event,
             loop_depth=loop_depth,
         )
         _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.update, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth, in_event=in_event,
             loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=body_conditional_depth, in_event=in_event,
             loop_depth=body_loop_depth,
         )
@@ -657,11 +673,11 @@ def _lint_statement(
         _lint_condition_expr(stmt.cond, diagnostics, filename, module)
         _lint_expr(
             stmt.cond, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, genvar_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth + 1,
         )
@@ -683,17 +699,17 @@ def _lint_statement(
             )
         _lint_expr(
             stmt.expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         for item in stmt.items:
             for value in item.values:
                 _lint_expr(
                     value, diagnostics, filename, module, min_transition,
-                    discrete_vars, user_function_names, symbol_types,
+                    discrete_vars, continuous_vars, user_function_names, symbol_types,
                 )
             _lint_statement(
                 item.body, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, genvar_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
                 conditional_depth=conditional_depth + 1, in_event=in_event,
                 loop_depth=loop_depth,
             )
@@ -716,7 +732,7 @@ def _lint_statement(
         for arg in stmt.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
         return
 
@@ -724,7 +740,7 @@ def _lint_statement(
         for arg in stmt.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
 
 
@@ -735,6 +751,7 @@ def _lint_event_expr(
     module: str,
     min_transition: float,
     discrete_vars: Set[str],
+    continuous_vars: Set[str],
     user_function_names: Set[str],
     symbol_types: Dict[str, va_ast.ParamType],
 ) -> None:
@@ -742,21 +759,21 @@ def _lint_event_expr(
         for child in event.events:
             _lint_event_expr(
                 child, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
         return
     for expr in event.args:
         _lint_expr(
             expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
     _lint_expr(
         event.time_tol_expr, diagnostics, filename, module, min_transition,
-        discrete_vars, user_function_names, symbol_types,
+        discrete_vars, continuous_vars, user_function_names, symbol_types,
     )
     _lint_expr(
         event.expr_tol_expr, diagnostics, filename, module, min_transition,
-        discrete_vars, user_function_names, symbol_types,
+        discrete_vars, continuous_vars, user_function_names, symbol_types,
     )
 
 
@@ -767,6 +784,7 @@ def _lint_expr(
     module: str,
     min_transition: float,
     discrete_vars: Set[str],
+    continuous_vars: Set[str],
     user_function_names: Set[str],
     symbol_types: Dict[str, va_ast.ParamType],
 ) -> None:
@@ -791,18 +809,18 @@ def _lint_expr(
             )
         _lint_expr(
             expr.left, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.right, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.UnaryExpr):
         _lint_expr(
             expr.operand, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
@@ -810,15 +828,15 @@ def _lint_expr(
         _lint_condition_expr(expr.cond, diagnostics, filename, module)
         _lint_expr(
             expr.cond, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.true_expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.false_expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
@@ -826,59 +844,59 @@ def _lint_expr(
         for part in expr.parts:
             _lint_expr(
                 part, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
         return
 
     if isinstance(expr, va_ast.ReplicateExpr):
         _lint_expr(
             expr.count, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.expr, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.ArrayAccess):
         _lint_expr(
             expr.index, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.index2, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.PartSelect):
         _lint_expr(
             expr.msb, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.lsb, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
     if isinstance(expr, va_ast.BranchAccess):
         _lint_expr(
             expr.node1_index, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node2_index, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node1_index2, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         _lint_expr(
             expr.node2_index2, diagnostics, filename, module, min_transition,
-            discrete_vars, user_function_names, symbol_types,
+            discrete_vars, continuous_vars, user_function_names, symbol_types,
         )
         return
 
@@ -886,7 +904,7 @@ def _lint_expr(
         for arg in expr.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
         return
 
@@ -895,6 +913,7 @@ def _lint_expr(
         if name == "transition":
             _lint_transition_call(
                 expr, diagnostics, filename, module, min_transition,
+                continuous_vars,
             )
         elif name == "ddt" and any(_expr_has_call(arg, "ddt") for arg in expr.args):
             diagnostics.append(
@@ -935,7 +954,7 @@ def _lint_expr(
         for arg in expr.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
-                discrete_vars, user_function_names, symbol_types,
+                discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
 
 
@@ -945,8 +964,12 @@ def _lint_transition_call(
     filename: str,
     module: str,
     min_transition: float,
+    continuous_vars: Set[str],
 ) -> None:
-    if expr.args and _expr_contains_branch_access(expr.args[0]):
+    if expr.args and (
+        _expr_contains_branch_access(expr.args[0])
+        or _expr_references_any(expr.args[0], continuous_vars)
+    ):
         diagnostics.append(
             _diag(
                 code="EVAS-AHDL-W5007",
@@ -1132,6 +1155,110 @@ def _assigned_from_discrete_expr(
     return names
 
 
+def _assigned_from_continuous_expr(
+    stmt: va_ast.Statement,
+    discrete_vars: Set[str],
+    continuous_vars: Set[str],
+    in_event: bool = False,
+) -> Set[str]:
+    names: Set[str] = set()
+    if stmt is None:
+        return names
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            names.update(
+                _assigned_from_continuous_expr(
+                    child,
+                    discrete_vars,
+                    continuous_vars,
+                    in_event,
+                )
+            )
+    elif isinstance(stmt, va_ast.Assignment):
+        target = _assignment_target_name(stmt)
+        if (
+            target
+            and not in_event
+            and _expr_has_continuous_behavior(
+                stmt.value,
+                discrete_vars,
+                continuous_vars,
+            )
+        ):
+            names.add(target)
+    elif isinstance(stmt, va_ast.EventStatement):
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.body,
+                discrete_vars,
+                continuous_vars,
+                True,
+            )
+        )
+    elif isinstance(stmt, va_ast.IfStatement):
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.then_body,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.else_body,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.ForStatement):
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.init,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.update,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.body,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.WhileStatement):
+        names.update(
+            _assigned_from_continuous_expr(
+                stmt.body,
+                discrete_vars,
+                continuous_vars,
+                in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.CaseStatement):
+        for item in stmt.items:
+            names.update(
+                _assigned_from_continuous_expr(
+                    item.body,
+                    discrete_vars,
+                    continuous_vars,
+                    in_event,
+                )
+            )
+    return names
+
+
 def _assignment_target_name(assign: Optional[va_ast.Assignment]) -> Optional[str]:
     if assign is None:
         return None
@@ -1236,6 +1363,18 @@ def _expr_contains_branch_access(expr: Optional[va_ast.Expr]) -> bool:
     return any(_expr_contains_branch_access(child) for child in _expr_children(expr))
 
 
+def _expr_references_any(expr: Optional[va_ast.Expr], names: Set[str]) -> bool:
+    if expr is None or not names:
+        return False
+    if isinstance(expr, va_ast.Identifier):
+        return expr.name in names
+    if isinstance(expr, (va_ast.ArrayAccess, va_ast.PartSelect)):
+        return expr.name in names or any(
+            _expr_references_any(child, names) for child in _expr_children(expr)
+        )
+    return any(_expr_references_any(child, names) for child in _expr_children(expr))
+
+
 def _expr_branch_access_equality(
     expr: Optional[va_ast.Expr],
 ) -> Optional[va_ast.BinaryExpr]:
@@ -1278,6 +1417,28 @@ def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[
         )
     return any(
         _expr_has_discrete_behavior(child, discrete_vars)
+        for child in _expr_children(expr)
+    )
+
+
+def _expr_has_continuous_behavior(
+    expr: Optional[va_ast.Expr],
+    discrete_vars: Set[str],
+    continuous_vars: Set[str],
+) -> bool:
+    if expr is None or _expr_has_discrete_behavior(expr, discrete_vars):
+        return False
+    if isinstance(expr, va_ast.BranchAccess):
+        return True
+    if isinstance(expr, va_ast.Identifier):
+        return expr.name in continuous_vars
+    if isinstance(expr, (va_ast.ArrayAccess, va_ast.PartSelect)):
+        return expr.name in continuous_vars or any(
+            _expr_has_continuous_behavior(child, discrete_vars, continuous_vars)
+            for child in _expr_children(expr)
+        )
+    return any(
+        _expr_has_continuous_behavior(child, discrete_vars, continuous_vars)
         for child in _expr_children(expr)
     )
 

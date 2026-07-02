@@ -71,10 +71,10 @@ severities for AHDL-style modeling risks. The command exits with `1` only when
 at least one `compat-error` is reported.
 
 Current warning diagnostics cover a Cadence AHDL-inspired static subset:
-transition timing, conditional potential contributions, case defaults, exact
-branch equality tests, floor/ceil contribution discontinuities, `gnd` node
-portability, discrete function arguments, implicit integer casts, and
-simulator-stop tasks inside loops.
+transition timing and simple continuous-input dataflow, conditional potential
+contributions, case defaults, exact branch equality tests, floor/ceil
+contribution discontinuities, `gnd` node portability, discrete function
+arguments, implicit integer casts, and simulator-stop tasks inside loops.
 The implementation keeps diagnostic metadata in a rule registry, including the
 EVAS code, severity, rule name, lint phase, source category, and related
 Cadence/Spectre identifiers when known.
