@@ -1,6 +1,6 @@
 # CLI Reference
 
-EVAS provides three subcommands:
+EVAS provides four subcommands:
 
 ## `evas list`
 
@@ -55,3 +55,22 @@ evas simulate path/to/tb_mydesign.scs --engine evas-rust
 | `--engine` | `python` | Engine override: `python`, `evas-rust`, `evas2`, or `rust2` |
 
 Exit code is `0` on success, `1` on simulation error.
+
+## `evas lint <file.va|file.scs>`
+
+Run EVAS/Spectre-style static checks without simulating.
+
+```bash
+evas lint path/to/model.va
+evas lint path/to/tb_mydesign.scs --format json
+```
+
+For `.scs` inputs, EVAS parses the netlist and follows `ahdl_include` entries.
+Diagnostics use `compat-error` for EVAS/Spectre subset issues and warning
+severities for AHDL-style modeling risks. The command exits with `1` only when
+at least one `compat-error` is reported.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--format` | `text` | Diagnostic output: `text` or `json` |
+| `--min-transition` | `1e-12` | Minimum transition rise/fall time used by lint warnings |

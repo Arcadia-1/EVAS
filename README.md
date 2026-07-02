@@ -60,6 +60,19 @@ evas simulate path/to/tb.scs -o output/mydesign --engine evas-rust
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.
 
+Before a full simulation, you can run a Spectre/AHDL-style static lint pass:
+
+```bash
+evas lint path/to/model.va
+evas lint path/to/tb.scs --format json
+```
+
+`evas lint` follows `ahdl_include` statements in `.scs` files and reports two
+classes of issues: `compat-error` for EVAS/Spectre subset problems that should
+block a candidate, and warning diagnostics for AHDL-style modeling risks such as
+discrete signals directly driving analog contributions or suspicious transition
+usage. Lint warnings do not change simulation pass/fail status.
+
 **Minimal testbench template** (`.scs`):
 
 ```spectre
