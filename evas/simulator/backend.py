@@ -15333,7 +15333,7 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_zp(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {poles})"
             return f"self._laplace_zp({base_key!r}, time, {x}, {zeros}, {poles})"
-        if name in {'zi_nd', 'zi_np'}:
+        if name in {'zi_nd', 'zi_np', 'zi_zd'}:
             base_key = self._alloc_stateful_func_key("zi", expr)
             x = args[0] if len(args) > 0 else "0.0"
             num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
@@ -15343,7 +15343,7 @@ class _ModuleCompiler:
                 return f"self._zi_nd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {den}, {interval})"
             return f"self._zi_nd({base_key!r}, time, {x}, {num}, {den}, {interval})"
         if name in {
-            'zi_zd', 'zi_zp',
+            'zi_zp',
         }:
             return args[0] if args else "0.0"
         if name == '$rdist_normal':
