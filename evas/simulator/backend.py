@@ -4927,6 +4927,31 @@ class CompiledModel:
         tau = 1.0 / abs(pole_values[0])
         return self._laplace_first_order_update(key, time, target, tau)
 
+    def _laplace_zd(self, key: str, time: float, x: float, zeros: Any, den: Any) -> float:
+        """
+        Minimal behavioral laplace_zd approximation for event-level tests.
+
+        Supports the first-order denominator form zeros={z0}, den={d0,d1},
+        interpreted as z0 / (d0 + d1*s). Unsupported coefficient shapes
+        conservatively return x, matching the legacy compile-supported
+        behavior.
+        """
+        try:
+            zero_values = [float(v) for v in zeros]
+            den_values = [float(v) for v in den]
+        except Exception:
+            return float(x)
+        if len(zero_values) != 1 or len(den_values) != 2:
+            return float(x)
+        d0 = den_values[0]
+        d1 = den_values[1]
+        if d0 == 0.0 or d1 == 0.0:
+            return float(x)
+
+        target = (zero_values[0] / d0) * float(x)
+        tau = abs(d1 / d0)
+        return self._laplace_first_order_update(key, time, target, tau)
+
     @staticmethod
     def _limexp(x: Any) -> float:
         x_f = float(x)
@@ -15209,8 +15234,16 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_np(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {poles})"
             return f"self._laplace_np({base_key!r}, time, {x}, {num}, {poles})"
+        if name == 'laplace_zd':
+            base_key = self._alloc_stateful_func_key("laplace", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            zeros = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            den = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            if self._in_loop_var:
+                return f"self._laplace_zd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {den})"
+            return f"self._laplace_zd({base_key!r}, time, {x}, {zeros}, {den})"
         if name in {
-            'laplace_zd', 'laplace_zp',
+            'laplace_zp',
             'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
         }:
             return args[0] if args else "0.0"
