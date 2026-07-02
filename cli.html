@@ -257,7 +257,7 @@
         <article role="main" id="furo-main-content">
           <section id="cli-reference">
 <h1>CLI Reference<a class="headerlink" href="#cli-reference" title="Link to this heading">¶</a></h1>
-<p>EVAS provides three subcommands:</p>
+<p>EVAS provides four subcommands:</p>
 <section id="evas-list">
 <h2><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">list</span></code><a class="headerlink" href="#evas-list" title="Link to this heading">¶</a></h2>
 <p>Print all bundled example names.</p>
@@ -320,6 +320,58 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.
 </table>
 </div>
 <p>Exit code is <code class="docutils literal notranslate"><span class="pre">0</span></code> on success, <code class="docutils literal notranslate"><span class="pre">1</span></code> on simulation error.</p>
+</section>
+<section id="evas-lint-file-va-file-scs">
+<h2><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span> <span class="pre">&lt;file.va|file.scs&gt;</span></code><a class="headerlink" href="#evas-lint-file-va-file-scs" title="Link to this heading">¶</a></h2>
+<p>Run EVAS/Spectre-style static checks without simulating.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>lint<span class="w"> </span>path/to/model.va
+evas<span class="w"> </span>lint<span class="w"> </span>path/to/tb_mydesign.scs<span class="w"> </span>--format<span class="w"> </span>json
+</pre></div>
+</div>
+<p>For <code class="docutils literal notranslate"><span class="pre">.scs</span></code> inputs, EVAS parses the netlist and follows <code class="docutils literal notranslate"><span class="pre">ahdl_include</span></code> entries.
+Diagnostics use <code class="docutils literal notranslate"><span class="pre">compat-error</span></code> for EVAS/Spectre subset issues and warning
+severities for AHDL-style modeling risks. The command exits with <code class="docutils literal notranslate"><span class="pre">1</span></code> only when
+at least one <code class="docutils literal notranslate"><span class="pre">compat-error</span></code> is reported.</p>
+<p>Current warning diagnostics cover a Cadence AHDL-inspired static subset:
+transition timing and simple continuous-input dataflow, conditional potential
+contributions, case defaults, exact branch equality tests, floor/ceil
+contribution discontinuities, <code class="docutils literal notranslate"><span class="pre">gnd</span></code> node portability, discrete function
+arguments, implicit integer casts, and simulator-stop tasks inside loops.
+The implementation keeps diagnostic metadata in a rule registry, including the
+EVAS code, severity, rule name, lint phase, source category, and related
+Cadence/Spectre identifiers when known.
+Diagnostics emitted from parsed Verilog-A nodes include line and column
+coordinates when available, which makes CLI output and JSON reports usable as
+repair-loop anchors.</p>
+<p>Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
+front-end failures when possible. Current examples include conditionally
+executed analog operators such as <code class="docutils literal notranslate"><span class="pre">transition</span></code>, <code class="docutils literal notranslate"><span class="pre">slew</span></code>, and <code class="docutils literal notranslate"><span class="pre">idt</span></code>, plus
+discipline vector ranges that use runtime variables instead of numeric or
+parameter constant expressions.
+The repository keeps small public oracle fixtures in
+<code class="docutils literal notranslate"><span class="pre">tests/fixtures/lint_oracle_cases</span></code> for lint regression tests. These fixtures
+store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre
+reports or generated certification output.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Option</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--format</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">text</span></code></p></td>
+<td><p>Diagnostic output: <code class="docutils literal notranslate"><span class="pre">text</span></code> or <code class="docutils literal notranslate"><span class="pre">json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--min-transition</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1e-12</span></code></p></td>
+<td><p>Minimum transition rise/fall time used by lint warnings</p></td>
+</tr>
+</tbody>
+</table>
+</div>
 </section>
 </section>
 
@@ -400,6 +452,7 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.
 <li><a class="reference internal" href="#evas-list"><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">list</span></code></a></li>
 <li><a class="reference internal" href="#evas-run-name"><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span> <span class="pre">&lt;name&gt;</span></code></a></li>
 <li><a class="reference internal" href="#evas-simulate-file-scs"><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span> <span class="pre">&lt;file.scs&gt;</span></code></a></li>
+<li><a class="reference internal" href="#evas-lint-file-va-file-scs"><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span> <span class="pre">&lt;file.va|file.scs&gt;</span></code></a></li>
 </ul>
 </li>
 </ul>
