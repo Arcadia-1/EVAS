@@ -4855,6 +4855,33 @@ class CompiledModel:
         st["last_eval_t"] = t
         return float(st["y"])
 
+    def _laplace_first_order_update(
+        self,
+        key: str,
+        time: float,
+        target: float,
+        tau: float,
+    ) -> float:
+        if self._laplace_states is None:
+            self._laplace_states = {}
+        t = float(time)
+        if key not in self._laplace_states:
+            self._laplace_states[key] = {"last_t": t, "y": target, "last_eval_t": t}
+            return target
+        st = self._laplace_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        dt = t - float(st["last_t"])
+        if dt > 0.0 and tau > 0.0:
+            alpha = 1.0 - math.exp(-dt / tau)
+            st["y"] = float(st["y"]) + alpha * (target - float(st["y"]))
+            st["last_t"] = t
+        elif dt < 0.0:
+            st["y"] = target
+            st["last_t"] = t
+        st["last_eval_t"] = t
+        return float(st["y"])
+
     def _laplace_nd(self, key: str, time: float, x: float, num: Any, den: Any) -> float:
         """
         Minimal behavioral laplace_nd approximation.
@@ -4876,27 +4903,29 @@ class CompiledModel:
         if d0 == 0.0 or d1 == 0.0:
             return float(x)
 
-        if self._laplace_states is None:
-            self._laplace_states = {}
-        t = float(time)
         target = (num_values[0] / d0) * float(x)
         tau = abs(d1 / d0)
-        if key not in self._laplace_states:
-            self._laplace_states[key] = {"last_t": t, "y": target, "last_eval_t": t}
-            return target
-        st = self._laplace_states[key]
-        if t == st["last_eval_t"]:
-            return float(st["y"])
-        dt = t - float(st["last_t"])
-        if dt > 0.0 and tau > 0.0:
-            alpha = 1.0 - math.exp(-dt / tau)
-            st["y"] = float(st["y"]) + alpha * (target - float(st["y"]))
-            st["last_t"] = t
-        elif dt < 0.0:
-            st["y"] = target
-            st["last_t"] = t
-        st["last_eval_t"] = t
-        return float(st["y"])
+        return self._laplace_first_order_update(key, time, target, tau)
+
+    def _laplace_np(self, key: str, time: float, x: float, num: Any, poles: Any) -> float:
+        """
+        Minimal behavioral laplace_np approximation for event-level tests.
+
+        Supports the task-oriented first real pole form num={n0}, poles={p0,...},
+        using abs(p0) as the pole frequency and n0 as the DC gain. Unsupported
+        shapes conservatively return x, matching the legacy compile-supported
+        behavior.
+        """
+        try:
+            num_values = [float(v) for v in num]
+            pole_values = [float(v) for v in poles]
+        except Exception:
+            return float(x)
+        if len(num_values) != 1 or not pole_values or pole_values[0] == 0.0:
+            return float(x)
+        target = num_values[0] * float(x)
+        tau = 1.0 / abs(pole_values[0])
+        return self._laplace_first_order_update(key, time, target, tau)
 
     @staticmethod
     def _limexp(x: Any) -> float:
@@ -15172,8 +15201,16 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_nd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {den})"
             return f"self._laplace_nd({base_key!r}, time, {x}, {num}, {den})"
+        if name == 'laplace_np':
+            base_key = self._alloc_stateful_func_key("laplace", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            poles = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            if self._in_loop_var:
+                return f"self._laplace_np(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {poles})"
+            return f"self._laplace_np({base_key!r}, time, {x}, {num}, {poles})"
         if name in {
-            'laplace_np', 'laplace_zd', 'laplace_zp',
+            'laplace_zd', 'laplace_zp',
             'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
         }:
             return args[0] if args else "0.0"
