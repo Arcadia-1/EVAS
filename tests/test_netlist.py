@@ -1419,6 +1419,34 @@ class TestIndexedMigrationHarness:
         assert "rust_sim_program_enabled = 1" in log
         assert (out_dir / "tran.csv").exists()
 
+    def test_evas2_alias_falls_back_to_python_when_rust_backend_is_missing(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import evas.netlist.runner as runner
+
+        monkeypatch.setattr(runner, "load_optional_rust_backend", lambda: None)
+        scs = tmp_path / "tb_evas2_missing_rust_source.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            VDD (vdd 0) vsource type=dc dc=1.8
+            simulatorOptions options evas_engine=evas2 evas_skip_source_error_control=true
+            tran tran stop=2n step=1n
+            save vdd:3f
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = python" in log
+        assert "evas_rust_unavailable_fallback = true" in log
+        assert "evas_rust_required = true" not in log
+        assert "evas_rust_full_model_required = true" not in log
+        assert (out_dir / "tran.csv").exists()
+
     def test_evas_simulate_logs_rust_transition_shadow_when_opted_in(
         self,
         tmp_path,

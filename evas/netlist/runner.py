@@ -30,6 +30,7 @@ from evas.simulator.indexed import (
     build_indexed_run_plan,
     check_indexed_trace_round_trip,
 )
+from evas.simulator.rust_backend import load_optional_rust_backend
 
 from .spectre_parser import (
     SpectreNetlist,
@@ -1404,10 +1405,18 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    rust_required_explicit = rust_required or rust_full_model_required
+    rust_unavailable_fallback = False
     if evas_rust_engine:
-        rust_full_model_fastpath = True
-        rust_full_model_required = True
-        rust_required = True
+        rust_available = load_optional_rust_backend() is not None
+        if rust_available or rust_required_explicit:
+            rust_full_model_fastpath = True
+            rust_full_model_required = True
+            rust_required = True
+        else:
+            evas_rust_engine = False
+            evas_engine = DEFAULT_EVAS_ENGINE
+            rust_unavailable_fallback = True
     indexed_arrays_effective = (
         indexed_arrays
         or rust_static_eval
@@ -1481,6 +1490,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_rust_full_model_required = true")
     if evas_rust_engine:
         log.write(f"    evas_engine = {RUST_EVAS_ENGINE}")
+    elif rust_unavailable_fallback:
+        log.write(f"    evas_engine = {DEFAULT_EVAS_ENGINE}")
+        log.write("    evas_rust_unavailable_fallback = true")
+        log.write(
+            "    evas_rust_unavailable_reason = optional Rust backend could "
+            "not be loaded; using python engine"
+        )
     if event_trace_audit:
         log.write("    evas_event_trace_audit = true")
     if rust_required:
