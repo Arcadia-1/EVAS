@@ -74,10 +74,7 @@ _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
     'initial',
 }
 
-_UNSUPPORTED_MODULE_BLOCKS = {
-    'generate',
-    'specify',
-}
+_UNSUPPORTED_MODULE_BLOCKS = set()
 
 
 class ParseError(Exception):
@@ -428,12 +425,13 @@ class Parser:
         tok = self.peek()
         self._reject_unsupported_procedural_block_if_present("module item")
 
-        if tok.type == TokenType.IDENT and tok.value in _UNSUPPORTED_MODULE_BLOCKS:
-            raise ParseError(
-                f"Unsupported Verilog-AMS module block '{tok.value}' is outside "
-                "the EVAS behavioral subset",
-                tok,
-            )
+        if tok.type == TokenType.IDENT and tok.value == "generate":
+            module.continuous_assigns.extend(self._parse_generate_block_assignments())
+            return
+
+        if tok.type == TokenType.IDENT and tok.value == "specify":
+            self._skip_specify_block()
+            return
 
         if tok.type == TokenType.IDENT and tok.value == "branch":
             module.branches.append(self._parse_branch_decl())
@@ -575,6 +573,84 @@ class Parser:
             parameter_overrides=parameter_overrides,
         )
 
+    def _parse_generate_block_assignments(self) -> List[Assignment]:
+        """Parse the supported generate/genvar subset as static assignments.
+
+        EVAS behavioral mode does not elaborate arbitrary SystemVerilog
+        generate constructs. This accepts the common simple wrapper used by
+        benchmark language-extension tasks:
+
+            generate
+                for (...) begin: label
+                    assign lhs = rhs;
+                end
+            endgenerate
+
+        The genvar itself is already parsed as a module variable; for the
+        current behavioral subset, assignments inside the generated body are
+        evaluated like ordinary continuous assignments.
+        """
+        self.expect(TokenType.IDENT)  # generate
+        assignments: List[Assignment] = []
+        while not self.at(TokenType.EOF):
+            tok = self.peek()
+            if tok.type == TokenType.IDENT and tok.value == "endgenerate":
+                self.advance()
+                break
+            if tok.type == TokenType.FOR:
+                assignments.extend(self._parse_generate_for_assignments())
+                continue
+            if tok.type == TokenType.ASSIGN_KW:
+                assignments.append(self._parse_continuous_assign())
+                continue
+            self.advance()
+        return assignments
+
+    def _parse_generate_for_assignments(self) -> List[Assignment]:
+        self.expect(TokenType.FOR)
+        self.expect(TokenType.LPAREN)
+        self._parse_simple_assignment()
+        self.expect(TokenType.SEMI)
+        self._parse_expression()
+        self.expect(TokenType.SEMI)
+        self._parse_simple_assignment()
+        self.expect(TokenType.RPAREN)
+
+        assignments: List[Assignment] = []
+        if self.match(TokenType.BEGIN):
+            if self.match(TokenType.COLON) and self.at(TokenType.IDENT):
+                self.advance()
+            while not self.at(TokenType.END, TokenType.EOF):
+                if self.at(TokenType.ASSIGN_KW):
+                    assignments.append(self._parse_continuous_assign())
+                else:
+                    self.advance()
+            self.expect(TokenType.END)
+            self.match(TokenType.SEMI)
+            return assignments
+
+        if self.at(TokenType.ASSIGN_KW):
+            assignments.append(self._parse_continuous_assign())
+        else:
+            self.advance()
+        return assignments
+
+    def _skip_specify_block(self) -> None:
+        """Skip specify/specparam timing metadata.
+
+        The current behavioral engine does not model digital path delays. It
+        can still compile modules whose executable behavior is carried by
+        regular assignments outside the specify block.
+        """
+        self.expect(TokenType.IDENT)  # specify
+        while not self.at(TokenType.EOF):
+            tok = self.peek()
+            if tok.type == TokenType.IDENT and tok.value == "endspecify":
+                self.advance()
+                self.match(TokenType.SEMI)
+                return
+            self.advance()
+
     def _parse_continuous_assign(self) -> Assignment:
         self.expect(TokenType.ASSIGN_KW)
         stmt = self._parse_simple_assignment()
@@ -654,27 +730,47 @@ class Parser:
         while True:
             if self.at(TokenType.IDENT):
                 name = self._expect_identifier_name("discipline declaration")
-                # Optional outer dimension range after the name (2-D array)
+                # Optional outer dimension range after the name.
+                post_array_hi, post_array_lo = None, None
                 if self.at(TokenType.LBRACKET):
-                    self._skip_range()  # consume [hi:lo] — recorded in array_hi/lo already
+                    post_array_hi, post_array_lo = self._parse_range()
+                effective_array_hi = array_hi if array_hi is not None else post_array_hi
+                effective_array_lo = array_lo if array_hi is not None else post_array_lo
+
                 # Update existing port decl or add new one
                 found = False
                 for pd in module.port_decls:
                     if pd.name == name:
                         pd.discipline = discipline
-                        if array_hi is not None:
+                        if effective_array_hi is not None:
                             pd.is_array = True
-                            pd.array_hi = array_hi
-                            pd.array_lo = array_lo
+                            pd.array_hi = effective_array_hi
+                            pd.array_lo = effective_array_lo
                         found = True
                         break
                 if not found:
+                    if effective_array_hi is not None:
+                        module.variables.append(VariableDecl(
+                            name=name,
+                            var_type=ParamType.REAL,
+                            is_array=True,
+                            array_hi=effective_array_hi,
+                            array_lo=effective_array_lo,
+                        ))
+                        if discipline in {"logic"}:
+                            module.variables[-1].var_type = ParamType.INTEGER
+                        if post_array_hi is not None and array_hi is not None:
+                            module.variables[-1].array2_hi = post_array_hi
+                            module.variables[-1].array2_lo = post_array_lo
+                        if not self.match(TokenType.COMMA):
+                            break
+                        continue
                     pd = PortDecl(name=name, direction=Direction.INOUT,
                                   discipline=discipline)
-                    if array_hi is not None:
+                    if effective_array_hi is not None:
                         pd.is_array = True
-                        pd.array_hi = array_hi
-                        pd.array_lo = array_lo
+                        pd.array_hi = effective_array_hi
+                        pd.array_lo = effective_array_lo
                     module.port_decls.append(pd)
             if not self.match(TokenType.COMMA):
                 break

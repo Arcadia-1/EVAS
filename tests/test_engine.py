@@ -9383,6 +9383,49 @@ endmodule
         model.evaluate(nv, 1e-9)
         assert model.output_nodes["y"] == pytest.approx(1.0)
 
+    def test_generate_for_assign_subset_drives_wreal_stage_array(self):
+        src = """\
+module generated_stage(input a, output y);
+    wreal a;
+    wreal y;
+    wreal stage[0:0];
+    genvar i;
+    generate
+        for (i = 0; i < 1; i = i + 1) begin: g_stage
+            assign stage[i] = a;
+        end
+    endgenerate
+    assign y = stage[0];
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"a": 0.625}
+
+        model.evaluate(nv, 0.0)
+
+        assert model.arrays["stage"][0] == pytest.approx(0.625)
+        assert model.output_nodes["y"] == pytest.approx(0.625)
+
+    def test_specify_specparam_block_is_accepted_as_timing_metadata(self):
+        src = """\
+module specify_passthrough(input a, output y);
+    logic a, y;
+    assign y = a;
+    specify
+        specparam tpd = 1n;
+        (a => y) = tpd;
+    endspecify
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"a": 1.0}
+
+        model.evaluate(nv, 0.0)
+
+        assert model.output_nodes["y"] == pytest.approx(1.0)
+
     def test_named_branch_voltage_probe(self):
         src = """\
 `include "disciplines.vams"
