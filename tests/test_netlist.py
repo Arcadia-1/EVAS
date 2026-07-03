@@ -111,6 +111,48 @@ def test_evas2_cross_zero_event_uses_python_event_semantics(tmp_path, monkeypatc
     assert data["out"][idx] == pytest.approx(1.0, abs=0.05)
 
 
+def test_evas2_integer_division_matches_spectre_bit_decode(tmp_path, monkeypatch):
+    _build_rust_core_or_skip()
+    va_file = tmp_path / "int_div_decode.va"
+    va_file.write_text(textwrap.dedent("""\
+        `include "disciplines.vams"
+
+        module int_div_decode(b0, b1, b2);
+            output b0, b1, b2;
+            electrical b0, b1, b2;
+            integer count;
+
+            analog begin
+                count = 1;
+                V(b0) <+ transition(((((count / (1 << 0)) % 2) != 0) ? 0.9 : 0.0), 0, 1p, 1p);
+                V(b1) <+ transition(((((count / (1 << 1)) % 2) != 0) ? 0.9 : 0.0), 0, 1p, 1p);
+                V(b2) <+ transition(((((count / (1 << 2)) % 2) != 0) ? 0.9 : 0.0), 0, 1p, 1p);
+            end
+        endmodule
+    """))
+    scs_file = tmp_path / "tb_int_div_decode.scs"
+    scs_file.write_text(textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+
+        ahdl_include "int_div_decode.va"
+
+        XDUT (b0 b1 b2) int_div_decode
+
+        tran tran stop=1n maxstep=100p
+        save b0 b1 b2
+    """))
+
+    monkeypatch.setenv("EVAS_ENGINE", "evas2")
+    out_dir = tmp_path / "out"
+    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    idx = int(np.argmin(np.abs(data["time"] - 0.5e-9)))
+    assert data["b0"][idx] == pytest.approx(0.9, abs=0.05)
+    assert data["b1"][idx] == pytest.approx(0.0, abs=0.05)
+    assert data["b2"][idx] == pytest.approx(0.0, abs=0.05)
+
+
 # ===========================================================================
 # _normalize_node_name
 # ===========================================================================

@@ -13,6 +13,13 @@ pub(crate) fn to_veriloga_integer(value: f64) -> i64 {
     }
 }
 
+pub(crate) fn to_veriloga_integer_trunc(value: f64) -> i64 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.trunc() as i64
+}
+
 pub(crate) fn truthy(value: f64) -> bool {
     value != 0.0
 }
@@ -154,6 +161,15 @@ pub(crate) fn evaluate_body_expr_segment(
             BODY_EXPR_MOD => {
                 let (left, right) = pop2(stack)?;
                 stack.push(left % right);
+            }
+            BODY_EXPR_IDIV => {
+                let (left, right) = pop2(stack)?;
+                let divisor = to_veriloga_integer_trunc(right);
+                if divisor == 0 {
+                    stack.push(0.0);
+                } else {
+                    stack.push((to_veriloga_integer_trunc(left) / divisor) as f64);
+                }
             }
             BODY_EXPR_GT => {
                 let (left, right) = pop2(stack)?;
