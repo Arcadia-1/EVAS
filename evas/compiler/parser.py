@@ -644,6 +644,13 @@ class Parser:
             self._parse_variable_decl(module)
             return
 
+        # Cadence recommends analog function declarations over legacy
+        # module-level function declarations.
+        if tok.type == TokenType.ANALOG and self.peek_n(1).type == TokenType.FUNCTION:
+            self.advance()
+            module.functions.append(self._parse_function_decl())
+            return
+
         # Analog block
         if tok.type == TokenType.ANALOG:
             self.advance()

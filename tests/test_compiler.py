@@ -653,6 +653,29 @@ class TestParserSubprograms:
         assert all(isinstance(arg, SubprogramArg) for arg in fn.args)
         assert [var.name for var in fn.variables] == ["tmp"]
 
+    def test_analog_function_declaration(self):
+        src = """
+        module m();
+        analog function real square;
+            input real x;
+            begin
+                square = x * x;
+            end
+        endfunction
+        analog begin
+            y = square(1.2);
+        end
+        endmodule
+        """
+        m = _parse(src)
+
+        assert len(m.functions) == 1
+        fn = m.functions[0]
+        assert isinstance(fn, FunctionDecl)
+        assert fn.name == "square"
+        assert fn.return_type == ParamType.REAL
+        assert [arg.name for arg in fn.args] == ["x"]
+
     def test_ansi_task_declaration_and_call(self):
         src = """
         module m();

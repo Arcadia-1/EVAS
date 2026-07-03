@@ -6534,10 +6534,13 @@ class _ModuleCompiler:
             local_types: Dict[str, ParamType] = {
                 arg.name: arg.var_type for arg in decl.args
             }
+            arg_name_set = set(local_names)
             ret_name = self._local_python_name("ret", decl.name)
             local_names[decl.name] = ret_name
             local_types[decl.name] = decl.return_type
             for var in decl.variables:
+                if var.name in arg_name_set:
+                    continue
                 local_names[var.name] = self._local_python_name("local", var.name)
                 local_types[var.name] = var.var_type
 
@@ -6552,6 +6555,8 @@ class _ModuleCompiler:
                 f"            {ret_name} = {self._default_value_for_type(decl.return_type)}"
             )
             for var in decl.variables:
+                if var.name in arg_name_set:
+                    continue
                 py_name = local_names[var.name]
                 if var.init_values:
                     init = self._compile_expr(var.init_values[0])
@@ -14903,6 +14908,8 @@ class _ModuleCompiler:
                 return "(self._temperature + 273.15)"
             if name == "$vt":
                 return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
+            if name == "$mfactor":
+                return "self._mfactor()"
             return f"_probe_state.get({name!r}, self.state.get({name!r}, 0.0))"
         if isinstance(expr, ArrayAccess):
             idx = self._compile_transition_probe_expr(expr.index)
@@ -15244,6 +15251,8 @@ class _ModuleCompiler:
                 return "(self._temperature + 273.15)"
             if name == '$vt':
                 return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
+            if name == '$mfactor':
+                return "self._mfactor()"
             return f"self.state[{name!r}]"
 
         if isinstance(expr, ArrayAccess):
@@ -15953,6 +15962,8 @@ class _ModuleCompiler:
                 return 300.15
             if expr.name == '$vt':
                 return 1.380649e-23 * 300.15 / 1.602176634e-19
+            if expr.name == '$mfactor':
+                return 1.0
             if expr.name in env:
                 return env[expr.name]
             return 0
