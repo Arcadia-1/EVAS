@@ -8132,6 +8132,28 @@ endmodule
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
 
+    def test_laplace_zd_origin_zero_advances_highpass_state(self):
+        src = """\
+`include "disciplines.vams"
+module laplace_zd_highpass_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ laplace_zd(V(vin), {0.0, 0.0}, {1.0, 1.0});
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        nv0 = {"vin": 0.0}
+        model.evaluate(nv0, 0.0)
+        assert nv0["out"] == pytest.approx(0.0)
+
+        nv1 = {"vin": 1.0}
+        model.evaluate(nv1, 1.0)
+        assert nv1["out"] == pytest.approx(math.exp(-1.0))
+
     def test_laplace_zp_first_real_pole_advances_state(self):
         src = """\
 `include "disciplines.vams"
@@ -8153,6 +8175,28 @@ endmodule
         nv1 = {"vin": 1.0}
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
+
+    def test_laplace_zp_origin_zero_advances_highpass_state(self):
+        src = """\
+`include "disciplines.vams"
+module laplace_zp_highpass_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ laplace_zp(V(vin), {0.0, 0.0}, {-1.0, 0.0});
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        nv0 = {"vin": 0.0}
+        model.evaluate(nv0, 0.0)
+        assert nv0["out"] == pytest.approx(0.0)
+
+        nv1 = {"vin": 1.0}
+        model.evaluate(nv1, 1.0)
+        assert nv1["out"] == pytest.approx(math.exp(-1.0))
 
     def test_zi_nd_first_order_difference_equation_advances_state(self):
         src = """\
@@ -8183,7 +8227,7 @@ module zi_np_probe(vin, out);
     input voltage vin;
     output voltage out;
     analog begin
-        V(out) <+ zi_np(V(vin), {1.0}, {1.0, 1.0}, 1n);
+        V(out) <+ zi_np(V(vin), {0.25}, {0.75, 0.0}, 1n);
     end
 endmodule
 """
@@ -8194,9 +8238,13 @@ endmodule
         model.evaluate(nv0, 0.0)
         assert nv0["out"] == pytest.approx(0.65)
 
-        nv1 = {"vin": 0.3}
+        nv1 = {"vin": 0.65}
         model.evaluate(nv1, 1e-9)
-        assert nv1["out"] == pytest.approx(-0.35)
+        assert nv1["out"] == pytest.approx(0.65)
+
+        nv2 = {"vin": 0.3}
+        model.evaluate(nv2, 2e-9)
+        assert nv2["out"] == pytest.approx(0.5625)
 
     def test_zi_zd_first_order_difference_equation_advances_state(self):
         src = """\
@@ -8205,20 +8253,28 @@ module zi_zd_probe(vin, out);
     input voltage vin;
     output voltage out;
     analog begin
-        V(out) <+ zi_zd(V(vin), {1.0}, {1.0, 1.0}, 1n);
+        V(out) <+ zi_zd(V(vin), {1.0, 0.0}, {1.0, -0.75}, 1n);
     end
 endmodule
 """
         ModelCls = compile_module(parse(src))
         model = ModelCls()
 
-        nv0 = {"vin": 0.55}
+        nv0 = {"vin": 0.0}
         model.evaluate(nv0, 0.0)
-        assert nv0["out"] == pytest.approx(0.55)
+        assert nv0["out"] == pytest.approx(0.0)
 
-        nv1 = {"vin": 0.85}
+        nv1 = {"vin": 0.55}
         model.evaluate(nv1, 1e-9)
-        assert nv1["out"] == pytest.approx(0.3)
+        assert nv1["out"] == pytest.approx(0.55)
+
+        nv2 = {"vin": 0.55}
+        model.evaluate(nv2, 2e-9)
+        assert nv2["out"] == pytest.approx(0.4125)
+
+        nv3 = {"vin": 0.85}
+        model.evaluate(nv3, 3e-9)
+        assert nv3["out"] == pytest.approx(0.609375)
 
     def test_zi_zp_first_order_difference_equation_advances_state(self):
         src = """\
@@ -8227,20 +8283,24 @@ module zi_zp_probe(vin, out);
     input voltage vin;
     output voltage out;
     analog begin
-        V(out) <+ zi_zp(V(vin), {1.0}, {1.0, 1.0}, 1n);
+        V(out) <+ zi_zp(V(vin), {1.0, 0.0}, {0.75, 0.0}, 1n);
     end
 endmodule
 """
         ModelCls = compile_module(parse(src))
         model = ModelCls()
 
-        nv0 = {"vin": 0.45}
+        nv0 = {"vin": 0.0}
         model.evaluate(nv0, 0.0)
-        assert nv0["out"] == pytest.approx(0.45)
+        assert nv0["out"] == pytest.approx(0.0)
 
         nv1 = {"vin": 0.45}
         model.evaluate(nv1, 1e-9)
-        assert nv1["out"] == pytest.approx(0.0)
+        assert nv1["out"] == pytest.approx(0.45)
+
+        nv2 = {"vin": 0.95}
+        model.evaluate(nv2, 2e-9)
+        assert nv2["out"] == pytest.approx(0.8375)
 
 
 class TestConnectmoduleAndMultidimensionalArrays:
