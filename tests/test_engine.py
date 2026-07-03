@@ -1266,6 +1266,97 @@ endmodule
         assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
         assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
 
+    def test_rust_sim_program_cross_body_dynamic_state_array_write(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_dynamic_array_write(ck, d0, d3, sum);
+    input voltage ck;
+    output voltage d0, d3, sum;
+    integer index = 0;
+    integer bits[0:3];
+    analog begin
+        @(initial_step) begin
+            index = 0;
+            bits[0] = 0;
+            bits[1] = 0;
+            bits[2] = 0;
+            bits[3] = 0;
+        end
+        @(cross(V(ck) - 0.5, +1)) begin
+            if (index < 4) begin
+                bits[index] = 1;
+                index = index + 1;
+            end
+        end
+        V(sum) <+ transition(index, 0.0, 20p, 20p);
+        V(d0) <+ transition(bits[0], 0.0, 20p, 20p);
+        V(d3) <+ transition(bits[3], 0.0, 20p, 20p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"ck": "CK", "d0": "D0", "d3": "D3", "sum": "SUM"}
+            sim = Simulator()
+            sim.add_source(
+                "CK",
+                pulse(0.0, 1.0, 1e-9, duty=0.5, rise=10e-12, fall=10e-12),
+            )
+            sim.add_model(model)
+            sim.record("D0")
+            sim.record("D3")
+            sim.record("SUM")
+            result = sim.run(
+                tstop=4.5e-9,
+                tstep=100e-12,
+                record_step=100e-12,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim, model
+
+        default_result, _default_sim, default_model = run_model(False)
+        rust_result, rust_sim, rust_model = run_model(True)
+
+        def interp(times, values, sample_time):
+            time_list = list(times)
+            value_list = list(values)
+            for idx in range(1, len(time_list)):
+                t0 = time_list[idx - 1]
+                t1 = time_list[idx]
+                if sample_time <= t1:
+                    if t1 == t0:
+                        return value_list[idx]
+                    frac = (sample_time - t0) / (t1 - t0)
+                    return value_list[idx - 1] + frac * (
+                        value_list[idx] - value_list[idx - 1]
+                    )
+            return value_list[-1]
+
+        sample_times = [0.2e-9, 1.2e-9, 2.2e-9, 3.2e-9, 4.2e-9]
+        for signal in ("D0", "D3", "SUM"):
+            assert [
+                interp(rust_result.time, rust_result.signals[signal], t)
+                for t in sample_times
+            ] == pytest.approx(
+                [
+                    interp(default_result.time, default_result.signals[signal], t)
+                    for t in sample_times
+                ],
+                abs=1.0e-8,
+            )
+        assert rust_model.state["index"] == pytest.approx(default_model.state["index"])
+        assert rust_model.arrays["bits"][0] == default_model.arrays["bits"][0] == 1
+        assert rust_model.arrays["bits"][3] == default_model.arrays["bits"][3] == 1
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_final_step_updates_state_after_trace(self):
         _build_rust_core_or_skip()
         src = """\
