@@ -30,6 +30,11 @@ from evas.simulator.indexed import (
     build_indexed_run_plan,
     check_indexed_trace_round_trip,
 )
+from evas.support_tiers import (
+    format_support_tier_hint,
+    support_tier_for_function,
+    unsupported_feature_message,
+)
 
 from .spectre_parser import (
     SpectreNetlist,
@@ -375,6 +380,10 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         for arg in stmt.args:
             _validate_supported_function_calls(arg, user_function_names)
         return
+    if isinstance(stmt, va_ast.TaskCall):
+        for arg in stmt.args:
+            _validate_supported_function_calls(arg, user_function_names)
+        return
     if isinstance(stmt, va_ast.EventStatement):
         event_is_initial_step = (
             isinstance(stmt.event, va_ast.EventExpr)
@@ -418,9 +427,15 @@ def _validate_supported_function_calls(expr, user_function_names: Optional[set] 
         user_function_names = set()
     for call in _iter_expr_calls(expr):
         if call.name not in _SUPPORTED_FUNCTION_CALLS and call.name not in user_function_names:
+            support_tier = support_tier_for_function(call.name)
             raise ValueError(
-                "Spectre-incompatible/unsupported Verilog-A function call: "
-                f"{call.name}()"
+                unsupported_feature_message(
+                    f"{call.name}()",
+                    support_tier,
+                    "no EVAS behavioral implementation is registered for "
+                    "this function/operator",
+                )
+                + format_support_tier_hint(support_tier)
             )
 
 

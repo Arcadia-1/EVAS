@@ -129,21 +129,22 @@ the in-package reference for common wiring patterns:
 
 ### Support tiers
 
-EVAS is strongest in the **behavioral-event / waveform-oriented** tier: voltage
-reads and drives, event-controlled state, timers, transitions, table/random/file
-helpers, and small mixed-signal logic/wreal subsets. This tier is implemented by
-a lightweight event/waveform engine and does not require a full conservative
-analog solver.
+EVAS reports unsupported-feature diagnostics with a stable
+`[support-tier: <name>]` suffix in text output and a `support_tier` field in
+JSON lint output. Benchmark reports should use these tiers instead of treating
+all Verilog-A/AMS failures as one flat simulator target.
 
-EVAS also accepts a limited **behavioral-continuous-time** tier. Operators such
-as `ddt()`, `idt()`, `laplace_*`, `zi_*`, and `limexp()` compile and run with
-explicit behavioral approximations for transient compatibility. They should not
-be read as Spectre-equivalent continuous-time transfer-function solving.
+| Tier | Boundary | Benchmark interpretation |
+|------|----------|--------------------------|
+| `behavioral-event` | Voltage-domain behavioral transient models: `V(...)` reads/drives, `cross`/`above`/`timer`/`initial_step`/`final_step`, `transition`, state machines, control logic, table/random/file helpers. This is the current EVAS core strength. | A valid failure here is a supported EVAS bug unless a narrower diagnostic says otherwise. |
+| `behavioral-continuous-time` | Legal voltage-domain `ddt`, `idt`, `idtmod`, `laplace_*`, `zi_*`, and `limexp` style models. EVAS has behavioral transient approximations for selected forms, but this is not a claim of Spectre-equivalent continuous-time transfer-function solving. | Treat unsupported or inaccurate rows as planned/limited continuous-time work, not as AMS/KCL coverage. |
+| `ams-digital` | `wreal`, `logic`, `always`, continuous `assign`, packed logic vectors, `specify`/`specparam`, `connectmodule`, and `connectrules`. EVAS supports only small behavioral bridge subsets where documented; a full AMS/digital event kernel is outside the certified core. | Full AMS/digital failures are outside current benchmark certification unless the row is explicitly documented as a supported bridge subset. |
+| `conservative-current-kcl` | `I(...) <+ ...`, branch currents, current probes, indirect branch equations, charge/current branch contributions, and KCL/MNA topology solving. | Architectural roadmap item, not a parser bug and not part of current certified EVAS support. |
 
-EVAS does not implement the **conservative-current / KCL-MNA** tier. Device-style
-models that rely on `I(p,n) <+ ...`, branch charge/current contributions,
-nonlinear device equations, or transistor-level AC/DC matrix solving remain
-outside the current simulator design.
+Certification boundary: current EVAS benchmark PASS claims apply to
+`behavioral-event` designs, plus explicitly documented behavioral helper subsets.
+Rows that require full `ams-digital` or `conservative-current-kcl` semantics must
+be reported separately from supported EVAS bugs.
 
 | Feature | Status |
 |---------|--------|
@@ -161,6 +162,8 @@ outside the current simulator design.
 | parameters and variables (real / integer / string) | ✅ |
 | user-defined functions/tasks, including bounded recursive functions | ✅ |
 | `module`, `connectmodule`, simple behavioral hierarchy | ✅ |
+| `logic`, `wreal`, simple continuous `assign`, simple `always @(posedge/negedge ...)` | limited `ams-digital` bridge subset |
+| simple `specify` / `specparam` path delay on behavioral assignments | limited `ams-digital` bridge subset |
 | `` `include ``, `` `define ``, `` `default_transition `` | ✅ |
 | SI suffixes, math: `sin` `cos` `exp` `ln` `log` `pow` `floor` `ceil` … | ✅ |
 | `$temperature`, `$vt`, `$abstime` | ✅ |
@@ -171,12 +174,13 @@ outside the current simulator design.
 | `last_crossing(expr, dir, time_tol, expr_tol)` | ✅ (most-recent event-time approximation) |
 | `analysis("ac")`, `ac_stim()` | ✅ (behavioral Python sweep helper) |
 | `white_noise()`, `flicker_noise()`, `noise_table()` | ✅ (behavioral PSD / integrated-noise helper) |
-| `ddt()`, `idt()`, `laplace_*()`, `zi_*()`, `limexp()` | ✅ (behavioral transient approximation) |
-| `generate` / `genvar`, `specify` / `specparam`, `connectrules` | not supported by design |
+| `ddt()`, `idt()`, `laplace_*()`, `zi_*()`, `limexp()` | limited `behavioral-continuous-time` approximation |
+| `generate` / `genvar` | limited static-elaboration subset |
+| `connectrules` | unsupported `ams-digital` scope |
 | custom `nature` / `discipline` semantics beyond the bundled VAMS stubs | not supported by design |
 | analog primitive instances such as `resistor` / `isource` | not supported by design |
-| `I() <+`, `q() <+`, branch charge/current contributions | not supported by design |
-| SPICE-style AC/DC matrix solving, transistors | not supported by design |
+| `I() <+`, `q() <+`, branch charge/current contributions, current probes | unsupported `conservative-current-kcl` scope |
+| SPICE-style AC/DC matrix solving, transistors | unsupported `conservative-current-kcl` scope |
 | Spectre `subckt` hierarchy | not yet implemented |
 
 ### Accuracy Profiles

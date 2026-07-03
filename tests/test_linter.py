@@ -13,6 +13,11 @@ from evas.compiler.linter import (
     lint_file,
     lint_source,
 )
+from evas.support_tiers import (
+    AMS_DIGITAL,
+    CONSERVATIVE_CURRENT_KCL,
+    OUTSIDE_CURRENT_SCOPE,
+)
 
 
 def _codes(diags):
@@ -34,6 +39,7 @@ def test_lint_rule_registry_covers_current_diagnostics():
         "EVAS-COMP-E2154",
         "EVAS-COMP-E2157",
         "EVAS-COMP-E2446",
+        "EVAS-COMP-EKCL",
         "EVAS-COMP-EUNSUPPORTED",
         "EVAS-AHDL-W5003",
         "EVAS-AHDL-W5004",
@@ -56,6 +62,7 @@ def test_lint_rule_registry_covers_current_diagnostics():
     assert expected_codes == set(LINT_RULE_SPECS)
     assert LINT_RULE_SPECS["EVAS-COMP-E2143"].severity == "compat-error"
     assert LINT_RULE_SPECS["EVAS-AHDL-W5011"].category == "cadence-ahdl"
+    assert LINT_RULE_SPECS["EVAS-COMP-EKCL"].rule == "unsupported-conservative-current-kcl"
     assert LINT_RULE_SPECS["EVAS-COMP-EUNSUPPORTED"].oracle_status == "evas-specific"
 
 
@@ -603,8 +610,95 @@ def test_unsupported_function_is_compat_error():
     """)
 
     diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EUNSUPPORTED")
 
     assert "EVAS-COMP-EUNSUPPORTED" in _codes(diags)
+    assert diag.support_tier == OUTSIDE_CURRENT_SCOPE
+    assert f"support-tier: {OUTSIDE_CURRENT_SCOPE}" in diag.format_text()
+    assert has_compat_errors(diags)
+
+
+def test_current_contribution_is_kcl_tier_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module current_drive(out);
+            output out;
+            electrical out;
+            analog begin
+                I(out) <+ 1u;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
+
+    assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert "current contribution I(...) <+ ..." in diag.message
+    assert f"support-tier: {CONSERVATIVE_CURRENT_KCL}" in diag.format_text()
+    assert has_compat_errors(diags)
+
+
+def test_current_probe_is_kcl_tier_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module current_probe(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            analog begin
+                V(out) <+ I(inp);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
+
+    assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert "current probe I(...)" in diag.message
+    assert has_compat_errors(diags)
+
+
+def test_indirect_branch_is_kcl_tier_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module indirect_branch(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            analog begin
+                V(out) : V(inp) == 0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
+
+    assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert "indirect branch equation" in diag.message
+    assert has_compat_errors(diags)
+
+
+def test_unsupported_digital_procedural_block_is_ams_digital_tier():
+    source = textwrap.dedent("""\
+        module initial_block(out);
+            output out;
+            logic out;
+            initial begin
+                out = 1'b0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source, filename="initial_block.va")
+    assert len(diags) == 1
+    diag = diags[0]
+
+    assert diag.code == "EVAS-COMP-EPARSE"
+    assert diag.support_tier == AMS_DIGITAL
+    assert f"support-tier: {AMS_DIGITAL}" in diag.format_text()
     assert has_compat_errors(diags)
 
 
@@ -745,3 +839,4 @@ def test_lint_cli_json_exits_nonzero_on_compat_error(tmp_path, monkeypatch, caps
     assert excinfo.value.code == 1
     data = json.loads(capsys.readouterr().out)
     assert data[0]["code"] == "EVAS-COMP-EUNSUPPORTED"
+    assert data[0]["support_tier"] == OUTSIDE_CURRENT_SCOPE
