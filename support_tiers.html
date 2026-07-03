@@ -305,6 +305,71 @@ unregistered function/operator calls report <code class="docutils literal notran
 so benchmark tooling can separate truly unclassified constructs from the four
 documented support tiers.</p>
 </section>
+<section id="continuous-time-operators">
+<h2>Continuous-Time Operators<a class="headerlink" href="#continuous-time-operators" title="Link to this heading">¶</a></h2>
+<p>EVAS supports <code class="docutils literal notranslate"><span class="pre">ddt()</span></code>, <code class="docutils literal notranslate"><span class="pre">idt()</span></code>, <code class="docutils literal notranslate"><span class="pre">idtmod()</span></code>, <code class="docutils literal notranslate"><span class="pre">laplace_nd()</span></code>, <code class="docutils literal notranslate"><span class="pre">laplace_np()</span></code>,
+<code class="docutils literal notranslate"><span class="pre">laplace_zd()</span></code>, <code class="docutils literal notranslate"><span class="pre">laplace_zp()</span></code>, <code class="docutils literal notranslate"><span class="pre">zi_nd()</span></code>, <code class="docutils literal notranslate"><span class="pre">zi_np()</span></code>, <code class="docutils literal notranslate"><span class="pre">zi_zd()</span></code>, <code class="docutils literal notranslate"><span class="pre">zi_zp()</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">limexp()</span></code> as voltage-domain behavioral transient approximations. The
+implementation uses finite-difference, trapezoidal integration, and simple
+state/filter updates inside the behavioral evaluator. This is intentionally
+separate from current-domain contribution stamping or full Spectre
+transfer-function solving.</p>
+<p>Spectre-restricted placements, such as conditional <code class="docutils literal notranslate"><span class="pre">idt()</span></code> or event-local
+analog contributions, are reported through compatibility diagnostics. Legal
+continuous-time operators without an EVAS implementation, for example
+<code class="docutils literal notranslate"><span class="pre">absdelay()</span></code>, report <code class="docutils literal notranslate"><span class="pre">EVAS-COMP-EUNSUPPORTED</span></code> with
+<code class="docutils literal notranslate"><span class="pre">support_tier=&quot;behavioral-continuous-time&quot;</span></code>.</p>
+</section>
+<section id="noise-and-stochastic-semantics">
+<h2>Noise and Stochastic Semantics<a class="headerlink" href="#noise-and-stochastic-semantics" title="Link to this heading">¶</a></h2>
+<p>In ordinary transient analysis, <code class="docutils literal notranslate"><span class="pre">white_noise()</span></code>, <code class="docutils literal notranslate"><span class="pre">flicker_noise()</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">noise_table()</span></code> do not create arbitrary random transient waveforms. They return
+a zero transient contribution and expose PSD data through the behavioral
+<code class="docutils literal notranslate"><span class="pre">evaluate_noise()</span></code>, <code class="docutils literal notranslate"><span class="pre">noise_spectrum()</span></code>, and <code class="docutils literal notranslate"><span class="pre">integrated_noise()</span></code> helpers.</p>
+<p>Explicit <code class="docutils literal notranslate"><span class="pre">$random</span></code>, <code class="docutils literal notranslate"><span class="pre">$dist_*()</span></code>, and <code class="docutils literal notranslate"><span class="pre">$rdist_*()</span></code> calls are behavioral random
+draws. EVAS makes fixed-seed draws reproducible; the same seed and draw order
+produce the same sequence across runs. Supported distributions include uniform,
+normal, exponential, poisson, chi-square, t, and erlang variants. Unsupported
+distribution names, such as an unimplemented <code class="docutils literal notranslate"><span class="pre">$rdist_gamma()</span></code>, fail with
+<code class="docutils literal notranslate"><span class="pre">EVAS-COMP-EUNSUPPORTED</span></code> and <code class="docutils literal notranslate"><span class="pre">support_tier=&quot;behavioral-event&quot;</span></code>.</p>
+</section>
+<section id="subprograms">
+<h2>Subprograms<a class="headerlink" href="#subprograms" title="Link to this heading">¶</a></h2>
+<p>EVAS supports Spectre-style function/task declarations such as <code class="docutils literal notranslate"><span class="pre">input</span> <span class="pre">x;</span> <span class="pre">real</span> <span class="pre">x;</span></code>, ANSI-style task/function arguments, local variables, multi-argument calls,
+bounded recursive functions, and task/function calls inside event bodies. These
+are covered by conformance tests for simple functions, recursive functions,
+task-local variables, and state updates through task calls.</p>
+</section>
+<section id="vectors-generate-and-electrical-indexing">
+<h2>Vectors, Generate, and Electrical Indexing<a class="headerlink" href="#vectors-generate-and-electrical-indexing" title="Link to this heading">¶</a></h2>
+<p>Pure expression vector semantics are separate from electrical topology. EVAS
+supports bit select, part select, concatenation, replication, reductions,
+packed logic vectors, and integer/real state arrays.</p>
+<p>Static <code class="docutils literal notranslate"><span class="pre">generate</span></code>/<code class="docutils literal notranslate"><span class="pre">genvar</span></code> elaboration is supported for the limited
+behavioral/continuous-assign subset used by supported bridge models. This is
+not the same as a full AMS generate/connect-rule implementation.</p>
+<p>Runtime voltage-domain electrical indexing such as <code class="docutils literal notranslate"><span class="pre">V(bus[i])</span></code> and
+<code class="docutils literal notranslate"><span class="pre">V(bus[i])</span> <span class="pre">&lt;+</span> <span class="pre">...</span></code> is supported by dynamic node resolution and cache-backed
+node lookup. Runtime current-domain indexing belongs to the unsupported
+<code class="docutils literal notranslate"><span class="pre">conservative-current-kcl</span></code> tier.</p>
+</section>
+<section id="ams-digital-boundary">
+<h2>AMS-Digital Boundary<a class="headerlink" href="#ams-digital-boundary" title="Link to this heading">¶</a></h2>
+<p>EVAS includes a small <code class="docutils literal notranslate"><span class="pre">ams-digital</span></code> bridge subset: <code class="docutils literal notranslate"><span class="pre">logic</span></code> and <code class="docutils literal notranslate"><span class="pre">wreal</span></code> ports,
+simple continuous <code class="docutils literal notranslate"><span class="pre">assign</span></code>, edge-sensitive <code class="docutils literal notranslate"><span class="pre">always</span> <span class="pre">&#64;(posedge/negedge</span> <span class="pre">...)</span></code>,
+packed logic vector operations, and simple <code class="docutils literal notranslate"><span class="pre">specify</span></code>/<code class="docutils literal notranslate"><span class="pre">specparam</span></code> path delays on
+behavioral assignments. Full four-state logic, connectmodule/connectrules
+resolution, and a complete AMS event kernel are outside current benchmark
+certification.</p>
+</section>
+<section id="kcl-mna-boundary">
+<h2>KCL/MNA Boundary<a class="headerlink" href="#kcl-mna-boundary" title="Link to this heading">¶</a></h2>
+<p>EVAS does not certify conservative current solving. <code class="docutils literal notranslate"><span class="pre">I(...)</span> <span class="pre">&lt;+</span> <span class="pre">...</span></code>, <code class="docutils literal notranslate"><span class="pre">I(...)</span></code>
+current probes, indirect branch equations, charge/current contributions, and
+SPICE-style AC/DC matrix solving are classified as <code class="docutils literal notranslate"><span class="pre">conservative-current-kcl</span></code>.
+<code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span></code> and <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span> <span class="pre">--ahdllint</span></code> report this tier explicitly so these
+rows are tracked as architectural roadmap work rather than parser bugs.</p>
+</section>
 </section>
 
         </article>
@@ -382,6 +447,12 @@ documented support tiers.</p>
             <ul>
 <li><a class="reference internal" href="#">Support Tiers</a><ul>
 <li><a class="reference internal" href="#diagnostic-taxonomy">Diagnostic Taxonomy</a></li>
+<li><a class="reference internal" href="#continuous-time-operators">Continuous-Time Operators</a></li>
+<li><a class="reference internal" href="#noise-and-stochastic-semantics">Noise and Stochastic Semantics</a></li>
+<li><a class="reference internal" href="#subprograms">Subprograms</a></li>
+<li><a class="reference internal" href="#vectors-generate-and-electrical-indexing">Vectors, Generate, and Electrical Indexing</a></li>
+<li><a class="reference internal" href="#ams-digital-boundary">AMS-Digital Boundary</a></li>
+<li><a class="reference internal" href="#kcl-mna-boundary">KCL/MNA Boundary</a></li>
 </ul>
 </li>
 </ul>
