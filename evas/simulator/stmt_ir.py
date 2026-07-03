@@ -24,6 +24,7 @@ from evas.compiler.ast_nodes import (
     WhileStatement,
 )
 from evas.simulator.expr_ir import (
+    SYMBOL_STATE_ARRAY,
     SYMBOL_STATE_SCALAR,
     ArrayAccessIR,
     BinaryExprIR,
@@ -660,6 +661,67 @@ def encode_event_body_program(
     return EventBodyProgram(event=stmt_ir.event, body_program=body_program)
 
 
+_MAX_DYNAMIC_STATE_ARRAY_TARGET_UNROLL = 256
+
+
+def _expr_is_safe_repeated_array_target_index(expr_ir: ExprIR) -> bool:
+    if isinstance(expr_ir, (LiteralIR, IdentifierIR)):
+        return True
+    if isinstance(expr_ir, BinaryExprIR):
+        return (
+            _expr_is_safe_repeated_array_target_index(expr_ir.left)
+            and _expr_is_safe_repeated_array_target_index(expr_ir.right)
+        )
+    if isinstance(expr_ir, UnaryExprIR):
+        return _expr_is_safe_repeated_array_target_index(expr_ir.operand)
+    if isinstance(expr_ir, TernaryExprIR):
+        return (
+            _expr_is_safe_repeated_array_target_index(expr_ir.cond)
+            and _expr_is_safe_repeated_array_target_index(expr_ir.true_expr)
+            and _expr_is_safe_repeated_array_target_index(expr_ir.false_expr)
+        )
+    return False
+
+
+def _dynamic_array_assignment_to_if_chain(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+) -> Optional[BlockIR]:
+    target = stmt_ir.target
+    if not isinstance(target, ArrayAccessIR):
+        return None
+    if resolve_static_array_element_binding(target, bindings) is not None:
+        return None
+    array_binding = bindings.resolve(target.name)
+    if (
+        array_binding is None
+        or array_binding.kind != SYMBOL_STATE_ARRAY
+        or array_binding.lo is None
+        or array_binding.hi is None
+    ):
+        return None
+    if not _expr_is_safe_repeated_array_target_index(target.index):
+        return None
+    lo = int(array_binding.lo)
+    hi = int(array_binding.hi)
+    count = hi - lo + 1
+    if count <= 0 or count > _MAX_DYNAMIC_STATE_ARRAY_TARGET_UNROLL:
+        return None
+    statements: list[StmtIR] = []
+    for idx in range(lo, hi + 1):
+        idx_expr = LiteralIR(float(idx), raw=str(idx))
+        statements.append(
+            IfStatementIR(
+                cond=BinaryExprIR("==", target.index, idx_expr),
+                then_body=AssignmentIR(
+                    target=ArrayAccessIR(target.name, idx_expr),
+                    value=stmt_ir.value,
+                ),
+            )
+        )
+    return BlockIR(tuple(statements))
+
+
 def _lower_assignment_target(
     target: object,
     context: StatementLoweringContext,
@@ -770,6 +832,19 @@ def _append_body_stmt_ops(
             return idtmod_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
+            lowered_array_assignment = _dynamic_array_assignment_to_if_chain(
+                stmt_ir,
+                bindings,
+            )
+            if lowered_array_assignment is not None:
+                return _append_body_stmt_ops(
+                    lowered_array_assignment,
+                    bindings,
+                    node_slots,
+                    stmt_ops,
+                    expr_ops,
+                    side_effects=side_effects,
+                )
             return False
         target_kind, target_id, target_integer = target
         if (
