@@ -8998,6 +8998,40 @@ endmodule
         assert model.state["code"] == 6
         assert result.signals["out"].tolist() == pytest.approx([10.25, 10.25])
 
+    def test_sscanf_function_form_parses_literal_key_value_text(self):
+        src = """\
+`include "disciplines.vams"
+module sscanf_function_probe(out);
+    output voltage out;
+    integer code;
+    integer count;
+    real gain;
+    string gain_line;
+    string mode_line;
+    analog begin
+        @(initial_step) begin
+            gain_line = "gain=0.8\\n";
+            mode_line = "mode=1";
+            count = $sscanf(gain_line, "gain=%f", gain);
+            count = count + $sscanf(mode_line, "mode=%d", code);
+        end
+        V(out) <+ gain + code + count;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["gain"] == pytest.approx(0.8)
+        assert model.state["code"] == 1
+        assert model.state["count"] == 2
+        assert result.signals["out"].tolist() == pytest.approx([3.8, 3.8])
+
     def test_table_model_1d_interpolates_file(self, tmp_path):
         table = tmp_path / "gain_table.txt"
         table.write_text("0, 0\n1, 2\n2, 8\n", encoding="utf-8")

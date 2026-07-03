@@ -1830,7 +1830,7 @@ _SUPPORTED_FUNCTIONS = {
     "$dist_exponential", "$dist_poisson", "$dist_chi_square", "$dist_t",
     "$dist_erlang", "$random", "$dist_uniform", "$rdist_uniform", "$fopen",
     "$fclose", "$fwrite", "$fstrobe", "$strobe", "$display", "$debug",
-    "$warning", "$error", "$info", "$fscanf", "$fgets", "$feof", "$fseek",
+    "$warning", "$error", "$info", "$fscanf", "$sscanf", "$fgets", "$feof", "$fseek",
     "$ftell", "$rewind", "$swrite", "$sformat", "analysis", "ac_stim",
     "white_noise", "flicker_noise", "noise_table", "$abstime", "$realtime",
     "$bound_step", "$discontinuity",
