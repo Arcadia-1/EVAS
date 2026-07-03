@@ -29,19 +29,24 @@ You should see the 5 bundled example groups printed.
 
 ## Engine Selection
 
-The packaged default is the Python compatibility engine. It works from PyPI or
-a fresh source checkout without compiling native code. Compatible Linux wheels
-also include the evas-rust shared library for explicit Rust-engine runs.
+The packaged default is EVAS2/Rust. Compatible Linux wheels include the
+evas-rust shared library, and source installs build it with cargo unless
+`EVAS_SKIP_RUST_CORE_BUILD=1` is set.
 
-evas-rust is the optional Rust-backed execution path for supported event-driven
-designs. If your platform installed the pure Python wheel, build the Rust core
-from source before selecting evas-rust:
+If your platform installed the pure Python wheel, build the Rust core from
+source before using the default engine:
 
 ```bash
 cargo build --manifest-path evas/rust_core/Cargo.toml --release
-evas simulate path/to/tb.scs --engine evas-rust
+evas simulate path/to/tb.scs
 ```
 
-You can also select the engine with `EVAS_ENGINE=evas-rust` or
-`simulatorOptions options evas_engine=evas-rust`. The legacy `evas2` and
-`rust2` selectors remain accepted as compatibility aliases.
+Use the Python compatibility engine as an explicit fallback:
+
+```bash
+evas simulate path/to/tb.scs --engine python
+```
+
+You can also select the engine with `EVAS_ENGINE=python` or
+`simulatorOptions options evas_engine=python`. The legacy `evas2` and `rust2`
+selectors remain accepted as compatibility aliases for `evas-rust`.
