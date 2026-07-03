@@ -155,6 +155,23 @@ class RustSimTransitionSpec(ctypes.Structure):
     ]
 
 
+class RustSimSlewSpec(ctypes.Structure):
+    _fields_ = [
+        ("output_node_id", ctypes.c_size_t),
+        ("reference_node_id", ctypes.c_size_t),
+        ("target_expr_start", ctypes.c_size_t),
+        ("target_expr_count", ctypes.c_size_t),
+        ("rise_expr_start", ctypes.c_size_t),
+        ("rise_expr_count", ctypes.c_size_t),
+        ("fall_expr_start", ctypes.c_size_t),
+        ("fall_expr_count", ctypes.c_size_t),
+        ("output_bias_expr_start", ctypes.c_size_t),
+        ("output_bias_expr_count", ctypes.c_size_t),
+        ("output_scale_expr_start", ctypes.c_size_t),
+        ("output_scale_expr_count", ctypes.c_size_t),
+    ]
+
+
 BODY_EXPR_CONST = 0
 BODY_EXPR_READ_NODE = 1
 BODY_EXPR_READ_STATE = 2
@@ -355,10 +372,31 @@ class RustSimSourceRecordProgram:
                     float(getattr(transition, "default_transition", 1.0e-12) or 1.0e-12),
                 )
             )
+        slew_specs = []
+        for slew in tuple(getattr(program, "slews", ()) or ()):
+            reference_node_id = getattr(slew, "reference_node_id", None)
+            slew_specs.append(
+                RustSimSlewSpec(
+                    int(getattr(slew, "output_node_id", 0)),
+                    _usize_max() if reference_node_id is None else int(reference_node_id),
+                    int(getattr(slew, "target_expr_start", 0)),
+                    int(getattr(slew, "target_expr_count", 0)),
+                    int(getattr(slew, "rise_expr_start", 0)),
+                    int(getattr(slew, "rise_expr_count", 0)),
+                    int(getattr(slew, "fall_expr_start", 0)),
+                    int(getattr(slew, "fall_expr_count", 0)),
+                    int(getattr(slew, "output_bias_expr_start", 0)),
+                    int(getattr(slew, "output_bias_expr_count", 0)),
+                    int(getattr(slew, "output_scale_expr_start", 0)),
+                    int(getattr(slew, "output_scale_expr_count", 0)),
+                )
+            )
         event_array_type = RustSimEventSpec * len(event_specs)
         transition_array_type = RustSimTransitionSpec * len(transition_specs)
+        slew_array_type = RustSimSlewSpec * len(slew_specs)
         self._c_events = event_array_type(*event_specs)
         self._c_transitions = transition_array_type(*transition_specs)
+        self._c_slews = slew_array_type(*slew_specs)
         linear_ops = []
         for op in tuple(getattr(program, "continuous_linear_ops", ()) or ()):
             condition = getattr(op, "condition", None)
@@ -534,6 +572,10 @@ class RustSimSourceRecordProgram:
         return len(self._c_transitions)
 
     @property
+    def slew_count(self) -> int:
+        return len(self._c_slews)
+
+    @property
     def linear_batch(self):
         return self._linear_batch
 
@@ -548,6 +590,10 @@ class RustSimSourceRecordProgram:
     @property
     def transition_ptr(self):
         return self._c_transitions
+
+    @property
+    def slew_ptr(self):
+        return self._c_slews
 
     @property
     def param_ptr(self):
@@ -1766,6 +1812,8 @@ class RustBackend:
                 ctypes.c_size_t,
                 ctypes.POINTER(RustSimTransitionSpec),
                 ctypes.c_size_t,
+                ctypes.POINTER(RustSimSlewSpec),
+                ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_uint8),
                 ctypes.POINTER(ctypes.c_size_t),
                 ctypes.POINTER(ctypes.c_size_t),
@@ -2581,6 +2629,7 @@ class RustBackend:
         use_event_transition_abi = (
             program.event_count > 0
             or program.transition_count > 0
+            or program.slew_count > 0
             or len(program.body_ir_batch) > 0
         )
         use_linear_abi = (
@@ -2668,6 +2717,8 @@ class RustBackend:
                 int(program.event_count),
                 program.transition_ptr,
                 int(program.transition_count),
+                program.slew_ptr,
+                int(program.slew_count),
                 side_kinds,
                 side_specs,
                 side_arg_starts,

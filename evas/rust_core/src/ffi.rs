@@ -298,6 +298,8 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     event_count: usize,
     transitions: *const EvasRustSimTransitionSpec,
     transition_count: usize,
+    slews: *const EvasRustSimSlewSpec,
+    slew_count: usize,
     side_effect_kinds: *mut u8,
     side_effect_spec_ids: *mut usize,
     side_effect_arg_starts: *mut usize,
@@ -358,6 +360,9 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     }
     if transition_count > 0 && transitions.is_null() {
         return -1009;
+    }
+    if slew_count > 0 && slews.is_null() {
+        return -1019;
     }
     if side_effect_capacity > 0
         && (side_effect_kinds.is_null()
@@ -452,6 +457,11 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     } else {
         std::slice::from_raw_parts(transitions, transition_count)
     };
+    let slew_slice = if slew_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(slews, slew_count)
+    };
     let side_effect_kind_slice = if side_effect_capacity == 0 {
         &mut []
     } else {
@@ -528,6 +538,7 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
         body_expr_slice,
         event_slice,
         transition_slice,
+        slew_slice,
         side_effect_kind_slice,
         side_effect_spec_slice,
         side_effect_arg_start_slice,

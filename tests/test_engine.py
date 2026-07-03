@@ -9750,6 +9750,53 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(0.0, abs=0.12)
 
+    def test_rust_full_model_slew_negative_srneg_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module slew_evas2(in, out, vss);
+    input voltage in;
+    output voltage out;
+    inout voltage vss;
+    analog begin
+        V(out, vss) <+ slew(V(in, vss), 1e8, -2e8);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"in": "IN", "out": "OUT", "vss": "VSS"}
+            sim = Simulator()
+            sim.add_source("IN", pulse(1.0, 0.0, period=20e-9, width=5e-9))
+            sim.add_source("VSS", dc(0.0))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim
+
+        ref = build_sim()
+        ref_result = ref.run(tstop=12e-9, tstep=1e-9, record_step=1e-9)
+
+        rust = build_sim()
+        rust_result = rust.run(
+            tstop=12e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+        )
+
+        assert len(rust_result.time) == len(ref_result.time)
+        assert rust_result.signals["OUT"].tolist() == pytest.approx(
+            ref_result.signals["OUT"].tolist(),
+            abs=1.0e-9,
+        )
+        assert rust._perf_stats["rust_full_model_required_failures"] == 0
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_slew_count"] == 1
+
 
 class TestUserSubprograms:
 
