@@ -34,6 +34,7 @@ from evas.simulator.expr_ir import (
     TernaryExprIR,
     UnaryExprIR,
     build_state_binding_ir,
+    static_array_element_name,
     static_node_ref_name,
 )
 from evas.simulator.rust_backend import (
@@ -69,6 +70,7 @@ from evas.simulator.stmt_ir import (
     WhileStatementIR,
     classify_body_stmt_ops_rejection,
     encode_body_stmt_ops,
+    idtmod_hidden_state_names,
     lower_stmt,
     unroll_static_for_statement,
 )
@@ -539,6 +541,88 @@ def _extend_bindings_from_static_array_accesses(
             present.add(slot_name)
             next_scalar_slot += 1
     return BindingTableIR(tuple(rewritten))
+
+
+def _extend_bindings_with_idtmod_state_slots(
+    bindings: BindingTableIR,
+    stmt_ir: object,
+) -> BindingTableIR:
+    targets = set(_iter_idtmod_assignment_target_names(stmt_ir, bindings))
+    if not targets:
+        return bindings
+
+    rewritten: list[StateBindingIR] = []
+    next_scalar_slot = 0
+    for binding in bindings.bindings:
+        if binding.kind != SYMBOL_STATE_SCALAR:
+            rewritten.append(binding)
+            continue
+
+        state_binding = StateBindingIR(
+            name=binding.name,
+            kind=binding.kind,
+            slot=next_scalar_slot,
+            integer=binding.integer,
+            lo=binding.lo,
+            hi=binding.hi,
+        )
+        rewritten.append(state_binding)
+        next_scalar_slot += 1
+
+        if binding.name not in targets:
+            continue
+        for hidden_name in idtmod_hidden_state_names(binding.name):
+            rewritten.append(
+                StateBindingIR(
+                    name=hidden_name,
+                    kind=SYMBOL_STATE_SCALAR,
+                    slot=next_scalar_slot,
+                    integer=False,
+                )
+            )
+            next_scalar_slot += 1
+    return BindingTableIR(tuple(rewritten))
+
+
+def _iter_idtmod_assignment_target_names(
+    stmt_ir: object,
+    bindings: BindingTableIR,
+) -> Iterable[str]:
+    if isinstance(stmt_ir, AssignmentIR):
+        if isinstance(stmt_ir.value, FunctionCallIR) and str(stmt_ir.value.name) == "idtmod":
+            target_name = _assignment_target_name_for_bindings(stmt_ir.target, bindings)
+            if target_name is not None:
+                yield target_name
+        return
+    if isinstance(stmt_ir, BlockIR):
+        for child in stmt_ir.statements:
+            yield from _iter_idtmod_assignment_target_names(child, bindings)
+        return
+    if isinstance(stmt_ir, EventStatementIR):
+        yield from _iter_idtmod_assignment_target_names(stmt_ir.body, bindings)
+        return
+    if isinstance(stmt_ir, IfStatementIR):
+        yield from _iter_idtmod_assignment_target_names(stmt_ir.then_body, bindings)
+        if stmt_ir.else_body is not None:
+            yield from _iter_idtmod_assignment_target_names(stmt_ir.else_body, bindings)
+        return
+    if isinstance(stmt_ir, (ForStatementIR, WhileStatementIR)):
+        yield from _iter_idtmod_assignment_target_names(stmt_ir.body, bindings)
+        return
+    if isinstance(stmt_ir, CaseStatementIR):
+        for item in stmt_ir.items:
+            yield from _iter_idtmod_assignment_target_names(item.body, bindings)
+
+
+def _assignment_target_name_for_bindings(
+    target: object,
+    bindings: BindingTableIR,
+) -> Optional[str]:
+    if isinstance(target, IdentifierIR):
+        return target.name
+    if isinstance(target, ArrayAccessIR):
+        return static_array_element_name(target, bindings)
+    return None
 
 
 def _model_params(model: Any) -> Tuple[tuple[int, str, float], ...]:
@@ -1416,6 +1500,7 @@ def _convert_event_transition_ops(
         build_state_binding_ir(module),
         body_ir,
     )
+    bindings = _extend_bindings_with_idtmod_state_slots(bindings, body_ir)
     local_node_slots, node_slot_to_global = _node_slot_maps(
         model=model,
         bindings=bindings,

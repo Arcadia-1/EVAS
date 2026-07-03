@@ -1415,6 +1415,70 @@ endmodule
         assert rust_sim._perf_stats["rust_sim_program_always_body_count"] == 1
         assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 0
 
+    def test_rust_sim_program_continuous_idtmod_sine_vco_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_idtmod_vco(vin, out, metric);
+    input voltage vin;
+    output voltage out, metric;
+    parameter real center_freq = 20.0e6;
+    parameter real vco_gain = 40.0e6;
+    parameter real vco_amp = 0.25;
+    parameter real samples_per_period = 24.0;
+    real freq_q;
+    real phase_q;
+    analog begin
+        freq_q = center_freq + vco_gain * V(vin);
+        phase_q = idtmod(freq_q, 0.0, 1.0);
+        V(out) <+ vco_amp * sin(6.283185307179586 * phase_q);
+        V(metric) <+ phase_q;
+        $bound_step(1.0 / (samples_per_period * freq_q));
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "out": "OUT", "metric": "METRIC"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(0.1))
+            sim.add_model(model)
+            sim.record("OUT")
+            sim.record("METRIC")
+            result = sim.run(
+                tstop=80e-9,
+                tstep=20e-9,
+                record_step=10e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        expected_freq = 24.0e6
+        for result in (default_result, rust_result):
+            assert result.time[-1] == pytest.approx(80e-9)
+            for time_value, metric_value, out_value in zip(
+                result.time.tolist(),
+                result.signals["METRIC"].tolist(),
+                result.signals["OUT"].tolist(),
+            ):
+                expected_phase = (expected_freq * time_value) % 1.0
+                assert metric_value == pytest.approx(expected_phase, abs=1e-10)
+                assert out_value == pytest.approx(
+                    0.25 * math.sin(6.283185307179586 * expected_phase),
+                    abs=1e-10,
+                )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_rdist_normal_noise_behavior(self):
         _build_rust_core_or_skip()
         src = """\

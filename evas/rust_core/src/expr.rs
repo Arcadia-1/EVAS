@@ -283,6 +283,67 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                     return Err(-2214);
                 }
             }
+            BODY_STMT_IDTMOD => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let init_id = stmt.target_id.checked_add(1).ok_or(-2290)?;
+                let last_t_id = stmt.target_id.checked_add(2).ok_or(-2291)?;
+                let last_x_id = stmt.target_id.checked_add(3).ok_or(-2292)?;
+                let last_eval_t_id = stmt.target_id.checked_add(4).ok_or(-2293)?;
+                if last_eval_t_id >= state_values.len() {
+                    return Err(-2294);
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let (x, ic, modulus) = pop3(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2295);
+                }
+
+                if state_values[init_id] == 0.0 {
+                    let mut y = ic;
+                    if modulus != 0.0 {
+                        y = y.rem_euclid(modulus.abs());
+                    }
+                    state_values[stmt.target_id] = y;
+                    state_values[init_id] = 1.0;
+                    state_values[last_t_id] = time;
+                    state_values[last_x_id] = x;
+                    state_values[last_eval_t_id] = time;
+                    pc += 1;
+                    continue;
+                }
+                if time != state_values[last_eval_t_id] {
+                    let dt = time - state_values[last_t_id];
+                    if dt > 0.0 {
+                        let mut y =
+                            state_values[stmt.target_id] + 0.5 * (x + state_values[last_x_id]) * dt;
+                        if modulus != 0.0 {
+                            y = y.rem_euclid(modulus.abs());
+                        }
+                        state_values[stmt.target_id] = y;
+                        state_values[last_t_id] = time;
+                        state_values[last_x_id] = x;
+                    } else if dt < 0.0 {
+                        state_values[last_t_id] = time;
+                        state_values[last_x_id] = x;
+                    }
+                    state_values[last_eval_t_id] = time;
+                }
+            }
             BODY_STMT_BOUND_STEP => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;

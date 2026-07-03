@@ -53,6 +53,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_CLOSE,
     BODY_STMT_FILE_OPEN,
     BODY_STMT_FILE_WRITE,
+    BODY_STMT_IDTMOD,
     BODY_STMT_IF,
     BODY_STMT_STROBE,
     BODY_STMT_WHILE,
@@ -165,6 +166,18 @@ class EventBodyProgram:
 
     event: EventIR
     body_program: BodyStmtProgram
+
+
+IDTMOD_HIDDEN_STATE_SUFFIXES = (
+    "__evas2_idtmod_initialized",
+    "__evas2_idtmod_last_t",
+    "__evas2_idtmod_last_x",
+    "__evas2_idtmod_last_eval_t",
+)
+
+
+def idtmod_hidden_state_names(target_name: str) -> Tuple[str, ...]:
+    return tuple(f"{target_name}.{suffix}" for suffix in IDTMOD_HIDDEN_STATE_SUFFIXES)
 
 
 StmtIR = Union[
@@ -659,6 +672,70 @@ def _lower_assignment_target(
     return None
 
 
+def _append_idtmod_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+) -> Optional[bool]:
+    value = stmt_ir.value
+    if not isinstance(value, FunctionCallIR) or str(value.name) != "idtmod":
+        return None
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    target_name = _assignment_target_name(stmt_ir.target, bindings)
+    if target is None or target_name is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE or target_integer:
+        return False
+    if not _has_adjacent_idtmod_hidden_slots(target_name, target_id, bindings):
+        return False
+    if len(value.args) > 3:
+        return False
+
+    args = list(value.args)
+    if not args:
+        args.append(LiteralIR(0.0))
+    while len(args) < 3:
+        args.append(LiteralIR(0.0 if len(args) == 1 else 1.0))
+
+    encoded: list[BodyExprOp] = []
+    for arg in args:
+        arg_ops = encode_body_expr_ops(arg, bindings, node_slots)
+        if arg_ops is None:
+            return False
+        encoded.extend(arg_ops)
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_IDTMOD,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _has_adjacent_idtmod_hidden_slots(
+    target_name: str,
+    target_slot: int,
+    bindings: BindingTableIR,
+) -> bool:
+    for offset, hidden_name in enumerate(idtmod_hidden_state_names(target_name), start=1):
+        hidden = bindings.resolve(hidden_name)
+        if (
+            hidden is None
+            or hidden.kind != SYMBOL_STATE_SCALAR
+            or int(hidden.slot) != int(target_slot) + offset
+        ):
+            return False
+    return True
+
+
 def _append_body_stmt_ops(
     stmt_ir: StmtIR,
     bindings: BindingTableIR,
@@ -682,6 +759,15 @@ def _append_body_stmt_ops(
         return True
 
     if isinstance(stmt_ir, AssignmentIR):
+        idtmod_encoded = _append_idtmod_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+        )
+        if idtmod_encoded is not None:
+            return idtmod_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
             return False
