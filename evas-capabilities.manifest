@@ -4,13 +4,12 @@
 # External skills (e.g., veriloga-skills) fetch this file to determine
 # domain classification and simulation routing.
 #
-# EVAS is an event-driven voltage-domain simulator. It does NOT solve KCL
-# equations — current contributions and continuous-time analog operators
-# are permanent architectural exclusions.
+# EVAS is an event-driven voltage-domain simulator. Current benchmark
+# certification is centered on behavioral-event designs, with explicitly
+# documented behavioral helper subsets. It does NOT solve KCL/MNA equations.
 #
 # Format: one construct per line. Lines starting with # are comments.
-# Update [supported] when EVAS adds new constructs.
-# The [unsupported] list should not change.
+# Unsupported entries are annotated with support-tier names used by diagnostics.
 
 [supported]
 # --- Contributions ---
@@ -27,6 +26,18 @@ V(node1, node2) <+
 transition()
 slew()
 last_crossing()
+ddt()
+idt()
+idtmod()
+limexp()
+laplace_nd()
+laplace_np()
+laplace_zd()
+laplace_zp()
+zi_nd()
+zi_np()
+zi_zd()
+zi_zp()
 `default_transition
 # --- Variables & Parameters ---
 parameter (real, integer, string)
@@ -48,6 +59,7 @@ $strobe
 $random
 $dist_uniform()
 $rdist_normal()
+$rdist_uniform()
 $temperature
 $vt
 $fopen()
@@ -55,6 +67,11 @@ $fclose()
 $fstrobe()
 $fwrite()
 $fdisplay()
+analysis()
+ac_stim()
+flicker_noise()
+white_noise()
+noise_table()
 # --- Math ---
 abs() sqrt() ln() log() exp() pow()
 sin() cos() floor() ceil() min() max()
@@ -69,18 +86,18 @@ from [a:b] (parameter ranges)
 subckt / ends (Spectre netlist hierarchy flattening)
 
 [unsupported]
-# These are PERMANENT architectural exclusions — EVAS is event-driven,
-# not a SPICE-class KCL solver. These will never be supported.
+# support-tier: conservative-current-kcl
 I() <+
-ddt()
-idt()
-idtmod()
-laplace_nd()
-laplace_zp()
-flicker_noise()
-white_noise()
+I()
+q() <+
+branch current contributions
+indirect branch equations
+current probes
 KCL-based solving
-analysis()
-branch
+SPICE AC/DC matrix solving
+transistors
+# support-tier: ams-digital
+connectrules
+full AMS/digital event kernel
+# outside current certified support
 nature / discipline (custom)
-limexp()

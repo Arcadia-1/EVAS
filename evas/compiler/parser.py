@@ -3,6 +3,8 @@ parser.py — Recursive descent parser for Verilog-A → AST
 """
 from typing import Dict, List, Optional, Tuple
 
+from evas.support_tiers import AMS_DIGITAL, format_support_tier_hint
+
 from .ast_nodes import *
 from .lexer import Token, TokenType, tokenize
 
@@ -171,7 +173,8 @@ class Parser:
         if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
             raise ParseError(
                 f"Spectre-incompatible {context}: {token.value!r} is a "
-                "digital Verilog procedural keyword, not a Verilog-A identifier",
+                "digital Verilog procedural keyword, not a Verilog-A identifier"
+                f"{format_support_tier_hint(AMS_DIGITAL)}",
                 token,
             )
 
@@ -222,7 +225,8 @@ class Parser:
         if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
             raise ParseError(
                 f"Spectre-incompatible {context}: digital Verilog "
-                f"'{token.value}' block is not supported in Verilog-A",
+                f"'{token.value}' block is not supported in Verilog-A"
+                f"{format_support_tier_hint(AMS_DIGITAL)}",
                 token,
             )
         if token.value in _SPECTRE_RESERVED_IDENTIFIERS and self.peek_n(1).type == TokenType.BEGIN:

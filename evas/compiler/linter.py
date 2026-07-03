@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from evas.netlist.spectre_parser import parse_spectre
+from evas.support_tiers import (
+    CONSERVATIVE_CURRENT_KCL,
+    format_support_tier_hint,
+    support_boundary_message,
+    support_tier_for_function,
+    support_tier_for_parse_error,
+    unsupported_feature_message,
+)
 
 from . import ast_nodes as va_ast
 from .lexer import Token, TokenType, tokenize
@@ -44,6 +52,7 @@ class Diagnostic:
     module: Optional[str] = None
     rule: str = ""
     spectre_ids: List[str] = field(default_factory=list)
+    support_tier: str = ""
     source: str = "evas-lint"
 
     def to_dict(self) -> dict:
@@ -58,7 +67,8 @@ class Diagnostic:
                 loc += f":{self.column}"
         module = f" [{self.module}]" if self.module else ""
         ids = f" ({', '.join(self.spectre_ids)})" if self.spectre_ids else ""
-        return f"{loc}: {self.severity} {self.code}{ids}{module}: {self.message}"
+        tier = format_support_tier_hint(self.support_tier)
+        return f"{loc}: {self.severity} {self.code}{ids}{tier}{module}: {self.message}"
 
 
 def _rule(
@@ -97,6 +107,7 @@ LINT_RULE_SPECS: Dict[str, RuleSpec] = {
         _rule("EVAS-COMP-E2154", COMPAT_ERROR, "conditional-analog-operator", spectre_ids=("VACOMP-2154",), category="spectre-compat"),
         _rule("EVAS-COMP-E2157", COMPAT_ERROR, "event-body-contribution", spectre_ids=("VACOMP-2157",), category="spectre-compat"),
         _rule("EVAS-COMP-E2446", COMPAT_ERROR, "nonconstant-discipline-range", spectre_ids=("VACOMP-2446",), category="spectre-compat", phase="static-token"),
+        _rule("EVAS-COMP-EKCL", COMPAT_ERROR, "unsupported-conservative-current-kcl", category="evas-compat", oracle_status="evas-specific"),
         _rule("EVAS-COMP-EUNSUPPORTED", COMPAT_ERROR, "unsupported-function", category="evas-compat", oracle_status="evas-specific"),
         _rule("EVAS-AHDL-W5003", STATIC_WARNING, "transition-missing-rise-time", spectre_ids=("AHDLLINT-5003",)),
         _rule(
@@ -151,6 +162,7 @@ def _diag(
     column: Optional[int] = None,
     module: Optional[str] = None,
     spectre_ids: Optional[Sequence[str]] = None,
+    support_tier: str = "",
     node: object = None,
 ) -> Diagnostic:
     spec = LINT_RULE_SPECS[code]
@@ -169,6 +181,7 @@ def _diag(
         module=module,
         rule=spec.rule,
         spectre_ids=list(spec.spectre_ids if spectre_ids is None else spectre_ids),
+        support_tier=support_tier,
     )
 
 
@@ -288,6 +301,7 @@ def lint_source(
                 file=filename,
                 line=getattr(token, "line", None),
                 column=getattr(token, "col", None),
+                support_tier=support_tier_for_parse_error(str(exc)) or "",
             )
         ]
 
@@ -486,6 +500,22 @@ def _lint_statement(
         return
 
     if isinstance(stmt, va_ast.Contribution):
+        if stmt.branch.access_type.upper() == "I":
+            diagnostics.append(
+                _diag(
+                    code="EVAS-COMP-EKCL",
+                    message=support_boundary_message(
+                        "current contribution I(...) <+ ...",
+                        CONSERVATIVE_CURRENT_KCL,
+                        "EVAS has limited branch-current bookkeeping helpers, "
+                        "but does not certify KCL/MNA topology solving",
+                    ),
+                    file=filename,
+                    module=module,
+                    support_tier=CONSERVATIVE_CURRENT_KCL,
+                    node=stmt,
+                )
+            )
         if in_event:
             diagnostics.append(
                 _diag(
@@ -737,6 +767,23 @@ def _lint_statement(
         return
 
     if isinstance(stmt, va_ast.TaskCall):
+        if stmt.name == "$indirect_branch":
+            diagnostics.append(
+                _diag(
+                    code="EVAS-COMP-EKCL",
+                    message=support_boundary_message(
+                        "indirect branch equation",
+                        CONSERVATIVE_CURRENT_KCL,
+                        "EVAS preserves selected syntax as a behavioral "
+                        "helper, but does not certify conservative topology "
+                        "solving",
+                    ),
+                    file=filename,
+                    module=module,
+                    support_tier=CONSERVATIVE_CURRENT_KCL,
+                    node=stmt,
+                )
+            )
         for arg in stmt.args:
             _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
@@ -882,6 +929,22 @@ def _lint_expr(
         return
 
     if isinstance(expr, va_ast.BranchAccess):
+        if expr.access_type.upper() == "I":
+            diagnostics.append(
+                _diag(
+                    code="EVAS-COMP-EKCL",
+                    message=support_boundary_message(
+                        "current probe I(...)",
+                        CONSERVATIVE_CURRENT_KCL,
+                        "EVAS can expose selected branch-current bookkeeping, "
+                        "but does not certify KCL/MNA current solving",
+                    ),
+                    file=filename,
+                    module=module,
+                    support_tier=CONSERVATIVE_CURRENT_KCL,
+                    node=expr,
+                )
+            )
         _lint_expr(
             expr.node1_index, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, symbol_types,
@@ -942,12 +1005,19 @@ def _lint_expr(
                 )
             )
         if not _is_supported_function(expr.name, user_function_names):
+            support_tier = support_tier_for_function(expr.name)
             diagnostics.append(
                 _diag(
                     code="EVAS-COMP-EUNSUPPORTED",
-                    message=f"unsupported Verilog-A function/operator call: {expr.name}()",
+                    message=unsupported_feature_message(
+                        f"{expr.name}()",
+                        support_tier,
+                        "no EVAS behavioral implementation is registered for "
+                        "this function/operator",
+                    ),
                     file=filename,
                     module=module,
+                    support_tier=support_tier,
                     node=expr,
                 )
             )
