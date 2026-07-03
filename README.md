@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A lightweight behavioral simulator for digital/mixed-signal Verilog-A models.
-EVAS ships with a Python compatibility engine by default and an optional evas-rust backend for supported event-driven designs. No ngspice, no KCL/KVL solver.
+EVAS runs supported event-driven designs through the EVAS2/Rust backend by default, with an explicit Python compatibility fallback. No ngspice, no KCL/KVL solver.
 
 
 ---
@@ -42,20 +42,19 @@ evas list        # verify install — prints bundled example groups
 
 If `evas` is not on PATH, use `python -m evas`.
 
-The packaged default uses the Python engine so examples and user netlists run
-from PyPI or a fresh source checkout. Compatible Linux wheels also include the
-evas-rust shared library. To request evas-rust explicitly, pass
-`--engine evas-rust`, set `EVAS_ENGINE=evas-rust`, or add
-`simulatorOptions options evas_engine=evas-rust` to the testbench. If your
-platform installed the pure Python wheel, build the Rust backend from source
-first. The legacy `evas2` and `rust2` selectors remain accepted as compatibility
-aliases.
+The packaged default is EVAS2/Rust. Compatible Linux wheels include the
+`evas-rust` shared library, and source installs build it with cargo unless
+`EVAS_SKIP_RUST_CORE_BUILD=1` is set. If your platform installed the pure Python
+wheel or the Rust backend is unavailable, select the Python compatibility engine
+explicitly with `--engine python`, `EVAS_ENGINE=python`, or
+`simulatorOptions options evas_engine=python`. The legacy `evas2` and `rust2`
+selectors remain accepted as compatibility aliases for `evas-rust`.
 
 ## Simulating your own design
 
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
-evas simulate path/to/tb.scs -o output/mydesign --engine evas-rust
+evas simulate path/to/tb.scs -o output/mydesign --engine python
 evas simulate path/to/tb.scs -o output/mydesign --ahdllint
 ```
 

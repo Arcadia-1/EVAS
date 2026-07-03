@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.7.0] — 2026-07-03
+
+### Changed — Default Engine
+- Changed the packaged default engine to EVAS2/Rust (`evas-rust`) for supported
+  event-driven designs.
+- Removed automatic fallback from `evas-rust`/`evas2` to the Python engine when
+  the Rust backend is unavailable. Select the compatibility engine explicitly
+  with `--engine python`, `EVAS_ENGINE=python`, or
+  `simulatorOptions options evas_engine=python`.
+
+### Added — EVAS2/Rust Coverage
+- Added EVAS2/Rust full-model support for Spectre `vsource type=square`,
+  including one-shot square sources with omitted `period`/`width` handling.
+- Added EVAS2/Rust support for dynamic state array writes in event bodies.
+- Added EVAS2/Rust support for `idtmod` continuous VCO-style models.
+
 ## [0.6.1] — 2026-07-02
 
 ### Added — Simulation Lint Preflight

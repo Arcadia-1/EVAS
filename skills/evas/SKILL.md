@@ -32,30 +32,31 @@ EVAS acceptance is not the same as Spectre portability. If Cadence/Spectre legal
 
 ## Install And Engine Selection
 
-Default EVAS uses the Python compatibility engine and should work from PyPI or a source checkout without native compilation:
+Default EVAS uses the EVAS2/Rust engine. Use the Python compatibility engine only as an explicit fallback:
 
 ```bash
 pip install evas-sim
 evas list
 evas simulate path/to/tb.scs -o WORK/evas-run
+evas simulate path/to/tb.scs -o WORK/evas-run --engine python
 ```
 
 Use `python -m evas` if `evas` is not on `PATH`.
 
-`evas-rust` is optional and must be built before explicitly selecting it. Build from the EVAS source repo:
+The Rust backend must be present for the default engine. Compatible Linux wheels include it; source installs build it with cargo unless `EVAS_SKIP_RUST_CORE_BUILD=1` is set. If needed, build it from the EVAS source repo:
 
 ```bash
 cargo build --manifest-path evas/rust_core/Cargo.toml --release
-evas simulate path/to/tb.scs -o WORK/evas-run --engine evas-rust
+evas simulate path/to/tb.scs -o WORK/evas-run
 ```
 
 Engine selectors:
 - CLI: `--engine python` or `--engine evas-rust`
 - Environment: `EVAS_ENGINE=python` or `EVAS_ENGINE=evas-rust`
-- Testbench: `simulatorOptions options evas_engine=evas-rust`
-- Compatibility aliases: `evas2` and `rust2`
+- Testbench: `simulatorOptions options evas_engine=python` or `simulatorOptions options evas_engine=evas-rust`
+- Compatibility aliases for Rust: `evas2` and `rust2`
 
-If the user explicitly wants `evas-rust` and `cargo` is missing, install a minimal Rust toolchain only with user approval or when the user has already authorized global Rust installation. Keep build artifacts local by setting `CARGO_TARGET_DIR` to the active project's `WORK/` directory when the build is only needed for that project.
+If the user needs the default `evas-rust` engine and `cargo` is missing, install a minimal Rust toolchain only with user approval or when the user has already authorized global Rust installation. Keep build artifacts local by setting `CARGO_TARGET_DIR` to the active project's `WORK/` directory when the build is only needed for that project.
 
 ## Working Directory Discipline
 

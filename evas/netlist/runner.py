@@ -30,8 +30,6 @@ from evas.simulator.indexed import (
     build_indexed_run_plan,
     check_indexed_trace_round_trip,
 )
-from evas.simulator.rust_backend import load_optional_rust_backend
-
 from .spectre_parser import (
     SpectreNetlist,
     SpectreSource,
@@ -48,10 +46,11 @@ except ImportError:  # pragma: no cover - Python < 3.8 compatibility fallback
 try:
     VERSION = _package_version("evas-sim")
 except Exception:
-    VERSION = "0.4.5"
+    VERSION = "0.7.0"
 
-DEFAULT_EVAS_ENGINE = "python"
+PYTHON_EVAS_ENGINE = "python"
 RUST_EVAS_ENGINE = "evas-rust"
+DEFAULT_EVAS_ENGINE = RUST_EVAS_ENGINE
 _RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
 
 _EVAS_PROFILE_PRESETS = {
@@ -101,10 +100,10 @@ def _simopt_bool(simopt: Dict[str, object], key: str, default: bool = False) -> 
 def _configured_evas_engine(simopt: Dict[str, object]) -> str:
     """Resolve EVAS engine selection.
 
-    The Python engine is the packaged default because it works from PyPI and a
-    fresh source checkout without building the optional Rust shared library.
-    evas-rust remains available through explicit simulatorOptions or EVAS_ENGINE.
-    Legacy evas2/rust2 selectors are accepted as compatibility aliases.
+    EVAS2/Rust is the default execution engine. Select the Python compatibility
+    engine explicitly with simulatorOptions, EVAS_ENGINE, or the CLI when a
+    manual fallback is needed. Legacy evas2/rust2 selectors are accepted as
+    compatibility aliases for evas-rust.
     """
 
     explicit = str(simopt.get("evas_engine", "")).strip().lower()
@@ -1477,18 +1476,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    rust_required_explicit = rust_required or rust_full_model_required
-    rust_unavailable_fallback = False
     if evas_rust_engine:
-        rust_available = load_optional_rust_backend() is not None
-        if rust_available or rust_required_explicit:
-            rust_full_model_fastpath = True
-            rust_full_model_required = True
-            rust_required = True
-        else:
-            evas_rust_engine = False
-            evas_engine = DEFAULT_EVAS_ENGINE
-            rust_unavailable_fallback = True
+        rust_full_model_fastpath = True
+        rust_full_model_required = True
+        rust_required = True
     indexed_arrays_effective = (
         indexed_arrays
         or rust_static_eval
@@ -1562,13 +1553,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_rust_full_model_required = true")
     if evas_rust_engine:
         log.write(f"    evas_engine = {RUST_EVAS_ENGINE}")
-    elif rust_unavailable_fallback:
-        log.write(f"    evas_engine = {DEFAULT_EVAS_ENGINE}")
-        log.write("    evas_rust_unavailable_fallback = true")
-        log.write(
-            "    evas_rust_unavailable_reason = optional Rust backend could "
-            "not be loaded; using python engine"
-        )
+    elif evas_engine == PYTHON_EVAS_ENGINE:
+        log.write(f"    evas_engine = {PYTHON_EVAS_ENGINE}")
     if event_trace_audit:
         log.write("    evas_event_trace_audit = true")
     if rust_required:

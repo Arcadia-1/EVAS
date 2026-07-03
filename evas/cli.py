@@ -114,8 +114,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(resolved, target)
 
-    # Simulate directly. The packaged default engine is Python; callers can
-    # request evas-rust explicitly when the Rust backend has been built.
+    # Simulate directly. The packaged default engine is evas-rust; callers can
+    # request the Python compatibility engine explicitly as a fallback.
     output_dir = Path.cwd() / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,7 +188,7 @@ def main() -> None:
     p_sim.add_argument(
         "--engine",
         choices=["python", "evas-rust", "evas2", "rust2"],
-        help="Engine override. The default is python; evas-rust requires the Rust backend.",
+        help="Engine override. The default is evas-rust; use python for manual fallback.",
     )
     p_sim.add_argument(
         "--ahdllint",
@@ -211,7 +211,7 @@ def main() -> None:
     p_run.add_argument(
         "--engine",
         choices=["python", "evas-rust", "evas2", "rust2"],
-        help="Engine override. The default is python; evas-rust requires the Rust backend.",
+        help="Engine override. The default is evas-rust; use python for manual fallback.",
     )
     p_run.set_defaults(func=cmd_run)
 
