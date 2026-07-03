@@ -60,6 +60,14 @@ _AMS_DIGITAL_FUNCTIONS = {
 }
 
 
+def _is_stochastic_function_name(name: str) -> bool:
+    return (
+        name in {"white_noise", "flicker_noise", "noise_table", "$random"}
+        or name.startswith("$rdist_")
+        or name.startswith("$dist_")
+    )
+
+
 def format_support_tier_hint(tier: str | None) -> str:
     """Return the visible diagnostic suffix for a support tier."""
     return f" [support-tier: {tier}]" if tier else ""
@@ -72,6 +80,8 @@ def support_tier_for_function(name: str) -> str:
         return BEHAVIORAL_CONTINUOUS_TIME
     if normalized in _AMS_DIGITAL_FUNCTIONS:
         return AMS_DIGITAL
+    if _is_stochastic_function_name(normalized):
+        return BEHAVIORAL_EVENT
     return OUTSIDE_CURRENT_SCOPE
 
 

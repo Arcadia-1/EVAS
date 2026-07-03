@@ -15,6 +15,8 @@ from evas.compiler.linter import (
 )
 from evas.support_tiers import (
     AMS_DIGITAL,
+    BEHAVIORAL_CONTINUOUS_TIME,
+    BEHAVIORAL_EVENT,
     CONSERVATIVE_CURRENT_KCL,
     OUTSIDE_CURRENT_SCOPE,
 )
@@ -615,6 +617,49 @@ def test_unsupported_function_is_compat_error():
     assert "EVAS-COMP-EUNSUPPORTED" in _codes(diags)
     assert diag.support_tier == OUTSIDE_CURRENT_SCOPE
     assert f"support-tier: {OUTSIDE_CURRENT_SCOPE}" in diag.format_text()
+    assert has_compat_errors(diags)
+
+
+def test_unsupported_continuous_time_operator_is_tiered():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module unsupported_ct(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            analog begin
+                V(out) <+ absdelay(V(inp), 1n);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EUNSUPPORTED")
+
+    assert diag.support_tier == BEHAVIORAL_CONTINUOUS_TIME
+    assert "absdelay()" in diag.message
+    assert f"support-tier: {BEHAVIORAL_CONTINUOUS_TIME}" in diag.format_text()
+    assert has_compat_errors(diags)
+
+
+def test_unsupported_random_distribution_is_behavioral_event_tiered():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module unsupported_dist(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ $rdist_gamma(17, 2.0, 1.0);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EUNSUPPORTED")
+
+    assert diag.support_tier == BEHAVIORAL_EVENT
+    assert "$rdist_gamma()" in diag.message
+    assert f"support-tier: {BEHAVIORAL_EVENT}" in diag.format_text()
     assert has_compat_errors(diags)
 
 

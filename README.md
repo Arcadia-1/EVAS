@@ -146,6 +146,37 @@ Certification boundary: current EVAS benchmark PASS claims apply to
 Rows that require full `ams-digital` or `conservative-current-kcl` semantics must
 be reported separately from supported EVAS bugs.
 
+Continuous-time policy: `ddt()`, `idt()`, `idtmod()`, `laplace_nd()`,
+`laplace_np()`, `laplace_zd()`, `laplace_zp()`, `zi_nd()`, `zi_np()`,
+`zi_zd()`, `zi_zp()`, and `limexp()` are supported as voltage-domain
+behavioral transient approximations in ordinary analog statements. EVAS rejects
+Spectre-illegal conditional/event-body placements through lint or compile-time
+diagnostics. Unsupported continuous-time operators such as `absdelay()` are
+reported as `behavioral-continuous-time`, not as generic parser gaps.
+
+Noise and stochastic policy: in ordinary transient analysis,
+`white_noise()`, `flicker_noise()`, and `noise_table()` contribute zero
+instantaneous random voltage and expose their PSD through `evaluate_noise()`,
+`noise_spectrum()`, and `integrated_noise()`. Explicit `$random`, `$dist_*()`,
+and `$rdist_*()` calls produce deterministic fixed-seed behavioral draws; the
+same seed and draw order reproduce the same sequence. Supported distribution
+helpers include uniform, normal, exponential, poisson, chi-square, t, and
+erlang forms. Unsupported distribution names produce an
+`EVAS-COMP-EUNSUPPORTED` diagnostic in the `behavioral-event` tier.
+
+Subprogram policy: EVAS supports Spectre-style old-form functions/tasks
+(`input x; real x;`), ANSI-style task/function arguments, local variables,
+multi-argument calls, bounded recursion, and task/function calls from event
+bodies with normal state-update ordering.
+
+Vector and indexing policy: pure expression bit-select, part-select,
+concatenation, replication, reduction, packed logic vectors, and integer/real
+state arrays are separate from electrical topology. Static `generate`/`genvar`
+elaboration is supported for a limited behavioral/continuous-assign subset.
+Runtime voltage-domain electrical indexing such as `V(bus[i])` and
+`V(bus[i]) <+ ...` is supported by dynamic node resolution; dynamic current
+indexing remains part of the unsupported `conservative-current-kcl` tier.
+
 | Feature | Status |
 |---------|--------|
 | `V(node) <+`, `V(a,b)` differential | ✅ |
@@ -156,6 +187,8 @@ be reported separately from supported EVAS bugs.
 | `slew(x, maxrise, maxfall)` transient limiter | ✅ (behavioral approximation) |
 | `for`, `repeat`, `while`, `do while`, `if/else`, `case/endcase`, `begin/end` | ✅ |
 | arrays, including integer/real 1-D and 2-D state arrays | ✅ |
+| bit/part select, concat, replication, reduction, packed logic vectors | ✅ |
+| runtime voltage electrical indexing such as `V(bus[i])` | ✅ |
 | `branch (p,n) br; V(br)` named branch voltage probes | ✅ |
 | `$analog_node_alias()` and string OOMR voltage probes such as `V(sigpath)` | ✅ |
 | `$table_model()` 1-D file tables and simple 2-D array-backed surfaces | ✅ |

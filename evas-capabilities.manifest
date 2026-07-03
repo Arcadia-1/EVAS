@@ -45,10 +45,18 @@ real
 integer
 genvar
 arrays
+bit select
+part select
+concatenation
+replication
+reduction operators
+packed logic vectors
+runtime voltage electrical indexing
 string .substr()
 # --- Control flow ---
 if/else
 for
+generate / genvar (limited static elaboration)
 begin/end
 case/endcase
 # --- System functions ---
@@ -80,6 +88,10 @@ sin() cos() floor() ceil() min() max()
 `define
 # --- Other ---
 from [a:b] (parameter ranges)
+logic / wreal bridge subset
+simple always @(posedge/negedge)
+simple continuous assign
+simple specify/specparam path delay
 
 [not_yet_implemented]
 # Parser supports these constructs but the runner does not yet act on them.
@@ -93,6 +105,7 @@ q() <+
 branch current contributions
 indirect branch equations
 current probes
+runtime current electrical indexing
 KCL-based solving
 SPICE AC/DC matrix solving
 transistors

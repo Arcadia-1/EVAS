@@ -28,3 +28,73 @@ reports `support_tier="ams-digital"` when it reaches the parser. Unknown
 unregistered function/operator calls report `support_tier="outside-current-scope"`
 so benchmark tooling can separate truly unclassified constructs from the four
 documented support tiers.
+
+## Continuous-Time Operators
+
+EVAS supports `ddt()`, `idt()`, `idtmod()`, `laplace_nd()`, `laplace_np()`,
+`laplace_zd()`, `laplace_zp()`, `zi_nd()`, `zi_np()`, `zi_zd()`, `zi_zp()`,
+and `limexp()` as voltage-domain behavioral transient approximations. The
+implementation uses finite-difference, trapezoidal integration, and simple
+state/filter updates inside the behavioral evaluator. This is intentionally
+separate from current-domain contribution stamping or full Spectre
+transfer-function solving.
+
+Spectre-restricted placements, such as conditional `idt()` or event-local
+analog contributions, are reported through compatibility diagnostics. Legal
+continuous-time operators without an EVAS implementation, for example
+`absdelay()`, report `EVAS-COMP-EUNSUPPORTED` with
+`support_tier="behavioral-continuous-time"`.
+
+## Noise and Stochastic Semantics
+
+In ordinary transient analysis, `white_noise()`, `flicker_noise()`, and
+`noise_table()` do not create arbitrary random transient waveforms. They return
+a zero transient contribution and expose PSD data through the behavioral
+`evaluate_noise()`, `noise_spectrum()`, and `integrated_noise()` helpers.
+
+Explicit `$random`, `$dist_*()`, and `$rdist_*()` calls are behavioral random
+draws. EVAS makes fixed-seed draws reproducible; the same seed and draw order
+produce the same sequence across runs. Supported distributions include uniform,
+normal, exponential, poisson, chi-square, t, and erlang variants. Unsupported
+distribution names, such as an unimplemented `$rdist_gamma()`, fail with
+`EVAS-COMP-EUNSUPPORTED` and `support_tier="behavioral-event"`.
+
+## Subprograms
+
+EVAS supports Spectre-style function/task declarations such as `input x; real
+x;`, ANSI-style task/function arguments, local variables, multi-argument calls,
+bounded recursive functions, and task/function calls inside event bodies. These
+are covered by conformance tests for simple functions, recursive functions,
+task-local variables, and state updates through task calls.
+
+## Vectors, Generate, and Electrical Indexing
+
+Pure expression vector semantics are separate from electrical topology. EVAS
+supports bit select, part select, concatenation, replication, reductions,
+packed logic vectors, and integer/real state arrays.
+
+Static `generate`/`genvar` elaboration is supported for the limited
+behavioral/continuous-assign subset used by supported bridge models. This is
+not the same as a full AMS generate/connect-rule implementation.
+
+Runtime voltage-domain electrical indexing such as `V(bus[i])` and
+`V(bus[i]) <+ ...` is supported by dynamic node resolution and cache-backed
+node lookup. Runtime current-domain indexing belongs to the unsupported
+`conservative-current-kcl` tier.
+
+## AMS-Digital Boundary
+
+EVAS includes a small `ams-digital` bridge subset: `logic` and `wreal` ports,
+simple continuous `assign`, edge-sensitive `always @(posedge/negedge ...)`,
+packed logic vector operations, and simple `specify`/`specparam` path delays on
+behavioral assignments. Full four-state logic, connectmodule/connectrules
+resolution, and a complete AMS event kernel are outside current benchmark
+certification.
+
+## KCL/MNA Boundary
+
+EVAS does not certify conservative current solving. `I(...) <+ ...`, `I(...)`
+current probes, indirect branch equations, charge/current contributions, and
+SPICE-style AC/DC matrix solving are classified as `conservative-current-kcl`.
+`evas lint` and `evas simulate --ahdllint` report this tier explicitly so these
+rows are tracked as architectural roadmap work rather than parser bugs.
