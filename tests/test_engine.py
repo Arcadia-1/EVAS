@@ -6321,6 +6321,12 @@ endmodule
         val = self.model._slew("s2", time=1e-9, target=0.0, maxrise=1e8, maxfall=2e8)
         assert val == pytest.approx(0.8, abs=1e-12)
 
+    def test_slew_accepts_cadence_negative_falling_rate(self):
+        self.model._slew("s2_neg", time=0.0, target=1.0, maxrise=1e8, maxfall=-2e8)
+        # Cadence Verilog-A SRneg is negative; its magnitude limits falling slope.
+        val = self.model._slew("s2_neg", time=1e-9, target=0.0, maxrise=1e8, maxfall=-2e8)
+        assert val == pytest.approx(0.8, abs=1e-12)
+
     def test_slew_zero_limit_means_unlimited(self):
         self.model._slew("s3", time=0.0, target=0.0, maxrise=0.0, maxfall=0.0)
         val = self.model._slew("s3", time=1e-9, target=1.0, maxrise=0.0, maxfall=0.0)
@@ -9709,6 +9715,40 @@ endmodule
 
         # By 15ns, with 1e8 V/s rise limit and 10ns elapsed since 5ns step, output nears 1V.
         assert result.signals["out"][-1] == pytest.approx(1.0, abs=0.1)
+
+    def test_slew_cadence_negative_srneg_limits_fall(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module slew_fall_test(out, vss);
+    output voltage out;
+    inout voltage vss;
+    real target;
+    analog begin
+        @(initial_step) target = 1.0;
+        @(timer(5e-9)) target = 0.0;
+        V(out, vss) <+ slew(target, 1e8, -2e8);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("vss", dc(0.0))
+        sim.record("out")
+        result = sim.run(tstop=12e-9, tstep=1e-9)
+
+        idx_5ns = min(range(len(result.time)), key=lambda i: abs(result.time[i] - 5e-9))
+        idx_6ns = min(range(len(result.time)), key=lambda i: abs(result.time[i] - 6e-9))
+        assert result.signals["out"][idx_5ns] == pytest.approx(0.8, abs=0.08)
+        assert result.signals["out"][idx_6ns] == pytest.approx(0.6, abs=0.08)
+
+        assert result.signals["out"][-1] == pytest.approx(0.0, abs=0.12)
 
 
 class TestUserSubprograms:
