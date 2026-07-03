@@ -78,6 +78,7 @@ from evas.simulator.transition_runtime import encode_transition_contribution_pro
 
 SOURCE_DC = "dc"
 SOURCE_PULSE = "pulse"
+SOURCE_SQUARE = "square"
 SOURCE_SINE = "sine"
 SOURCE_PWL = "pwl"
 EVENT_DUE_ALWAYS = "always"
@@ -1826,7 +1827,7 @@ def _source_from_metadata(
             ),
             None,
         )
-    if kind == SOURCE_PULSE:
+    if kind in (SOURCE_PULSE, SOURCE_SQUARE):
         flags = 0
         if bool(meta.get("has_width", False)):
             flags |= 1
