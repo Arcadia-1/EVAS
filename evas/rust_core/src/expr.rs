@@ -283,6 +283,107 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                     return Err(-2214);
                 }
             }
+            BODY_STMT_LAST_CROSSING => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let init_id = stmt.target_id.checked_add(1).ok_or(-2280)?;
+                let prev_t_id = stmt.target_id.checked_add(2).ok_or(-2281)?;
+                let prev_x_id = stmt.target_id.checked_add(3).ok_or(-2282)?;
+                if prev_x_id >= state_values.len() {
+                    return Err(-2283);
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let expr_tol = pop1(&mut stack)?.abs();
+                let time_tol = pop1(&mut stack)?.max(0.0);
+                let direction = pop1(&mut stack)?;
+                let mut value = pop1(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2284);
+                }
+
+                if state_values[init_id] == 0.0 {
+                    state_values[init_id] = 1.0;
+                    state_values[prev_t_id] = time;
+                    state_values[prev_x_id] = value;
+                    pc += 1;
+                    continue;
+                }
+
+                let prev_value = state_values[prev_x_id];
+                let prev_time = state_values[prev_t_id];
+                let mut triggered = false;
+                let mut trigger_direction = 0_i32;
+                let mut trigger_went_beyond = false;
+                let mut crossing_time = state_values[stmt.target_id];
+
+                let interpolate_cross_time = || -> f64 {
+                    let delta = value - prev_value;
+                    let frac = if delta.abs() > 1.0e-30 {
+                        (-prev_value / delta).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    prev_time + frac * (time - prev_time)
+                };
+
+                if direction >= 0.0 && prev_value < -expr_tol {
+                    if value > expr_tol {
+                        triggered = true;
+                        trigger_direction = 1;
+                        trigger_went_beyond = true;
+                        crossing_time = interpolate_cross_time();
+                    } else if value.abs() <= expr_tol {
+                        triggered = true;
+                        trigger_direction = 1;
+                        crossing_time = interpolate_cross_time();
+                    }
+                }
+                if !triggered && direction <= 0.0 && prev_value > expr_tol {
+                    if value < -expr_tol {
+                        triggered = true;
+                        trigger_direction = -1;
+                        trigger_went_beyond = true;
+                        crossing_time = interpolate_cross_time();
+                    } else if value.abs() <= expr_tol {
+                        triggered = true;
+                        trigger_direction = -1;
+                        crossing_time = interpolate_cross_time();
+                    }
+                }
+
+                if triggered {
+                    let previous_crossing_time = state_values[stmt.target_id];
+                    if previous_crossing_time < 0.0
+                        || (crossing_time - previous_crossing_time).abs() > time_tol
+                    {
+                        state_values[stmt.target_id] = crossing_time;
+                    }
+                    if trigger_went_beyond {
+                        let sign_eps = expr_tol.max(1.0e-18);
+                        if trigger_direction < 0 {
+                            value = value.min(-sign_eps);
+                        } else if trigger_direction > 0 {
+                            value = value.max(sign_eps);
+                        }
+                    }
+                }
+                state_values[prev_t_id] = time;
+                state_values[prev_x_id] = value;
+            }
             BODY_STMT_IDTMOD => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;

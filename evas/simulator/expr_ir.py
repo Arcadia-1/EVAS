@@ -70,6 +70,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_NEG,
     BODY_EXPR_NOT,
     BODY_EXPR_POW,
+    BODY_EXPR_RANDOM_INT32,
     BODY_EXPR_RDIST_NORMAL,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
@@ -195,6 +196,7 @@ _BODY_FUNCTION_OPS = {
     "min": (BODY_EXPR_MIN, 2),
     "max": (BODY_EXPR_MAX, 2),
     "pow": (BODY_EXPR_POW, 2),
+    "$random": (BODY_EXPR_RANDOM_INT32, 1),
     "$rdist_normal": (BODY_EXPR_RDIST_NORMAL, 3),
 }
 

@@ -71,6 +71,7 @@ from evas.simulator.stmt_ir import (
     classify_body_stmt_ops_rejection,
     encode_body_stmt_ops,
     idtmod_hidden_state_names,
+    last_crossing_hidden_state_names,
     lower_stmt,
     unroll_static_for_statement,
 )
@@ -544,12 +545,15 @@ def _extend_bindings_from_static_array_accesses(
     return BindingTableIR(tuple(rewritten))
 
 
-def _extend_bindings_with_idtmod_state_slots(
+def _extend_bindings_with_stateful_function_slots(
     bindings: BindingTableIR,
     stmt_ir: object,
 ) -> BindingTableIR:
-    targets = set(_iter_idtmod_assignment_target_names(stmt_ir, bindings))
-    if not targets:
+    idtmod_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "idtmod"))
+    last_crossing_targets = set(
+        _iter_stateful_assignment_target_names(stmt_ir, bindings, "last_crossing")
+    )
+    if not idtmod_targets and not last_crossing_targets:
         return bindings
 
     rewritten: list[StateBindingIR] = []
@@ -570,9 +574,12 @@ def _extend_bindings_with_idtmod_state_slots(
         rewritten.append(state_binding)
         next_scalar_slot += 1
 
-        if binding.name not in targets:
-            continue
-        for hidden_name in idtmod_hidden_state_names(binding.name):
+        hidden_names: list[str] = []
+        if binding.name in idtmod_targets:
+            hidden_names.extend(idtmod_hidden_state_names(binding.name))
+        if binding.name in last_crossing_targets:
+            hidden_names.extend(last_crossing_hidden_state_names(binding.name))
+        for hidden_name in hidden_names:
             rewritten.append(
                 StateBindingIR(
                     name=hidden_name,
@@ -585,34 +592,40 @@ def _extend_bindings_with_idtmod_state_slots(
     return BindingTableIR(tuple(rewritten))
 
 
-def _iter_idtmod_assignment_target_names(
+def _iter_stateful_assignment_target_names(
     stmt_ir: object,
     bindings: BindingTableIR,
+    function_name: str,
 ) -> Iterable[str]:
     if isinstance(stmt_ir, AssignmentIR):
-        if isinstance(stmt_ir.value, FunctionCallIR) and str(stmt_ir.value.name) == "idtmod":
+        if (
+            isinstance(stmt_ir.value, FunctionCallIR)
+            and str(stmt_ir.value.name) == function_name
+        ):
             target_name = _assignment_target_name_for_bindings(stmt_ir.target, bindings)
             if target_name is not None:
                 yield target_name
         return
     if isinstance(stmt_ir, BlockIR):
         for child in stmt_ir.statements:
-            yield from _iter_idtmod_assignment_target_names(child, bindings)
+            yield from _iter_stateful_assignment_target_names(child, bindings, function_name)
         return
     if isinstance(stmt_ir, EventStatementIR):
-        yield from _iter_idtmod_assignment_target_names(stmt_ir.body, bindings)
+        yield from _iter_stateful_assignment_target_names(stmt_ir.body, bindings, function_name)
         return
     if isinstance(stmt_ir, IfStatementIR):
-        yield from _iter_idtmod_assignment_target_names(stmt_ir.then_body, bindings)
+        yield from _iter_stateful_assignment_target_names(stmt_ir.then_body, bindings, function_name)
         if stmt_ir.else_body is not None:
-            yield from _iter_idtmod_assignment_target_names(stmt_ir.else_body, bindings)
+            yield from _iter_stateful_assignment_target_names(
+                stmt_ir.else_body, bindings, function_name
+            )
         return
     if isinstance(stmt_ir, (ForStatementIR, WhileStatementIR)):
-        yield from _iter_idtmod_assignment_target_names(stmt_ir.body, bindings)
+        yield from _iter_stateful_assignment_target_names(stmt_ir.body, bindings, function_name)
         return
     if isinstance(stmt_ir, CaseStatementIR):
         for item in stmt_ir.items:
-            yield from _iter_idtmod_assignment_target_names(item.body, bindings)
+            yield from _iter_stateful_assignment_target_names(item.body, bindings, function_name)
 
 
 def _assignment_target_name_for_bindings(
@@ -1501,7 +1514,7 @@ def _convert_event_transition_ops(
         build_state_binding_ir(module),
         body_ir,
     )
-    bindings = _extend_bindings_with_idtmod_state_slots(bindings, body_ir)
+    bindings = _extend_bindings_with_stateful_function_slots(bindings, body_ir)
     local_node_slots, node_slot_to_global = _node_slot_maps(
         model=model,
         bindings=bindings,

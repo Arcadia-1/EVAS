@@ -56,6 +56,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_WRITE,
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
+    BODY_STMT_LAST_CROSSING,
     BODY_STMT_STROBE,
     BODY_STMT_WHILE,
     BODY_TARGET_NODE,
@@ -176,9 +177,19 @@ IDTMOD_HIDDEN_STATE_SUFFIXES = (
     "__evas2_idtmod_last_eval_t",
 )
 
+LAST_CROSSING_HIDDEN_STATE_SUFFIXES = (
+    "__evas2_last_crossing_initialized",
+    "__evas2_last_crossing_prev_t",
+    "__evas2_last_crossing_prev_x",
+)
+
 
 def idtmod_hidden_state_names(target_name: str) -> Tuple[str, ...]:
     return tuple(f"{target_name}.{suffix}" for suffix in IDTMOD_HIDDEN_STATE_SUFFIXES)
+
+
+def last_crossing_hidden_state_names(target_name: str) -> Tuple[str, ...]:
+    return tuple(f"{target_name}.{suffix}" for suffix in LAST_CROSSING_HIDDEN_STATE_SUFFIXES)
 
 
 StmtIR = Union[
@@ -611,7 +622,7 @@ def _iter_expr_rejection_tags(
             yield "transition_expr"
         elif name in {"cross", "above", "timer", "idtmod", "last_crossing", "slew"}:
             yield f"stateful_analog_function:{name}"
-        elif name.startswith("$"):
+        elif name.startswith("$") and name not in {"$random", "$rdist_normal"}:
             yield f"system_function:{name}"
         elif name not in {
             "abs",
@@ -782,12 +793,81 @@ def _append_idtmod_assignment_stmt_ops(
     return True
 
 
+def _append_last_crossing_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+) -> Optional[bool]:
+    value = stmt_ir.value
+    if not isinstance(value, FunctionCallIR) or str(value.name) != "last_crossing":
+        return None
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    target_name = _assignment_target_name(stmt_ir.target, bindings)
+    if target is None or target_name is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE or target_integer:
+        return False
+    if not _has_adjacent_last_crossing_hidden_slots(target_name, target_id, bindings):
+        return False
+    if len(value.args) > 4:
+        return False
+
+    args = list(value.args)
+    if not args:
+        args.append(LiteralIR(0.0))
+    while len(args) < 4:
+        if len(args) == 1:
+            args.append(LiteralIR(0.0))
+        elif len(args) == 2:
+            args.append(LiteralIR(0.0))
+        else:
+            args.append(LiteralIR(1.0e-12))
+
+    encoded: list[BodyExprOp] = []
+    for arg in args:
+        arg_ops = encode_body_expr_ops(arg, bindings, node_slots)
+        if arg_ops is None:
+            return False
+        encoded.extend(arg_ops)
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_LAST_CROSSING,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
 def _has_adjacent_idtmod_hidden_slots(
     target_name: str,
     target_slot: int,
     bindings: BindingTableIR,
 ) -> bool:
     for offset, hidden_name in enumerate(idtmod_hidden_state_names(target_name), start=1):
+        hidden = bindings.resolve(hidden_name)
+        if (
+            hidden is None
+            or hidden.kind != SYMBOL_STATE_SCALAR
+            or int(hidden.slot) != int(target_slot) + offset
+        ):
+            return False
+    return True
+
+
+def _has_adjacent_last_crossing_hidden_slots(
+    target_name: str,
+    target_slot: int,
+    bindings: BindingTableIR,
+) -> bool:
+    for offset, hidden_name in enumerate(last_crossing_hidden_state_names(target_name), start=1):
         hidden = bindings.resolve(hidden_name)
         if (
             hidden is None
@@ -830,6 +910,15 @@ def _append_body_stmt_ops(
         )
         if idtmod_encoded is not None:
             return idtmod_encoded
+        last_crossing_encoded = _append_last_crossing_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+        )
+        if last_crossing_encoded is not None:
+            return last_crossing_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
             lowered_array_assignment = _dynamic_array_assignment_to_if_chain(

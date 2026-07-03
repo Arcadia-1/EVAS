@@ -1680,6 +1680,72 @@ endmodule
         assert rust_sim._perf_stats["rust_sim_program_always_body_count"] == 1
         assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
 
+    def test_rust_sim_program_cross_samples_current_idtmod_state(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_idtmod_sample(clk, out, metric);
+    input voltage clk;
+    output voltage out, metric;
+    parameter real freq = 1.25e6;
+    real phase_q;
+    real sample_q;
+    analog begin
+        phase_q = idtmod(freq, 0.0, 1.0);
+        @(initial_step) begin
+            sample_q = 0.0;
+        end
+        @(cross(V(clk) - 0.45, +1)) begin
+            sample_q = phase_q;
+        end
+        V(out) <+ sample_q;
+        V(metric) <+ phase_q;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "out": "OUT", "metric": "METRIC"}
+            sim = Simulator()
+            sim.add_source(
+                "CLK",
+                pulse(
+                    0.0,
+                    1.0,
+                    delay=100e-9,
+                    period=200e-9,
+                    width=80e-9,
+                    rise=1e-12,
+                    fall=1e-12,
+                ),
+            )
+            sim.add_model(model)
+            sim.record("OUT")
+            sim.record("METRIC")
+            result = sim.run(
+                tstop=760e-9,
+                tstep=20e-9,
+                record_step=20e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        rust_result, rust_sim = run_model(True)
+
+        final_sample = float(rust_result.signals["OUT"][-1])
+        final_phase = float(rust_result.signals["METRIC"][-1])
+        expected_sample = (1.25e6 * (700e-9 + 0.45e-12)) % 1.0
+        expected_phase = (1.25e6 * 760e-9) % 1.0
+        assert final_sample == pytest.approx(expected_sample, abs=1e-5)
+        assert final_phase == pytest.approx(expected_phase, abs=1e-10)
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_rdist_normal_noise_behavior(self):
         _build_rust_core_or_skip()
         src = """\
@@ -1727,6 +1793,66 @@ endmodule
         assert max(abs(float(value)) for value in noises.tolist()) > 0.05
         assert sim._perf_stats["rust_sim_program_enabled"] == 1
         assert sim._perf_stats["rust_sim_program_always_body_count"] == 1
+
+    def test_rust_sim_program_random_event_body_lowers(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_random_event(clk, out, metric);
+    input voltage clk;
+    output voltage out, metric;
+    integer seed_q;
+    integer raw_q;
+    integer code_q;
+    real out_q;
+    analog begin
+        @(initial_step) begin
+            seed_q = 19;
+            code_q = 0;
+            out_q = 0.0;
+        end
+        @(cross(V(clk) - 0.45, +1)) begin
+            raw_q = $random(seed_q);
+            code_q = raw_q % 5;
+            if (code_q < 0) begin
+                code_q = -code_q;
+            end
+            out_q = 0.05 * code_q;
+        end
+        V(out) <+ out_q;
+        V(metric) <+ code_q;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT", "metric": "METRIC"}
+        sim = Simulator()
+        sim.add_source(
+            "CLK",
+            pulse(0.0, 1.0, delay=1e-9, period=2e-9, width=0.8e-9),
+        )
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.record("METRIC")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=0.25e-9,
+            record_step=0.25e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        metric_values = [round(float(value)) for value in result.signals["METRIC"].tolist()]
+        assert all(0 <= value <= 4 for value in metric_values)
+        assert len(set(metric_values)) >= 2
+        assert result.signals["OUT"].tolist() == pytest.approx(
+            [0.05 * value for value in metric_values], abs=1e-12
+        )
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
 
     def test_time_array_starts_at_zero(self):
         sim = Simulator()
@@ -7973,6 +8099,50 @@ endmodule
 
         # Ramp crosses 0.5 near 5ns.
         assert result.signals["tlast"][-1] == pytest.approx(5e-9, abs=2e-9)
+
+    def test_rust_sim_program_last_crossing_assignment_lowers(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_last_crossing_probe(vin, out, tlast);
+    input voltage vin;
+    output voltage out;
+    output voltage tlast;
+    real lc;
+    integer seen;
+    analog begin
+        @(initial_step) seen = 0;
+        lc = last_crossing(V(vin) - 0.5, +1);
+        @(cross(V(vin) - 0.5, +1))
+            seen = 1;
+        V(out) <+ seen;
+        V(tlast) <+ lc;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"vin": "VIN", "out": "OUT", "tlast": "TLAST"}
+
+        sim = Simulator()
+        sim.add_source("VIN", pwl([0.0, 10e-9, 20e-9], [0.0, 1.0, 1.0]))
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.record("TLAST")
+        result = sim.run(
+            tstop=20e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["OUT"][-1] == pytest.approx(1.0)
+        assert result.signals["TLAST"][-1] == pytest.approx(5e-9, abs=2e-12)
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
 
 
 class TestWhileStatement:

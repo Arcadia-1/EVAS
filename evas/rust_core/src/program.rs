@@ -1191,6 +1191,72 @@ pub(crate) fn rust_sim_execute_events(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn rust_sim_execute_always_events(
+    events: &[EvasRustSimEventSpec],
+    body_stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    param_values: &[f64],
+    bound_step_limit: &mut f64,
+    side_effect_log: &mut RustSideEffectLog<'_>,
+    time: f64,
+    phase: u8,
+) -> Result<usize, i32> {
+    rust_sim_execute_always_events_in_range(
+        events,
+        body_stmt_ops,
+        body_expr_ops,
+        node_values,
+        state_values,
+        param_values,
+        bound_step_limit,
+        side_effect_log,
+        time,
+        phase,
+        0,
+        events.len(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rust_sim_execute_always_events_in_range(
+    events: &[EvasRustSimEventSpec],
+    body_stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    param_values: &[f64],
+    bound_step_limit: &mut f64,
+    side_effect_log: &mut RustSideEffectLog<'_>,
+    time: f64,
+    phase: u8,
+    start_idx: usize,
+    end_idx: usize,
+) -> Result<usize, i32> {
+    let mut fired_count = 0_usize;
+    let capped_end = end_idx.min(events.len());
+    for event in &events[start_idx.min(capped_end)..capped_end] {
+        if event.phase != phase || event.kind != RUST_SIM_EVENT_ALWAYS {
+            continue;
+        }
+        rust_sim_execute_event_body(
+            event,
+            body_stmt_ops,
+            body_expr_ops,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            bound_step_limit,
+            Some(&mut *side_effect_log),
+        )?;
+        fired_count += 1;
+    }
+    Ok(fired_count)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_execute_final_step_events(
     events: &[EvasRustSimEventSpec],
     body_stmt_ops: &[EvasRustBodyStmtOp],
@@ -2155,6 +2221,20 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             bound_step_limit,
             Some(&mut *side_effect_log),
         )?;
+        fired += rust_sim_execute_always_events_in_range(
+            events,
+            body_stmt_ops,
+            body_expr_ops,
+            node_values,
+            state_values,
+            param_values,
+            bound_step_limit,
+            side_effect_log,
+            event_time,
+            RUST_SIM_EVENT_PHASE_PRE,
+            candidate.event_idx.saturating_add(1),
+            events.len(),
+        )?;
         evaluate_static_linear_ops(
             linear_ops,
             linear_terms,
@@ -2309,6 +2389,9 @@ pub fn rust_sim_event_transition_record_trace(
     let has_post_cross_events = events.iter().any(|event| {
         event.phase == RUST_SIM_EVENT_PHASE_POST && event.kind == RUST_SIM_EVENT_CROSS
     });
+    let has_pre_always_events = events.iter().any(|event| {
+        event.phase == RUST_SIM_EVENT_PHASE_PRE && event.kind == RUST_SIM_EVENT_ALWAYS
+    });
     let has_pre_initial_runtime_events = events.iter().any(|event| {
         event.phase == RUST_SIM_EVENT_PHASE_PRE
             && event.kind != RUST_SIM_EVENT_CROSS
@@ -2321,9 +2404,7 @@ pub fn rust_sim_event_transition_record_trace(
     });
     let has_pre_step_runtime_events = events.iter().any(|event| {
         event.phase == RUST_SIM_EVENT_PHASE_PRE
-            && (event.kind == RUST_SIM_EVENT_ABOVE
-                || event.kind == RUST_SIM_EVENT_TIMER
-                || event.kind == RUST_SIM_EVENT_ALWAYS)
+            && (event.kind == RUST_SIM_EVENT_ABOVE || event.kind == RUST_SIM_EVENT_TIMER)
     });
     let has_post_step_runtime_events = events.iter().any(|event| {
         event.phase == RUST_SIM_EVENT_PHASE_POST
@@ -2684,6 +2765,20 @@ pub fn rust_sim_event_transition_record_trace(
         bound_step_limit = f64::INFINITY;
 
         rust_sim_write_sources(sources, source_data, node_values, time)?;
+        if has_pre_always_events {
+            event_fires += rust_sim_execute_always_events(
+                events,
+                body_stmt_ops,
+                body_expr_ops,
+                node_values,
+                state_values,
+                param_values,
+                &mut bound_step_limit,
+                &mut side_effect_log,
+                time,
+                RUST_SIM_EVENT_PHASE_PRE,
+            )?;
+        }
         if has_pre_cross_events {
             rust_sim_collect_cross_events_into(
                 events,

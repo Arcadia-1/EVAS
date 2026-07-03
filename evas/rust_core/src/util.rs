@@ -95,6 +95,13 @@ fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
     mean + std * radius * angle.cos()
 }
 
+fn deterministic_random_int32(seed: f64) -> f64 {
+    let seed_bits = seed.to_bits();
+    let index = next_rdist_draw_index(seed_bits);
+    let stream = seed_bits ^ index.rotate_left(17) ^ 0x91e1_0da5_c79e_7b1d_u64;
+    (splitmix64(stream) as u32 as i32) as f64
+}
+
 pub(crate) fn evaluate_body_expr_segment(
     ops: &[EvasRustBodyExprOp],
     node_values: &[f64],
@@ -278,6 +285,10 @@ pub(crate) fn evaluate_body_expr_segment(
             BODY_EXPR_RDIST_NORMAL => {
                 let (seed, mean, std) = pop3(stack)?;
                 stack.push(deterministic_normal(seed, mean, std));
+            }
+            BODY_EXPR_RANDOM_INT32 => {
+                let seed = pop1(stack)?;
+                stack.push(deterministic_random_int32(seed));
             }
             BODY_EXPR_FLOOR => {
                 let value = pop1(stack)?;
