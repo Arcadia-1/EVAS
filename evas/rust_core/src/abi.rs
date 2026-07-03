@@ -114,6 +114,7 @@ pub(crate) const BODY_EXPR_POW: u8 = 71;
 pub(crate) const BODY_EXPR_TAN: u8 = 72;
 pub(crate) const BODY_EXPR_TANH: u8 = 73;
 pub(crate) const BODY_EXPR_RDIST_NORMAL: u8 = 80;
+pub(crate) const BODY_STMT_IDTMOD: u8 = 244;
 pub(crate) const BODY_STMT_WHILE: u8 = 245;
 pub(crate) const BODY_STMT_ENDWHILE: u8 = 246;
 pub(crate) const BODY_STMT_FILE_OPEN: u8 = 247;
