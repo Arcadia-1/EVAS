@@ -12,6 +12,7 @@ fallback and no external EDA simulator dependency.
 
    installation
    quickstart
+   support_tiers
    cli
 
 .. toctree::

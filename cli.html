@@ -3,7 +3,7 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Examples Catalog" href="examples/index.html"><link rel="prev" title="Quickstart" href="quickstart.html">
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Examples Catalog" href="examples/index.html"><link rel="prev" title="Support Tiers" href="support_tiers.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>CLI Reference - EVAS 0.7.0 documentation</title>
@@ -195,6 +195,7 @@
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="support_tiers.html">Support Tiers</a></li>
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">CLI Reference</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
@@ -344,7 +345,11 @@ evas<span class="w"> </span>lint<span class="w"> </span>path/to/tb_mydesign.scs<
 <p>For <code class="docutils literal notranslate"><span class="pre">.scs</span></code> inputs, EVAS parses the netlist and follows <code class="docutils literal notranslate"><span class="pre">ahdl_include</span></code> entries.
 Diagnostics use <code class="docutils literal notranslate"><span class="pre">compat-error</span></code> for EVAS/Spectre subset issues and warning
 severities for AHDL-style modeling risks. The command exits with <code class="docutils literal notranslate"><span class="pre">1</span></code> only when
-at least one <code class="docutils literal notranslate"><span class="pre">compat-error</span></code> is reported.</p>
+at least one <code class="docutils literal notranslate"><span class="pre">compat-error</span></code> is reported.
+Unsupported-feature diagnostics include support-tier metadata so benchmark
+tooling can distinguish supported EVAS bugs from planned or out-of-scope
+language areas. Text output shows <code class="docutils literal notranslate"><span class="pre">[support-tier:</span> <span class="pre">&lt;name&gt;]</span></code>; JSON output includes
+a <code class="docutils literal notranslate"><span class="pre">support_tier</span></code> field.</p>
 <p>Current warning diagnostics cover a Cadence AHDL-inspired static subset:
 transition timing and simple continuous-input dataflow, conditional potential
 contributions, case defaults, exact branch equality tests, floor/ceil
@@ -403,14 +408,14 @@ reports or generated certification output.</p>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>
-          <a class="prev-page" href="quickstart.html">
+          <a class="prev-page" href="support_tiers.html">
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
               <div class="page-info">
                 <div class="context">
                   <span>Previous</span>
                 </div>
                 
-                <div class="title">Quickstart</div>
+                <div class="title">Support Tiers</div>
                 
               </div>
             </a>

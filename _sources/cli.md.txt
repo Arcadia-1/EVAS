@@ -76,6 +76,10 @@ For `.scs` inputs, EVAS parses the netlist and follows `ahdl_include` entries.
 Diagnostics use `compat-error` for EVAS/Spectre subset issues and warning
 severities for AHDL-style modeling risks. The command exits with `1` only when
 at least one `compat-error` is reported.
+Unsupported-feature diagnostics include support-tier metadata so benchmark
+tooling can distinguish supported EVAS bugs from planned or out-of-scope
+language areas. Text output shows `[support-tier: <name>]`; JSON output includes
+a `support_tier` field.
 
 Current warning diagnostics cover a Cadence AHDL-inspired static subset:
 transition timing and simple continuous-input dataflow, conditional potential

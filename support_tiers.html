@@ -1,13 +1,13 @@
 <!doctype html>
 <html class="no-js" lang="en" data-content_root="./">
-  <head>
-<meta charset="utf-8">
+  <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="#">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="CLI Reference" href="cli.html"><link rel="prev" title="Quickstart" href="quickstart.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-<meta name="robots" content="noindex" />
-<title>Search - EVAS 0.7.0 documentation</title><link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+        <title>Support Tiers - EVAS 0.7.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
     <link rel="stylesheet" type="text/css" href="_static/custom.css?v=0dddca06" />
@@ -173,7 +173,7 @@
           <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
         </button>
       </div>
-      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
         <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
       </label>
     </div>
@@ -185,17 +185,17 @@
   
   <span class="sidebar-brand-text">EVAS 0.7.0 documentation</span>
   
-</a><form class="sidebar-search-container" method="get" action="#" role="search">
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
   <input type="hidden" name="check_keywords" value="yes">
   <input type="hidden" name="area" value="default">
 </form>
 <div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
   <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
-<ul>
+<ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
-<li class="toctree-l1"><a class="reference internal" href="support_tiers.html">Support Tiers</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Support Tiers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
@@ -233,7 +233,17 @@
           <span>Back to top</span>
         </a>
         <div class="content-icon-container">
-          <div class="theme-toggle-container theme-toggle-content">
+          <div class="view-this-page">
+  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/blob/main/docs_en/support_tiers.md?plain=true" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div><div class="edit-this-page">
+  <a class="muted-link" href="https://github.com/Arcadia-1/EVAS/edit/main/docs_en/support_tiers.md" rel="edit" title="Edit this page">
+    <svg><use href="#svg-pencil"></use></svg>
+    <span class="visually-hidden">Edit this page</span>
+  </a>
+</div><div class="theme-toggle-container theme-toggle-content">
             <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
               <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
               <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
@@ -241,22 +251,61 @@
               <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
             </button>
           </div>
-          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
             <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
           </label>
         </div>
         <article role="main" id="furo-main-content">
-          
-<noscript>
-<div class="admonition error">
-  <p class="admonition-title">Error</p>
-  <p>
-    Please activate JavaScript to enable the search functionality.
-  </p>
+          <section id="support-tiers">
+<h1>Support Tiers<a class="headerlink" href="#support-tiers" title="Link to this heading">¶</a></h1>
+<p>EVAS is an event-driven voltage-domain simulator. Benchmark reports should use
+the support tiers below instead of treating every Verilog-A/AMS row as one flat
+support target.</p>
+<p>Unsupported-feature diagnostics include a stable <code class="docutils literal notranslate"><span class="pre">[support-tier:</span> <span class="pre">&lt;name&gt;]</span></code>
+suffix in text output and a <code class="docutils literal notranslate"><span class="pre">support_tier</span></code> field in JSON lint output.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Tier</p></th>
+<th class="head"><p>Boundary</p></th>
+<th class="head"><p>Benchmark interpretation</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">behavioral-event</span></code></p></td>
+<td><p>Voltage-domain behavioral transient models: <code class="docutils literal notranslate"><span class="pre">V(...)</span></code> reads/drives, <code class="docutils literal notranslate"><span class="pre">cross</span></code>/<code class="docutils literal notranslate"><span class="pre">above</span></code>/<code class="docutils literal notranslate"><span class="pre">timer</span></code>/<code class="docutils literal notranslate"><span class="pre">initial_step</span></code>/<code class="docutils literal notranslate"><span class="pre">final_step</span></code>, <code class="docutils literal notranslate"><span class="pre">transition</span></code>, state machines, control logic, table/random/file helpers. This is the current EVAS core strength.</p></td>
+<td><p>A valid failure here is a supported EVAS bug unless a narrower diagnostic says otherwise.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">behavioral-continuous-time</span></code></p></td>
+<td><p>Legal voltage-domain <code class="docutils literal notranslate"><span class="pre">ddt</span></code>, <code class="docutils literal notranslate"><span class="pre">idt</span></code>, <code class="docutils literal notranslate"><span class="pre">idtmod</span></code>, <code class="docutils literal notranslate"><span class="pre">laplace_*</span></code>, <code class="docutils literal notranslate"><span class="pre">zi_*</span></code>, and <code class="docutils literal notranslate"><span class="pre">limexp</span></code> style models. EVAS has behavioral transient approximations for selected forms, but this is not a Spectre-equivalent continuous-time solver claim.</p></td>
+<td><p>Treat unsupported or inaccurate rows as planned/limited continuous-time work, not as AMS/KCL coverage.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ams-digital</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">wreal</span></code>, <code class="docutils literal notranslate"><span class="pre">logic</span></code>, <code class="docutils literal notranslate"><span class="pre">always</span></code>, continuous <code class="docutils literal notranslate"><span class="pre">assign</span></code>, packed logic vectors, <code class="docutils literal notranslate"><span class="pre">specify</span></code>/<code class="docutils literal notranslate"><span class="pre">specparam</span></code>, <code class="docutils literal notranslate"><span class="pre">connectmodule</span></code>, and <code class="docutils literal notranslate"><span class="pre">connectrules</span></code>. EVAS supports only small behavioral bridge subsets where documented; a full AMS/digital event kernel is outside the certified core.</p></td>
+<td><p>Full AMS/digital failures are outside current benchmark certification unless the row is explicitly documented as a supported bridge subset.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">conservative-current-kcl</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">I(...)</span> <span class="pre">&lt;+</span> <span class="pre">...</span></code>, branch currents, current probes, indirect branch equations, charge/current branch contributions, and KCL/MNA topology solving.</p></td>
+<td><p>Architectural roadmap item, not a parser bug and not part of current certified EVAS support.</p></td>
+</tr>
+</tbody>
+</table>
 </div>
-</noscript>
-
-<div id="search-results"></div>
+<p>Current EVAS benchmark PASS claims apply to <code class="docutils literal notranslate"><span class="pre">behavioral-event</span></code> designs, plus
+explicitly documented behavioral helper subsets. Rows that require full
+<code class="docutils literal notranslate"><span class="pre">ams-digital</span></code> or <code class="docutils literal notranslate"><span class="pre">conservative-current-kcl</span></code> semantics should be reported
+separately from supported EVAS bugs.</p>
+<section id="diagnostic-taxonomy">
+<h2>Diagnostic Taxonomy<a class="headerlink" href="#diagnostic-taxonomy" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span></code> and the optional <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span> <span class="pre">--ahdllint</span></code> preflight expose the
+same taxonomy. Unsupported current contributions and current probes report
+<code class="docutils literal notranslate"><span class="pre">support_tier=&quot;conservative-current-kcl&quot;</span></code>. Unsupported digital procedural syntax
+reports <code class="docutils literal notranslate"><span class="pre">support_tier=&quot;ams-digital&quot;</span></code> when it reaches the parser. Unknown
+unregistered function/operator calls report <code class="docutils literal notranslate"><span class="pre">support_tier=&quot;outside-current-scope&quot;</span></code>
+so benchmark tooling can separate truly unclassified constructs from the four
+documented support tiers.</p>
+</section>
+</section>
 
         </article>
       </div>
@@ -264,8 +313,26 @@
         
 
         <div class="related-pages">
-          
-          
+          <a class="next-page" href="cli.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">CLI Reference</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="quickstart.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Quickstart</div>
+                
+              </div>
+            </a>
         </div>
         <div class="bottom-of-page">
           <div class="left-details">
@@ -301,8 +368,27 @@
 </div>
       </footer>
     </div>
-    <aside class="toc-drawer no-toc">
+    <aside class="toc-drawer">
       
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Support Tiers</a><ul>
+<li><a class="reference internal" href="#diagnostic-taxonomy">Diagnostic Taxonomy</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
       
       
     </aside>
@@ -312,8 +398,5 @@
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
     <script async="async" src="https://cdn.bootcdn.net/ajax/libs/busuanzi/2.3.0/bsz.pure.mini.js"></script>
-    
-<script src="_static/searchtools.js"></script>
-<script src="_static/language_data.js"></script>
-<script src="searchindex.js"></script></body>
+    </body>
 </html>
