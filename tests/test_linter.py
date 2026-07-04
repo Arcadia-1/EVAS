@@ -902,6 +902,58 @@ def test_strict_spectre_rejects_extension_only_behavioral_constructs():
     )
 
 
+def test_strict_spectre_rejects_seeded_rdist_parity_gaps():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module strict_random(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ $rdist_exponential(17, 2.0)
+                        + $rdist_poisson(17, 4.0)
+                        + $rdist_normal(17, 0.0, 1.0)
+                        + $rdist_erlang(17, 3.0, 6.0);
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "$rdist_exponential()" in messages
+    assert "$rdist_poisson()" in messages
+    assert "$rdist_normal()" in messages
+    assert "$rdist_erlang()" in messages
+    assert "seeded Spectre PRNG sequence parity is not certified" in messages
+
+
+def test_strict_spectre_rejects_integer_select_concat_parity_gaps():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module strict_vectors(out);
+            output out;
+            electrical out;
+            integer code_q;
+            integer count_q;
+            integer window_q;
+            analog begin
+                window_q = code_q[3:1];
+                code_q = {2'b10, count_q[1:0]};
+                V(out) <+ code_q + window_q;
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "integer part-select" in messages
+    assert "integer select concatenation" in messages
+    assert has_compat_errors(strict_diags)
+
+
 def test_strict_spectre_allows_static_electrical_indexing():
     source = textwrap.dedent("""\
         `include "disciplines.vams"

@@ -108,8 +108,9 @@ parameter constant expressions.
 syntax that standalone Spectre rejects in the current target, including AMS
 bridge constructs (`logic`, `wreal`, continuous `assign`, `always`),
 task/do-while extensions, runtime electrical-node indexing, selected
-version-gated random distributions, `generate`, `specify`, `connectmodule`, and
-`connectrules`.
+version-gated random distributions, seeded `$rdist_*` distributions whose
+Spectre PRNG sequence parity is not certified, integer bit/part-select
+concatenation gaps, `generate`, `specify`, `connectmodule`, and `connectrules`.
 The repository keeps small public oracle fixtures in
 `tests/fixtures/lint_oracle_cases` for lint regression tests. These fixtures
 store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre

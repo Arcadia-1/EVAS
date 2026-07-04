@@ -5141,8 +5141,8 @@ class Simulator:
         def _set_current_source_values(nv: Dict[str, float], t: float) -> None:
             for pos, neg, src in self.current_sources:
                 value = src.waveform(t)
-                nv[f"@I:{pos}:{neg}"] = value
-                nv[f"@I:{neg}:{pos}"] = -value
+                nv[f"@I:{pos}:{neg}"] = -value
+                nv[f"@I:{neg}:{pos}"] = value
 
         # Initialize node voltages
         for src in self.sources:

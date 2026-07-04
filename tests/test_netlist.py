@@ -2807,7 +2807,85 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         rows = list(csv.DictReader((out_dir / "tran.csv").open()))
         final_p = float(rows[-1]["p"])
 
-        assert final_p == pytest.approx(9.5e-15, rel=0.02)
+        assert final_p == pytest.approx(-9.5e-15, rel=0.02)
+
+    def test_isource_branch_current_sign_matches_spectre_idt_probe(self, tmp_path):
+        va_file = tmp_path / "kcl_inductor_idt_voltage.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module kcl_inductor_idt_voltage(p, n);
+                inout p, n;
+                electrical p, n;
+                parameter real l = 1n;
+                analog begin
+                    V(p, n) <+ l * idt(I(p, n), 0.0);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_kcl_inductor_idt_voltage.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "kcl_inductor_idt_voltage.va"
+            Istep (p 0) isource type=pwl wave=[0 0.0 20n 0.0 21n 1u 80n 1u 81n -1u 160n -1u]
+            XDUT (p 0) kcl_inductor_idt_voltage l=1n
+            tran tran stop=160n maxstep=1n
+            save p
+        """))
+
+        out_dir = tmp_path / "out_kcl_inductor_idt_voltage"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["p"])
+
+        assert sample_at(21e-9) == pytest.approx(-5.0e-25, abs=1e-27)
+        assert sample_at(40e-9) == pytest.approx(-1.95e-23, rel=0.02)
+        assert sample_at(80e-9) == pytest.approx(-5.95e-23, rel=0.02)
+
+    def test_zi_nd_sampled_data_filter_matches_spectre_samples(self, tmp_path):
+        va_file = tmp_path / "continuous_zi_nd_filter.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module continuous_zi_nd_filter(in, out);
+                input in;
+                output out;
+                electrical in, out;
+                analog begin
+                    V(out) <+ zi_nd(V(in), {0.5, 0.5}, {1.0, -0.25}, 10n);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_continuous_zi_nd_filter.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "continuous_zi_nd_filter.va"
+            Vin (inp 0) vsource type=pwl wave=[0 0.0 20n 0.0 21n 1.0 80n 1.0 81n 0.0 160n 0.0]
+            XDUT (inp out) continuous_zi_nd_filter
+            tran tran stop=160n maxstep=1n
+            save inp out
+        """))
+
+        out_dir = tmp_path / "out_continuous_zi_nd_filter"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["out"])
+
+        assert sample_at(30e-9) == pytest.approx(0.5, abs=1e-9)
+        assert sample_at(40e-9) == pytest.approx(1.125, abs=1e-9)
+        assert sample_at(50e-9) == pytest.approx(1.28125, abs=1e-9)
+        assert sample_at(70e-9) == pytest.approx(1.33008, rel=1e-5)
+        assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
+        assert sample_at(120e-9) == pytest.approx(0.0130177, rel=1e-5)
+        assert sample_at(140e-9) == pytest.approx(0.0008136, rel=1e-4)
 
     def test_ordinary_current_contribution_is_visible_to_branch_probe(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EVAS_ENGINE", "python")

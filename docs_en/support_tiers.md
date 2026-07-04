@@ -37,7 +37,9 @@ narrower than the default EVAS extension mode: it reports
 Spectre target rejects, such as AMS bridge constructs (`logic`, `wreal`,
 continuous `assign`, `always`), task/do-while extensions, runtime
 electrical-node indexing, selected version-gated random distributions,
-`generate`, `specify`, `connectmodule`, and `connectrules`.
+seeded `$rdist_*` distributions whose Spectre PRNG sequence parity is not
+certified, integer bit/part-select concatenation gaps, `generate`, `specify`,
+`connectmodule`, and `connectrules`.
 
 ## Continuous-Time Operators
 
@@ -68,6 +70,10 @@ produce the same sequence across runs. Supported distributions include uniform,
 normal, exponential, poisson, chi-square, t, and erlang variants. Unsupported
 distribution names, such as an unimplemented `$rdist_gamma()`, fail with
 `EVAS-COMP-EUNSUPPORTED` and `support_tier="behavioral-event"`.
+Strict Spectre mode rejects seeded `$rdist_exponential`,
+`$rdist_poisson`, `$rdist_normal`, and `$rdist_erlang` until their exact
+Spectre PRNG sequences are certified; default EVAS extension mode keeps the
+deterministic EVAS streams for reproducible behavioral simulation.
 
 ## Subprograms
 
@@ -95,6 +101,9 @@ node lookup. Runtime current-domain indexing belongs to the unsupported
 Strict Spectre mode accepts constant or statically elaborated electrical indexes
 but rejects runtime electrical-node indexing so benchmark rows can be separated
 from EVAS extension-mode capabilities.
+It also rejects integer scalar bit/part-select and integer-select
+concatenation forms whose Spectre output diverges from EVAS extension-mode
+evaluation.
 
 ## AMS-Digital Boundary
 

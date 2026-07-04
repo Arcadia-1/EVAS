@@ -570,6 +570,13 @@ _STRICT_VERSION_GATED_RANDOM = {
     "$rdist_t",
 }
 
+_STRICT_SEEDED_RANDOM_PARITY = {
+    "$rdist_erlang",
+    "$rdist_exponential",
+    "$rdist_normal",
+    "$rdist_poisson",
+}
+
 
 def _strict_spectre_diag(
     feature: str,
@@ -635,6 +642,17 @@ def _lint_strict_spectre_module(
         var.name for var in getattr(module, "variables", [])
         if getattr(var, "is_genvar", False)
     )
+    scalar_integer_names = {
+        param.name for param in getattr(module, "parameters", [])
+        if getattr(param, "param_type", None) == va_ast.ParamType.INTEGER
+    }
+    scalar_integer_names.update(
+        var.name for var in getattr(module, "variables", [])
+        if (
+            getattr(var, "var_type", None) == va_ast.ParamType.INTEGER
+            and not getattr(var, "is_array", False)
+        )
+    )
 
     for function in getattr(module, "functions", []):
         if _stmt_has_function_call(function.body, function.name):
@@ -654,6 +672,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
 
     for task in getattr(module, "tasks", []):
@@ -663,6 +682,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
 
     for assignment in getattr(module, "continuous_assigns", []):
@@ -672,6 +692,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_expr(
             assignment.value,
@@ -679,6 +700,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
 
     if module.analog_block is not None:
@@ -688,6 +710,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
     for always in getattr(module, "always_blocks", []):
         _lint_strict_spectre_event(
@@ -696,6 +719,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             always.body,
@@ -703,6 +727,7 @@ def _lint_strict_spectre_module(
             filename,
             module.name,
             constant_index_names,
+            scalar_integer_names,
         )
     return diagnostics
 
@@ -713,6 +738,7 @@ def _lint_strict_spectre_statement(
     filename: str,
     module: str,
     constant_index_names: Set[str],
+    scalar_integer_names: Set[str],
 ) -> None:
     if stmt is None:
         return
@@ -720,6 +746,7 @@ def _lint_strict_spectre_statement(
         for child in stmt.statements:
             _lint_strict_spectre_statement(
                 child, diagnostics, filename, module, constant_index_names,
+                scalar_integer_names,
             )
         return
     if isinstance(stmt, va_ast.Contribution):
@@ -728,80 +755,103 @@ def _lint_strict_spectre_statement(
         )
         _lint_strict_spectre_expr(
             stmt.expr, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.Assignment):
         _lint_strict_spectre_expr(
             stmt.target, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_expr(
             stmt.value, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.EventStatement):
         _lint_strict_spectre_event(
             stmt.event, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.body, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.IfStatement):
         _lint_strict_spectre_expr(
             stmt.cond, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.then_body, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.else_body, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.ForStatement):
         _lint_strict_spectre_statement(
             stmt.init, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_expr(
             stmt.cond, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.update, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.body, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.WhileStatement):
         _lint_strict_spectre_expr(
             stmt.cond, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         _lint_strict_spectre_statement(
             stmt.body, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         return
     if isinstance(stmt, va_ast.CaseStatement):
         _lint_strict_spectre_expr(
             stmt.expr, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
         for item in stmt.items:
             for value in item.values:
                 _lint_strict_spectre_expr(
-                    value, diagnostics, filename, module, constant_index_names,
+                    value,
+                    diagnostics,
+                    filename,
+                    module,
+                    constant_index_names,
+                    scalar_integer_names,
                 )
             _lint_strict_spectre_statement(
                 item.body, diagnostics, filename, module, constant_index_names,
+                scalar_integer_names,
             )
         return
     if isinstance(stmt, va_ast.SystemTask):
         for arg in stmt.args:
             _lint_strict_spectre_expr(
                 arg, diagnostics, filename, module, constant_index_names,
+                scalar_integer_names,
             )
         return
     if isinstance(stmt, va_ast.TaskCall):
         for arg in stmt.args:
             _lint_strict_spectre_expr(
                 arg, diagnostics, filename, module, constant_index_names,
+                scalar_integer_names,
             )
 
 
@@ -811,22 +861,27 @@ def _lint_strict_spectre_event(
     filename: str,
     module: str,
     constant_index_names: Set[str],
+    scalar_integer_names: Set[str],
 ) -> None:
     if isinstance(event, va_ast.CombinedEvent):
         for child in event.events:
             _lint_strict_spectre_event(
                 child, diagnostics, filename, module, constant_index_names,
+                scalar_integer_names,
             )
         return
     for expr in event.args:
         _lint_strict_spectre_expr(
             expr, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
     _lint_strict_spectre_expr(
         event.time_tol_expr, diagnostics, filename, module, constant_index_names,
+        scalar_integer_names,
     )
     _lint_strict_spectre_expr(
         event.expr_tol_expr, diagnostics, filename, module, constant_index_names,
+        scalar_integer_names,
     )
 
 
@@ -836,6 +891,7 @@ def _lint_strict_spectre_expr(
     filename: str,
     module: str,
     constant_index_names: Set[str],
+    scalar_integer_names: Set[str],
 ) -> None:
     if expr is None:
         return
@@ -843,8 +899,59 @@ def _lint_strict_spectre_expr(
         _lint_strict_spectre_branch(
             expr, diagnostics, filename, module, constant_index_names,
         )
+    if isinstance(expr, va_ast.ArrayAccess) and expr.name in scalar_integer_names:
+        diagnostics.append(
+            _strict_spectre_diag(
+                "integer bit-select",
+                BEHAVIORAL_EVENT,
+                "Spectre-compatible mode does not certify EVAS integer "
+                "bit-select semantics",
+                filename,
+                module=module,
+                node=expr,
+            )
+        )
+    if isinstance(expr, va_ast.PartSelect) and expr.name in scalar_integer_names:
+        diagnostics.append(
+            _strict_spectre_diag(
+                "integer part-select",
+                BEHAVIORAL_EVENT,
+                "Spectre leaves this integer part-select value unassigned in "
+                "the current parity case",
+                filename,
+                module=module,
+                node=expr,
+            )
+        )
+    if (
+        isinstance(expr, va_ast.ConcatExpr)
+        and _strict_concat_uses_integer_select(expr, scalar_integer_names)
+    ):
+        diagnostics.append(
+            _strict_spectre_diag(
+                "integer select concatenation",
+                BEHAVIORAL_EVENT,
+                "Spectre integer select/concatenation semantics diverge from "
+                "EVAS extension-mode evaluation",
+                filename,
+                module=module,
+                node=expr,
+            )
+        )
     if isinstance(expr, va_ast.FunctionCall):
         name = expr.name.lower()
+        if name in _STRICT_SEEDED_RANDOM_PARITY:
+            diagnostics.append(
+                _strict_spectre_diag(
+                    f"{expr.name}()",
+                    BEHAVIORAL_EVENT,
+                    "seeded Spectre PRNG sequence parity is not certified for "
+                    "this distribution",
+                    filename,
+                    module=module,
+                    node=expr,
+                )
+            )
         if name in _STRICT_VERSION_GATED_RANDOM:
             diagnostics.append(
                 _strict_spectre_diag(
@@ -860,7 +967,22 @@ def _lint_strict_spectre_expr(
     for child in _expr_children(expr):
         _lint_strict_spectre_expr(
             child, diagnostics, filename, module, constant_index_names,
+            scalar_integer_names,
         )
+
+
+def _strict_concat_uses_integer_select(
+    expr: va_ast.Expr,
+    scalar_integer_names: Set[str],
+) -> bool:
+    if isinstance(expr, va_ast.ArrayAccess):
+        return expr.name in scalar_integer_names
+    if isinstance(expr, va_ast.PartSelect):
+        return expr.name in scalar_integer_names
+    return any(
+        _strict_concat_uses_integer_select(child, scalar_integer_names)
+        for child in _expr_children(expr)
+    )
 
 
 def _lint_strict_spectre_branch(

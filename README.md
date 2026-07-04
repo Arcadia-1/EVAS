@@ -99,7 +99,9 @@ Strict Spectre mode additionally rejects EVAS extension syntax that standalone
 Spectre rejects in the current compatibility target, including AMS bridge
 constructs (`logic`, `wreal`, continuous `assign`, `always`), task/do-while
 extensions, runtime electrical-node indexing, selected version-gated random
-distributions, `generate`, `specify`, `connectmodule`, and `connectrules`.
+distributions, seeded `$rdist_*` distributions whose Spectre PRNG sequence
+parity is not certified, integer bit/part-select concatenation gaps,
+`generate`, `specify`, `connectmodule`, and `connectrules`.
 The lint regression suite also keeps a small set of public oracle fixtures under
 `tests/fixtures/lint_oracle_cases`. These cases record distilled expected EVAS
 diagnostic codes only; raw Cadence/Spectre logs and generated certification
