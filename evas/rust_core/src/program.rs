@@ -1746,6 +1746,137 @@ pub(crate) fn rust_sim_apply_transitions(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn rust_sim_apply_slews(
+    slews: &[EvasRustSimSlewSpec],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    node_values: &mut [f64],
+    state_values: &[f64],
+    param_values: &[f64],
+    current_values: &mut [f64],
+    last_times: &mut [f64],
+    initialized_flags: &mut [u8],
+    output_values: &mut [f64],
+    time: f64,
+    initial_condition_mode: bool,
+) -> Result<(), i32> {
+    let count = slews.len();
+    if current_values.len() != count
+        || last_times.len() != count
+        || initialized_flags.len() != count
+        || output_values.len() != count
+    {
+        return Err(-974);
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    for idx in 0..count {
+        let spec = slews[idx];
+        if spec.output_node_id >= node_values.len() {
+            return Err(-975);
+        }
+        let target = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.target_expr_start,
+            spec.target_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            0.0,
+        )?;
+        let rise = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.rise_expr_start,
+            spec.rise_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            0.0,
+        )?;
+        let raw_fall = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.fall_expr_start,
+            spec.fall_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            -rise,
+        )?;
+        let fall_limit = if raw_fall < 0.0 { -raw_fall } else { raw_fall };
+
+        let mut next = if initialized_flags[idx] == 0 || initial_condition_mode {
+            target
+        } else {
+            let current = current_values[idx];
+            let dt = time - last_times[idx];
+            if dt <= 0.0 {
+                if (target >= current && rise <= 0.0) || (target < current && fall_limit == 0.0) {
+                    target
+                } else {
+                    current
+                }
+            } else {
+                let delta = target - current;
+                if delta >= 0.0 {
+                    if rise <= 0.0 {
+                        target
+                    } else {
+                        current + delta.min(rise * dt)
+                    }
+                } else if fall_limit == 0.0 {
+                    target
+                } else {
+                    current - (-delta).min(fall_limit * dt)
+                }
+            }
+        };
+        if !next.is_finite() {
+            next = target;
+        }
+        current_values[idx] = next;
+        if initialized_flags[idx] == 0 || time > last_times[idx] {
+            last_times[idx] = time;
+        }
+        initialized_flags[idx] = 1;
+        output_values[idx] = next;
+
+        let reference = if spec.reference_node_id == CONDITION_NONE {
+            0.0
+        } else {
+            if spec.reference_node_id >= node_values.len() {
+                return Err(-976);
+            }
+            node_values[spec.reference_node_id]
+        };
+        let output_bias = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.output_bias_expr_start,
+            spec.output_bias_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            0.0,
+        )?;
+        let output_scale = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.output_scale_expr_start,
+            spec.output_scale_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            1.0,
+        )?;
+        node_values[spec.output_node_id] = reference + output_bias + output_scale * next;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_record_transition_breakpoints_until(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
@@ -2254,6 +2385,7 @@ pub fn rust_sim_event_transition_record_trace(
     body_expr_ops: &[EvasRustBodyExprOp],
     events: &[EvasRustSimEventSpec],
     transitions: &[EvasRustSimTransitionSpec],
+    slews: &[EvasRustSimSlewSpec],
     side_effect_kinds: &mut [u8],
     side_effect_spec_ids: &mut [usize],
     side_effect_arg_starts: &mut [usize],
@@ -2303,6 +2435,7 @@ pub fn rust_sim_event_transition_record_trace(
     let use_cross_accepted_event_time = cross_acceptance_slack_factor > 0.0;
     let event_count = events.len();
     let transition_count = transitions.len();
+    let slew_count = slews.len();
     let has_pre_cross_events = events
         .iter()
         .any(|event| event.phase == RUST_SIM_EVENT_PHASE_PRE && event.kind == RUST_SIM_EVENT_CROSS);
@@ -2378,6 +2511,10 @@ pub fn rust_sim_event_transition_record_trace(
     let mut transition_active_flags = vec![0_u8; transition_count];
     let mut transition_initialized_flags = vec![0_u8; transition_count];
     let mut transition_output_values = vec![0.0_f64; transition_count];
+    let mut slew_current_values = vec![0.0_f64; slew_count];
+    let mut slew_last_times = vec![0.0_f64; slew_count];
+    let mut slew_initialized_flags = vec![0_u8; slew_count];
+    let mut slew_output_values = vec![0.0_f64; slew_count];
     let mut bound_step_limit = f64::INFINITY;
     let mut side_effect_log = RustSideEffectLog {
         kinds: side_effect_kinds,
@@ -2468,6 +2605,19 @@ pub fn rust_sim_event_transition_record_trace(
         default_transition,
         true,
     )?;
+    rust_sim_apply_slews(
+        slews,
+        body_expr_ops,
+        node_values,
+        state_values,
+        param_values,
+        &mut slew_current_values,
+        &mut slew_last_times,
+        &mut slew_initialized_flags,
+        &mut slew_output_values,
+        0.0,
+        true,
+    )?;
     if has_post_cross_events {
         rust_sim_collect_cross_events_into(
             events,
@@ -2547,6 +2697,19 @@ pub fn rust_sim_event_transition_record_trace(
             &mut transition_output_values,
             0.0,
             default_transition,
+            false,
+        )?;
+        rust_sim_apply_slews(
+            slews,
+            body_expr_ops,
+            node_values,
+            state_values,
+            param_values,
+            &mut slew_current_values,
+            &mut slew_last_times,
+            &mut slew_initialized_flags,
+            &mut slew_output_values,
+            0.0,
             false,
         )?;
     }
@@ -2811,6 +2974,19 @@ pub fn rust_sim_event_transition_record_trace(
             default_transition,
             false,
         )?;
+        rust_sim_apply_slews(
+            slews,
+            body_expr_ops,
+            node_values,
+            state_values,
+            param_values,
+            &mut slew_current_values,
+            &mut slew_last_times,
+            &mut slew_initialized_flags,
+            &mut slew_output_values,
+            time,
+            false,
+        )?;
         if has_post_cross_events {
             rust_sim_collect_cross_events_into(
                 events,
@@ -2912,6 +3088,19 @@ pub fn rust_sim_event_transition_record_trace(
                     default_transition,
                     false,
                 )?;
+                rust_sim_apply_slews(
+                    slews,
+                    body_expr_ops,
+                    node_values,
+                    state_values,
+                    param_values,
+                    &mut slew_current_values,
+                    &mut slew_last_times,
+                    &mut slew_initialized_flags,
+                    &mut slew_output_values,
+                    time,
+                    false,
+                )?;
             }
         }
         let post_event_fires = if has_post_step_runtime_events {
@@ -2974,6 +3163,19 @@ pub fn rust_sim_event_transition_record_trace(
                 &mut transition_output_values,
                 time,
                 default_transition,
+                false,
+            )?;
+            rust_sim_apply_slews(
+                slews,
+                body_expr_ops,
+                node_values,
+                state_values,
+                param_values,
+                &mut slew_current_values,
+                &mut slew_last_times,
+                &mut slew_initialized_flags,
+                &mut slew_output_values,
+                time,
                 false,
             )?;
         }

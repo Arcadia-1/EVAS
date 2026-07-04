@@ -658,6 +658,7 @@ class Simulator:
         self._perf_stats["rust_sim_program_transition_count"] = len(
             program.transitions
         )
+        self._perf_stats["rust_sim_program_slew_count"] = len(program.slews)
         abi_t0 = _wall_time.perf_counter()
         try:
             rust_program = rust_backend.make_source_record_program(program)
@@ -736,7 +737,7 @@ class Simulator:
         self._perf_stats["rust_sim_program_enabled"] = 1
         self._perf_stats["rust_sim_program_source_record_enabled"] = 1
         self._perf_stats["rust_sim_program_event_transition_enabled"] = int(
-            bool(program.events or program.transitions)
+            bool(program.events or program.transitions or program.slews)
         )
         self._perf_stats["rust_sim_program_points"] = len(times)
         self._perf_stats["rust_sim_program_source_breakpoints"] = int(
@@ -4009,6 +4010,7 @@ class Simulator:
             "rust_sim_program_body_stmt_ops": 0,
             "rust_sim_program_body_expr_ops": 0,
             "rust_sim_program_transition_count": 0,
+            "rust_sim_program_slew_count": 0,
             "rust_sim_program_points": 0,
             "rust_sim_program_source_breakpoints": 0,
             "rust_sim_program_event_fires": 0,

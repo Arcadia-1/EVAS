@@ -58,6 +58,7 @@ from evas.simulator.schedule_ir import (
     EventTriggerIR,
     encode_event_due_program,
 )
+from evas.simulator.slew_runtime import encode_slew_contribution_program
 from evas.simulator.stmt_ir import (
     AssignmentIR,
     BlockIR,
@@ -217,6 +218,25 @@ class RustSimTransition:
 
 
 @dataclass(frozen=True)
+class RustSimSlew:
+    """A slew() state slot and its output target."""
+
+    slew_id: int
+    output_node_id: int
+    reference_node_id: Optional[int]
+    target_expr_start: int
+    target_expr_count: int
+    rise_expr_start: int
+    rise_expr_count: int
+    fall_expr_start: int
+    fall_expr_count: int
+    output_bias_expr_start: int = 0
+    output_bias_expr_count: int = 0
+    output_scale_expr_start: int = 0
+    output_scale_expr_count: int = 0
+
+
+@dataclass(frozen=True)
 class RustSimRecord:
     """A recorded waveform column."""
 
@@ -246,6 +266,7 @@ class RustSimProgram:
     events: Tuple[RustSimEvent, ...]
     body_ops: Tuple[RustSimBodyOp, ...]
     transitions: Tuple[RustSimTransition, ...]
+    slews: Tuple[RustSimSlew, ...]
     records: Tuple[RustSimRecord, ...]
     side_effects: Tuple[RustSimSideEffect, ...] = ()
     continuous_linear_ops: Tuple[RustSimLinearOp, ...] = ()
@@ -1036,7 +1057,7 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, AssignmentIR):
         return True
     if isinstance(stmt_ir, ContributionIR):
-        return not _expr_contains_transition_call(stmt_ir.expr)
+        return not _expr_contains_transition_or_slew_call(stmt_ir.expr)
     if isinstance(stmt_ir, IfStatementIR):
         return _is_continuous_body_stmt(stmt_ir.then_body) and (
             stmt_ir.else_body is None or _is_continuous_body_stmt(stmt_ir.else_body)
@@ -1238,7 +1259,7 @@ def _stmt_has_rustsim_event_transition_candidate(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, EventStatementIR):
         return True
     if isinstance(stmt_ir, ContributionIR):
-        return _expr_contains_transition_call(stmt_ir.expr)
+        return _expr_contains_transition_or_slew_call(stmt_ir.expr)
     if isinstance(stmt_ir, IfStatementIR):
         return _stmt_has_rustsim_event_transition_candidate(stmt_ir.then_body) or (
             stmt_ir.else_body is not None
@@ -1276,6 +1297,39 @@ def _expr_contains_transition_call(expr_ir: ExprIR) -> bool:
     if isinstance(expr_ir, BranchAccessIR):
         return any(
             child is not None and _expr_contains_transition_call(child)
+            for child in (
+                expr_ir.node1_index,
+                expr_ir.node1_index2,
+                expr_ir.node2_index,
+                expr_ir.node2_index2,
+            )
+        )
+    return False
+
+
+def _expr_contains_transition_or_slew_call(expr_ir: ExprIR) -> bool:
+    if isinstance(expr_ir, FunctionCallIR):
+        name = str(expr_ir.name)
+        return name in {"transition", "slew"} or any(
+            _expr_contains_transition_or_slew_call(arg) for arg in expr_ir.args
+        )
+    if isinstance(expr_ir, BinaryExprIR):
+        return _expr_contains_transition_or_slew_call(
+            expr_ir.left
+        ) or _expr_contains_transition_or_slew_call(expr_ir.right)
+    if isinstance(expr_ir, UnaryExprIR):
+        return _expr_contains_transition_or_slew_call(expr_ir.operand)
+    if isinstance(expr_ir, TernaryExprIR):
+        return (
+            _expr_contains_transition_or_slew_call(expr_ir.cond)
+            or _expr_contains_transition_or_slew_call(expr_ir.true_expr)
+            or _expr_contains_transition_or_slew_call(expr_ir.false_expr)
+        )
+    if isinstance(expr_ir, ArrayAccessIR):
+        return _expr_contains_transition_or_slew_call(expr_ir.index)
+    if isinstance(expr_ir, BranchAccessIR):
+        return any(
+            child is not None and _expr_contains_transition_or_slew_call(child)
             for child in (
                 expr_ir.node1_index,
                 expr_ir.node1_index2,
@@ -1477,6 +1531,7 @@ def _convert_event_transition_ops(
     params: list[RustSimParam],
     events: list[RustSimEvent],
     transitions: list[RustSimTransition],
+    slews: list[RustSimSlew],
     body_stmt_ops: list[BodyStmtOp],
     body_expr_ops: list[BodyExprOp],
     side_effects: list[RustSimSideEffect],
@@ -1534,6 +1589,7 @@ def _convert_event_transition_ops(
     converted_events = 0
     converted_always_bodies = 0
     converted_transitions = 0
+    converted_slews = 0
     pending_continuous: list[object] = []
     seen_transition = False
     contributed_nodes = _collect_contributed_nodes(body_ir)
@@ -1692,6 +1748,82 @@ def _convert_event_transition_ops(
                 local_node_slots,
             )
             if transition_program is None:
+                slew_program = encode_slew_contribution_program(
+                    BlockIR((stmt,)),
+                    bindings,
+                    local_node_slots,
+                )
+                if slew_program is not None:
+                    for idx, output_slot in enumerate(slew_program.output_node_slots):
+                        expr_base = idx * 5
+                        if expr_base + 4 >= len(slew_program.expr_segments):
+                            reasons.append(f"{prefix}:slew_expr_segment_mismatch")
+                            continue
+                        target_start, target_count = _append_expr_segment(
+                            body_expr_ops,
+                            slew_program.expr_segments[expr_base],
+                            node_slot_to_global=node_slot_to_global,
+                            state_slot_to_global=state_slot_to_global,
+                            param_slot_to_global=param_slot_to_global,
+                        )
+                        rise_start, rise_count = _append_expr_segment(
+                            body_expr_ops,
+                            slew_program.expr_segments[expr_base + 1],
+                            node_slot_to_global=node_slot_to_global,
+                            state_slot_to_global=state_slot_to_global,
+                            param_slot_to_global=param_slot_to_global,
+                        )
+                        fall_start, fall_count = _append_expr_segment(
+                            body_expr_ops,
+                            slew_program.expr_segments[expr_base + 2],
+                            node_slot_to_global=node_slot_to_global,
+                            state_slot_to_global=state_slot_to_global,
+                            param_slot_to_global=param_slot_to_global,
+                        )
+                        output_bias_start, output_bias_count = _append_expr_segment(
+                            body_expr_ops,
+                            slew_program.expr_segments[expr_base + 3],
+                            node_slot_to_global=node_slot_to_global,
+                            state_slot_to_global=state_slot_to_global,
+                            param_slot_to_global=param_slot_to_global,
+                        )
+                        output_scale_start, output_scale_count = _append_expr_segment(
+                            body_expr_ops,
+                            slew_program.expr_segments[expr_base + 4],
+                            node_slot_to_global=node_slot_to_global,
+                            state_slot_to_global=state_slot_to_global,
+                            param_slot_to_global=param_slot_to_global,
+                        )
+                        reference_slot = slew_program.reference_node_slots[idx]
+                        slews.append(
+                            RustSimSlew(
+                                slew_id=len(slews),
+                                output_node_id=int(
+                                    node_slot_to_global.get(int(output_slot), output_slot)
+                                ),
+                                reference_node_id=(
+                                    None
+                                    if reference_slot is None
+                                    else int(
+                                        node_slot_to_global.get(
+                                            int(reference_slot), reference_slot
+                                        )
+                                    )
+                                ),
+                                target_expr_start=target_start,
+                                target_expr_count=target_count,
+                                rise_expr_start=rise_start,
+                                rise_expr_count=rise_count,
+                                fall_expr_start=fall_start,
+                                fall_expr_count=fall_count,
+                                output_bias_expr_start=output_bias_start,
+                                output_bias_expr_count=output_bias_count,
+                                output_scale_expr_start=output_scale_start,
+                                output_scale_expr_count=output_scale_count,
+                            )
+                        )
+                        converted_slews += 1
+                    continue
                 direct_program = encode_body_stmt_ops(
                     BlockIR((stmt,)),
                     bindings,
@@ -1803,7 +1935,12 @@ def _convert_event_transition_ops(
 
     flush_continuous_body()
 
-    if converted_events == 0 and converted_always_bodies == 0 and converted_transitions == 0:
+    if (
+        converted_events == 0
+        and converted_always_bodies == 0
+        and converted_transitions == 0
+        and converted_slews == 0
+    ):
         return (f"{prefix}:no_event_transition_ir",)
     side_effects.extend(side_effect_builder.effects)
     return tuple(reasons)
@@ -1920,6 +2057,7 @@ def build_source_record_rust_program(
     continuous_linear_ops: list[RustSimLinearOp] = []
     rust_events: list[RustSimEvent] = []
     rust_transitions: list[RustSimTransition] = []
+    rust_slews: list[RustSimSlew] = []
     body_stmt_ops: list[BodyStmtOp] = []
     body_expr_ops: list[BodyExprOp] = []
     side_effects: list[RustSimSideEffect] = []
@@ -1968,6 +2106,7 @@ def build_source_record_rust_program(
                 params=params,
                 events=rust_events,
                 transitions=rust_transitions,
+                slews=rust_slews,
                 body_stmt_ops=body_stmt_ops,
                 body_expr_ops=body_expr_ops,
                 side_effects=side_effects,
@@ -2018,6 +2157,7 @@ def build_source_record_rust_program(
             events=tuple(rust_events),
             body_ops=(),
             transitions=tuple(rust_transitions),
+            slews=tuple(rust_slews),
             records=tuple(records),
             side_effects=tuple(side_effects),
             continuous_linear_ops=tuple(continuous_linear_ops),

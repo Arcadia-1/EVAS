@@ -4636,12 +4636,14 @@ class CompiledModel:
 
         This is a transient behavioral approximation:
         - maxrise/maxfall are interpreted as V/s limits.
-        - maxrise<=0 or maxfall<=0 means "no limit" in that direction.
+        - Cadence Verilog-A passes SRneg as a negative value.
+        - maxrise<=0 or maxfall==0 means "no limit" in that direction.
         """
         t = float(time)
         tgt = float(target)
         mr = float(maxrise)
-        mf = float(maxfall)
+        raw_mf = float(maxfall)
+        mf = -raw_mf if raw_mf < 0.0 else raw_mf
 
         if key not in self.slew_states:
             self.slew_states[key] = {"value": tgt, "last_t": t}
@@ -4652,7 +4654,7 @@ class CompiledModel:
         dt = t - float(st["last_t"])
         if dt <= 0.0:
             # Same-time re-evaluation: only allow immediate move for unlimited slope.
-            if (tgt >= cur and mr <= 0.0) or (tgt < cur and mf <= 0.0):
+            if (tgt >= cur and mr <= 0.0) or (tgt < cur and mf == 0.0):
                 st["value"] = tgt
                 return tgt
             return cur
@@ -4664,7 +4666,7 @@ class CompiledModel:
             else:
                 nxt = cur + min(delta, mr * dt)
         else:
-            if mf <= 0.0:
+            if mf == 0.0:
                 nxt = tgt
             else:
                 nxt = cur - min(-delta, mf * dt)

@@ -218,3 +218,20 @@ pub struct EvasRustSimTransitionSpec {
     pub output_scale_expr_count: usize,
     pub default_transition: f64,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustSimSlewSpec {
+    pub output_node_id: usize,
+    pub reference_node_id: usize,
+    pub target_expr_start: usize,
+    pub target_expr_count: usize,
+    pub rise_expr_start: usize,
+    pub rise_expr_count: usize,
+    pub fall_expr_start: usize,
+    pub fall_expr_count: usize,
+    pub output_bias_expr_start: usize,
+    pub output_bias_expr_count: usize,
+    pub output_scale_expr_start: usize,
+    pub output_scale_expr_count: usize,
+}
