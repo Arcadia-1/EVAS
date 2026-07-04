@@ -71,6 +71,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
             output_dir=args.output,
             ahdllint=args.ahdllint,
             ahdllint_min_transition=args.ahdllint_min_transition,
+            spectre_strict=args.spectre_strict,
         )
     finally:
         if args.engine:
@@ -159,7 +160,11 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
     from evas.compiler.linter import has_compat_errors, lint_file
 
-    diagnostics = lint_file(args.input, min_transition=args.min_transition)
+    diagnostics = lint_file(
+        args.input,
+        min_transition=args.min_transition,
+        strict_spectre=args.spectre_strict,
+    )
     if args.format == "json":
         print(json.dumps([d.to_dict() for d in diagnostics], indent=2, sort_keys=True))
     else:
@@ -201,6 +206,11 @@ def main() -> None:
         default=1e-12,
         help="Minimum transition rise/fall time used by --ahdllint (default: 1e-12)",
     )
+    p_sim.add_argument(
+        "--spectre-strict",
+        action="store_true",
+        help="Reject EVAS extension syntax outside strict standalone Spectre Verilog-A",
+    )
     p_sim.set_defaults(func=cmd_simulate)
 
     # evas run
@@ -236,6 +246,11 @@ def main() -> None:
         type=float,
         default=1e-12,
         help="Minimum transition rise/fall time used for lint warnings (default: 1e-12)",
+    )
+    p_lint.add_argument(
+        "--spectre-strict",
+        action="store_true",
+        help="Reject EVAS extension syntax outside strict standalone Spectre Verilog-A",
     )
     p_lint.set_defaults(func=cmd_lint)
 

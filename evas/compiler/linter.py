@@ -12,6 +12,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from evas.netlist.spectre_parser import parse_spectre
 from evas.support_tiers import (
+    AMS_DIGITAL,
+    BEHAVIORAL_EVENT,
     CONSERVATIVE_CURRENT_KCL,
     format_support_tier_hint,
     support_boundary_message,
@@ -108,6 +110,7 @@ LINT_RULE_SPECS: Dict[str, RuleSpec] = {
         _rule("EVAS-COMP-E2157", COMPAT_ERROR, "event-body-contribution", spectre_ids=("VACOMP-2157",), category="spectre-compat"),
         _rule("EVAS-COMP-E2446", COMPAT_ERROR, "nonconstant-discipline-range", spectre_ids=("VACOMP-2446",), category="spectre-compat", phase="static-token"),
         _rule("EVAS-COMP-EKCL", COMPAT_ERROR, "unsupported-conservative-current-kcl", category="evas-compat", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-ESPECTRESTRICT", COMPAT_ERROR, "strict-spectre-rejected-extension", category="spectre-compat", oracle_status="evas-specific"),
         _rule("EVAS-COMP-EUNSUPPORTED", COMPAT_ERROR, "unsupported-function", category="evas-compat", oracle_status="evas-specific"),
         _rule("EVAS-AHDL-W5003", STATIC_WARNING, "transition-missing-rise-time", spectre_ids=("AHDLLINT-5003",)),
         _rule(
@@ -185,18 +188,32 @@ def _diag(
     )
 
 
-def lint_file(path: str | Path, *, min_transition: float = 1e-12) -> List[Diagnostic]:
+def lint_file(
+    path: str | Path,
+    *,
+    min_transition: float = 1e-12,
+    strict_spectre: bool = False,
+) -> List[Diagnostic]:
     """Lint a Verilog-A file or a Spectre netlist with ahdl_include entries."""
     src_path = Path(path).resolve()
     if src_path.suffix.lower() == ".scs":
-        return lint_spectre_netlist(src_path, min_transition=min_transition)
-    return lint_veriloga_file(src_path, min_transition=min_transition)
+        return lint_spectre_netlist(
+            src_path,
+            min_transition=min_transition,
+            strict_spectre=strict_spectre,
+        )
+    return lint_veriloga_file(
+        src_path,
+        min_transition=min_transition,
+        strict_spectre=strict_spectre,
+    )
 
 
 def lint_spectre_netlist(
     path: str | Path,
     *,
     min_transition: float = 1e-12,
+    strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     scs_path = Path(path).resolve()
     try:
@@ -224,7 +241,11 @@ def lint_spectre_netlist(
             )
             continue
         diagnostics.extend(
-            lint_veriloga_file(va_path, min_transition=min_transition)
+            lint_veriloga_file(
+                va_path,
+                min_transition=min_transition,
+                strict_spectre=strict_spectre,
+            )
         )
     return diagnostics
 
@@ -233,6 +254,7 @@ def lint_veriloga_file(
     path: str | Path,
     *,
     min_transition: float = 1e-12,
+    strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     va_path = Path(path).resolve()
     try:
@@ -250,6 +272,7 @@ def lint_veriloga_file(
         filename=str(va_path),
         source_dir=str(va_path.parent),
         min_transition=min_transition,
+        strict_spectre=strict_spectre,
     )
 
 
@@ -259,10 +282,14 @@ def lint_source(
     filename: str = "<string>",
     source_dir: str = ".",
     min_transition: float = 1e-12,
+    strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     diagnostics: List[Diagnostic] = []
+    strict_token_diagnostics: List[Diagnostic] = []
     try:
         pp_src, _defines, _default_transition = preprocess(source, source_dir=source_dir)
+        if strict_spectre:
+            strict_token_diagnostics = _lint_strict_spectre_tokens(pp_src, filename)
         range_diagnostics = _lint_nonconstant_discipline_ranges(pp_src, filename)
         modules = parse_all(pp_src)
     except PreprocessorError as exc:
@@ -293,8 +320,8 @@ def lint_source(
             else []
         )
         if any(d.code == "EVAS-COMP-E2446" for d in range_diagnostics):
-            return range_diagnostics
-        return [
+            return strict_token_diagnostics + range_diagnostics
+        return strict_token_diagnostics + [
             _diag(
                 code="EVAS-COMP-EPARSE",
                 message=str(exc),
@@ -305,9 +332,17 @@ def lint_source(
             )
         ]
 
+    diagnostics.extend(strict_token_diagnostics)
     diagnostics.extend(range_diagnostics)
     for module in modules:
-        diagnostics.extend(_lint_module(module, filename, min_transition))
+        diagnostics.extend(
+            _lint_module(
+                module,
+                filename,
+                min_transition,
+                strict_spectre=strict_spectre,
+            )
+        )
     return diagnostics
 
 
@@ -333,6 +368,8 @@ def _lint_module(
     module: va_ast.Module,
     filename: str,
     min_transition: float,
+    *,
+    strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     diagnostics: List[Diagnostic] = []
     for warning in module.warnings:
@@ -356,6 +393,8 @@ def _lint_module(
     }
     symbol_types = _module_symbol_types(module)
     diagnostics.extend(_lint_module_declarations(module, filename))
+    if strict_spectre:
+        diagnostics.extend(_lint_strict_spectre_module(module, filename))
     discrete_vars = set(integer_vars)
     if module.analog_block is not None:
         discrete_vars.update(_assigned_in_events(module.analog_block.body))
@@ -468,6 +507,473 @@ def _lint_module_declarations(
                 )
             )
     return diagnostics
+
+
+_STRICT_TOKEN_REJECTIONS = {
+    TokenType.CONNECTMODULE: (
+        "connectmodule",
+        AMS_DIGITAL,
+        "standalone Spectre Verilog-A rejects connectmodule artifacts",
+    ),
+    TokenType.LOGIC: (
+        "logic",
+        AMS_DIGITAL,
+        "logic is an AMS/digital extension, not strict standalone Verilog-A",
+    ),
+    TokenType.WREAL: (
+        "wreal",
+        AMS_DIGITAL,
+        "wreal is an AMS/digital extension, not strict standalone Verilog-A",
+    ),
+    TokenType.ASSIGN_KW: (
+        "continuous assign",
+        AMS_DIGITAL,
+        "continuous assign belongs to the EVAS AMS bridge subset",
+    ),
+    TokenType.ALWAYS: (
+        "always block",
+        AMS_DIGITAL,
+        "edge-sensitive always blocks require the EVAS AMS bridge subset",
+    ),
+    TokenType.TASK: (
+        "task/endtask",
+        BEHAVIORAL_EVENT,
+        "current standalone Spectre rejects user task declarations in this flow",
+    ),
+    TokenType.DO: (
+        "do while",
+        BEHAVIORAL_EVENT,
+        "do-while is accepted by EVAS extension mode but rejected in strict mode",
+    ),
+}
+
+_STRICT_IDENT_REJECTIONS = {
+    "generate": (
+        "generate/genvar static elaboration",
+        AMS_DIGITAL,
+        "generate is accepted by EVAS extension mode but rejected in strict mode",
+    ),
+    "specify": (
+        "specify/specparam",
+        AMS_DIGITAL,
+        "specify/specparam timing blocks are outside standalone Verilog-A",
+    ),
+    "connectrules": (
+        "connectrules",
+        AMS_DIGITAL,
+        "connectrules require a full AMS connect-rule environment",
+    ),
+}
+
+_STRICT_VERSION_GATED_RANDOM = {
+    "$rdist_chi_square",
+    "$rdist_t",
+}
+
+
+def _strict_spectre_diag(
+    feature: str,
+    tier: str,
+    detail: str,
+    file: str,
+    *,
+    module: Optional[str] = None,
+    node: object = None,
+    line: Optional[int] = None,
+    column: Optional[int] = None,
+) -> Diagnostic:
+    return _diag(
+        code="EVAS-COMP-ESPECTRESTRICT",
+        message=(
+            f"strict Spectre mode rejects {feature}: {detail}; "
+            "use default EVAS extension mode for this construct"
+        ),
+        file=file,
+        module=module,
+        support_tier=tier,
+        node=node,
+        line=line,
+        column=column,
+    )
+
+
+def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    try:
+        tokens = tokenize(source)
+    except Exception:
+        return diagnostics
+    for token in tokens:
+        if token.type == TokenType.EOF:
+            break
+        spec = _STRICT_TOKEN_REJECTIONS.get(token.type)
+        if spec is None and token.type == TokenType.IDENT:
+            spec = _STRICT_IDENT_REJECTIONS.get(token.value.lower())
+        if spec is None:
+            continue
+        feature, tier, detail = spec
+        diagnostics.append(
+            _strict_spectre_diag(
+                feature,
+                tier,
+                detail,
+                filename,
+                line=token.line,
+                column=token.col,
+            )
+        )
+    return diagnostics
+
+
+def _lint_strict_spectre_module(
+    module: va_ast.Module,
+    filename: str,
+) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    constant_index_names = {param.name for param in getattr(module, "parameters", [])}
+    constant_index_names.update(
+        var.name for var in getattr(module, "variables", [])
+        if getattr(var, "is_genvar", False)
+    )
+
+    for function in getattr(module, "functions", []):
+        if _stmt_has_function_call(function.body, function.name):
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "recursive function",
+                    BEHAVIORAL_EVENT,
+                    "the current strict Spectre benchmark flow rejects recursion",
+                    filename,
+                    module=module.name,
+                    node=function,
+                )
+            )
+        _lint_strict_spectre_statement(
+            function.body,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+
+    for task in getattr(module, "tasks", []):
+        _lint_strict_spectre_statement(
+            task.body,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+
+    for assignment in getattr(module, "continuous_assigns", []):
+        _lint_strict_spectre_expr(
+            assignment.target,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+        _lint_strict_spectre_expr(
+            assignment.value,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+
+    if module.analog_block is not None:
+        _lint_strict_spectre_statement(
+            module.analog_block.body,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+    for always in getattr(module, "always_blocks", []):
+        _lint_strict_spectre_event(
+            always.event,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            always.body,
+            diagnostics,
+            filename,
+            module.name,
+            constant_index_names,
+        )
+    return diagnostics
+
+
+def _lint_strict_spectre_statement(
+    stmt: va_ast.Statement,
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+    constant_index_names: Set[str],
+) -> None:
+    if stmt is None:
+        return
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            _lint_strict_spectre_statement(
+                child, diagnostics, filename, module, constant_index_names,
+            )
+        return
+    if isinstance(stmt, va_ast.Contribution):
+        _lint_strict_spectre_branch(
+            stmt.branch, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_expr(
+            stmt.expr, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.Assignment):
+        _lint_strict_spectre_expr(
+            stmt.target, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_expr(
+            stmt.value, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.EventStatement):
+        _lint_strict_spectre_event(
+            stmt.event, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.body, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.IfStatement):
+        _lint_strict_spectre_expr(
+            stmt.cond, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.then_body, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.else_body, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.ForStatement):
+        _lint_strict_spectre_statement(
+            stmt.init, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_expr(
+            stmt.cond, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.update, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.body, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.WhileStatement):
+        _lint_strict_spectre_expr(
+            stmt.cond, diagnostics, filename, module, constant_index_names,
+        )
+        _lint_strict_spectre_statement(
+            stmt.body, diagnostics, filename, module, constant_index_names,
+        )
+        return
+    if isinstance(stmt, va_ast.CaseStatement):
+        _lint_strict_spectre_expr(
+            stmt.expr, diagnostics, filename, module, constant_index_names,
+        )
+        for item in stmt.items:
+            for value in item.values:
+                _lint_strict_spectre_expr(
+                    value, diagnostics, filename, module, constant_index_names,
+                )
+            _lint_strict_spectre_statement(
+                item.body, diagnostics, filename, module, constant_index_names,
+            )
+        return
+    if isinstance(stmt, va_ast.SystemTask):
+        for arg in stmt.args:
+            _lint_strict_spectre_expr(
+                arg, diagnostics, filename, module, constant_index_names,
+            )
+        return
+    if isinstance(stmt, va_ast.TaskCall):
+        for arg in stmt.args:
+            _lint_strict_spectre_expr(
+                arg, diagnostics, filename, module, constant_index_names,
+            )
+
+
+def _lint_strict_spectre_event(
+    event: va_ast.EventExpr | va_ast.CombinedEvent,
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+    constant_index_names: Set[str],
+) -> None:
+    if isinstance(event, va_ast.CombinedEvent):
+        for child in event.events:
+            _lint_strict_spectre_event(
+                child, diagnostics, filename, module, constant_index_names,
+            )
+        return
+    for expr in event.args:
+        _lint_strict_spectre_expr(
+            expr, diagnostics, filename, module, constant_index_names,
+        )
+    _lint_strict_spectre_expr(
+        event.time_tol_expr, diagnostics, filename, module, constant_index_names,
+    )
+    _lint_strict_spectre_expr(
+        event.expr_tol_expr, diagnostics, filename, module, constant_index_names,
+    )
+
+
+def _lint_strict_spectre_expr(
+    expr: Optional[va_ast.Expr],
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+    constant_index_names: Set[str],
+) -> None:
+    if expr is None:
+        return
+    if isinstance(expr, va_ast.BranchAccess):
+        _lint_strict_spectre_branch(
+            expr, diagnostics, filename, module, constant_index_names,
+        )
+    if isinstance(expr, va_ast.FunctionCall):
+        name = expr.name.lower()
+        if name in _STRICT_VERSION_GATED_RANDOM:
+            diagnostics.append(
+                _strict_spectre_diag(
+                    f"{expr.name}()",
+                    BEHAVIORAL_EVENT,
+                    "this random distribution is version-gated out of the "
+                    "current standalone Spectre compatibility target",
+                    filename,
+                    module=module,
+                    node=expr,
+                )
+            )
+    for child in _expr_children(expr):
+        _lint_strict_spectre_expr(
+            child, diagnostics, filename, module, constant_index_names,
+        )
+
+
+def _lint_strict_spectre_branch(
+    branch: va_ast.BranchAccess,
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+    constant_index_names: Set[str],
+) -> None:
+    index_exprs = (
+        branch.node1_index,
+        branch.node2_index,
+        branch.node1_index2,
+        branch.node2_index2,
+    )
+    if not any(index is not None for index in index_exprs):
+        return
+    if all(
+        index is None or _strict_index_is_static(index, constant_index_names)
+        for index in index_exprs
+    ):
+        return
+    diagnostics.append(
+        _strict_spectre_diag(
+            "runtime electrical-node indexing",
+            BEHAVIORAL_EVENT,
+            "standalone Spectre accepts only constant or statically elaborated "
+            "electrical indexes in this compatibility mode",
+            filename,
+            module=module,
+            node=branch,
+        )
+    )
+
+
+def _strict_index_is_static(
+    expr: va_ast.Expr,
+    constant_index_names: Set[str],
+) -> bool:
+    if isinstance(expr, va_ast.NumberLiteral):
+        return True
+    if isinstance(expr, va_ast.Identifier):
+        return expr.name in constant_index_names
+    if isinstance(expr, va_ast.UnaryExpr):
+        return expr.op in {"+", "-"} and _strict_index_is_static(
+            expr.operand,
+            constant_index_names,
+        )
+    if isinstance(expr, va_ast.BinaryExpr):
+        return expr.op in {"+", "-", "*", "/", "%", "**"} and (
+            _strict_index_is_static(expr.left, constant_index_names)
+            and _strict_index_is_static(expr.right, constant_index_names)
+        )
+    return False
+
+
+def _stmt_has_function_call(stmt: va_ast.Statement, name: str) -> bool:
+    target = name.lower()
+    if stmt is None:
+        return False
+    if isinstance(stmt, va_ast.Block):
+        return any(_stmt_has_function_call(child, name) for child in stmt.statements)
+    if isinstance(stmt, va_ast.Contribution):
+        return _expr_has_call(stmt.expr, target)
+    if isinstance(stmt, va_ast.Assignment):
+        return _expr_has_call(stmt.target, target) or _expr_has_call(stmt.value, target)
+    if isinstance(stmt, va_ast.EventStatement):
+        return (
+            _event_has_function_call(stmt.event, target)
+            or _stmt_has_function_call(stmt.body, target)
+        )
+    if isinstance(stmt, va_ast.IfStatement):
+        return (
+            _expr_has_call(stmt.cond, target)
+            or _stmt_has_function_call(stmt.then_body, target)
+            or _stmt_has_function_call(stmt.else_body, target)
+        )
+    if isinstance(stmt, va_ast.ForStatement):
+        return (
+            _stmt_has_function_call(stmt.init, target)
+            or _expr_has_call(stmt.cond, target)
+            or _stmt_has_function_call(stmt.update, target)
+            or _stmt_has_function_call(stmt.body, target)
+        )
+    if isinstance(stmt, va_ast.WhileStatement):
+        return _expr_has_call(stmt.cond, target) or _stmt_has_function_call(
+            stmt.body,
+            target,
+        )
+    if isinstance(stmt, va_ast.CaseStatement):
+        return _expr_has_call(stmt.expr, target) or any(
+            any(_expr_has_call(value, target) for value in item.values)
+            or _stmt_has_function_call(item.body, target)
+            for item in stmt.items
+        )
+    if isinstance(stmt, va_ast.SystemTask):
+        return any(_expr_has_call(arg, target) for arg in stmt.args)
+    if isinstance(stmt, va_ast.TaskCall):
+        return any(_expr_has_call(arg, target) for arg in stmt.args)
+    return False
+
+
+def _event_has_function_call(
+    event: va_ast.EventExpr | va_ast.CombinedEvent,
+    name: str,
+) -> bool:
+    if isinstance(event, va_ast.CombinedEvent):
+        return any(_event_has_function_call(child, name) for child in event.events)
+    return (
+        any(_expr_has_call(expr, name) for expr in event.args)
+        or _expr_has_call(event.time_tol_expr, name)
+        or _expr_has_call(event.expr_tol_expr, name)
+    )
 
 
 def _lint_statement(

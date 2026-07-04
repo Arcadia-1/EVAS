@@ -56,18 +56,23 @@ selectors remain accepted as compatibility aliases for `evas-rust`.
 evas simulate path/to/tb.scs -o output/mydesign
 evas simulate path/to/tb.scs -o output/mydesign --engine python
 evas simulate path/to/tb.scs -o output/mydesign --ahdllint
+evas simulate path/to/tb.scs -o output/mydesign --spectre-strict
 ```
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.
 `--ahdllint` runs EVAS lint as a non-blocking simulation preflight and writes
 diagnostics into the simulation log before model compilation. Netlists may also
 request this with `simulatorOptions options ahdllint=true`.
+`--spectre-strict` runs the same lint preflight in blocking strict standalone
+Spectre mode, rejecting EVAS extension syntax before compilation. Netlists may
+also request this with `simulatorOptions options spectre_strict=true`.
 
 Before a full simulation, you can run a Spectre/AHDL-style static lint pass:
 
 ```bash
 evas lint path/to/model.va
 evas lint path/to/tb.scs --format json
+evas lint path/to/model.va --spectre-strict
 ```
 
 `evas lint` follows `ahdl_include` statements in `.scs` files and reports two
@@ -90,6 +95,11 @@ Compatibility diagnostics include Cadence/Spectre-aligned cases such as
 conditionally executed analog operators (`transition`, `slew`, `idt`) and
 discipline vector ranges that depend on runtime variables instead of numeric or
 parameter constant expressions.
+Strict Spectre mode additionally rejects EVAS extension syntax that standalone
+Spectre rejects in the current compatibility target, including AMS bridge
+constructs (`logic`, `wreal`, continuous `assign`, `always`), task/do-while
+extensions, runtime electrical-node indexing, selected version-gated random
+distributions, `generate`, `specify`, `connectmodule`, and `connectrules`.
 The lint regression suite also keeps a small set of public oracle fixtures under
 `tests/fixtures/lint_oracle_cases`. These cases record distilled expected EVAS
 diagnostic codes only; raw Cadence/Spectre logs and generated certification

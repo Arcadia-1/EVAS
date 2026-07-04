@@ -536,6 +536,46 @@ class TestAhdlIncludePathFallback:
         assert "AHDL lint diagnostics:" in log
         assert "EVAS-AHDL-W5003" in log
 
+    def test_evas_simulate_spectre_strict_blocks_extension_syntax(self, tmp_path):
+        va_file = tmp_path / "ams_bridge.va"
+        va_file.write_text(textwrap.dedent("""\
+            module ams_bridge(clk, y);
+                input logic clk;
+                output wreal y;
+                assign y = clk;
+                always @(posedge clk) y = 1;
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_ams_bridge.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "ams_bridge.va"
+
+            Vclk (clk 0) vsource type=pulse val0=0 val1=1 period=1n
+            XDUT (clk y) ams_bridge
+
+            simulatorOptions options spectre_strict=true
+            tran tran stop=1n maxstep=100p
+            save clk y
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert not ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "Spectre strict lint diagnostics:" in log
+        assert "EVAS-COMP-ESPECTRESTRICT" in log
+        assert "strict Spectre mode rejects logic" in log
+        assert "ERROR: Spectre strict lint rejected this input." in log
+        assert "evas completes with 1 errors" in log
+
     def test_user_defined_function_call_allowed_by_netlist_runner(self, tmp_path):
         va_file = tmp_path / "fn_clamp.va"
         va_file.write_text(textwrap.dedent("""\

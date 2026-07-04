@@ -43,6 +43,7 @@ def test_lint_rule_registry_covers_current_diagnostics():
         "EVAS-COMP-E2446",
         "EVAS-COMP-EKCL",
         "EVAS-COMP-EUNSUPPORTED",
+        "EVAS-COMP-ESPECTRESTRICT",
         "EVAS-AHDL-W5003",
         "EVAS-AHDL-W5004",
         "EVAS-AHDL-W5005",
@@ -66,6 +67,7 @@ def test_lint_rule_registry_covers_current_diagnostics():
     assert LINT_RULE_SPECS["EVAS-AHDL-W5011"].category == "cadence-ahdl"
     assert LINT_RULE_SPECS["EVAS-COMP-EKCL"].rule == "unsupported-conservative-current-kcl"
     assert LINT_RULE_SPECS["EVAS-COMP-EUNSUPPORTED"].oracle_status == "evas-specific"
+    assert LINT_RULE_SPECS["EVAS-COMP-ESPECTRESTRICT"].category == "spectre-compat"
 
 
 def test_diagnostics_use_registered_rule_metadata():
@@ -835,6 +837,89 @@ def test_constant_electrical_range_is_allowed():
     assert not has_compat_errors(diags)
 
 
+def test_strict_spectre_rejects_ams_bridge_tokens():
+    source = textwrap.dedent("""\
+        module ams_bridge(clk, y);
+            input logic clk;
+            output wreal y;
+            assign y = clk;
+            always @(posedge clk) y = 1;
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert has_compat_errors(strict_diags)
+    assert all(
+        diag.support_tier == AMS_DIGITAL
+        for diag in strict_diags
+        if diag.code == "EVAS-COMP-ESPECTRESTRICT"
+    )
+    assert "logic" in messages
+    assert "wreal" in messages
+    assert "continuous assign" in messages
+    assert "always block" in messages
+
+
+def test_strict_spectre_rejects_extension_only_behavioral_constructs():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module strict_ext(out);
+            output [3:0] out;
+            electrical [3:0] out;
+            integer i;
+
+            task update;
+                begin
+                    i = i + 1;
+                end
+            endtask
+
+            analog begin
+                do i = i + 1; while (i < 2);
+                V(out[i]) <+ $rdist_t(7, 3.0);
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert has_compat_errors(strict_diags)
+    assert "task/endtask" in messages
+    assert "do while" in messages
+    assert "runtime electrical-node indexing" in messages
+    assert "$rdist_t()" in messages
+    assert any(
+        diag.support_tier == BEHAVIORAL_EVENT
+        for diag in strict_diags
+        if diag.code == "EVAS-COMP-ESPECTRESTRICT"
+    )
+
+
+def test_strict_spectre_allows_static_electrical_indexing():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module static_idx(out);
+            output [3:0] out;
+            electrical [3:0] out;
+            analog begin
+                V(out[0]) <+ 1.0;
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(strict_diags)
+    assert not has_compat_errors(strict_diags)
+
+
 def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     va_file = tmp_path / "model.va"
     va_file.write_text(textwrap.dedent("""\
@@ -885,3 +970,28 @@ def test_lint_cli_json_exits_nonzero_on_compat_error(tmp_path, monkeypatch, caps
     data = json.loads(capsys.readouterr().out)
     assert data[0]["code"] == "EVAS-COMP-EUNSUPPORTED"
     assert data[0]["support_tier"] == OUTSIDE_CURRENT_SCOPE
+
+
+def test_lint_cli_json_spectre_strict_exits_nonzero(tmp_path, monkeypatch, capsys):
+    va_file = tmp_path / "ams_bridge.va"
+    va_file.write_text(textwrap.dedent("""\
+        module ams_bridge(clk, y);
+            input logic clk;
+            output wreal y;
+            assign y = clk;
+            always @(posedge clk) y = 1;
+        endmodule
+    """))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evas", "lint", str(va_file), "--spectre-strict", "--format", "json"],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        runpy.run_module("evas", run_name="__main__")
+
+    assert excinfo.value.code == 1
+    data = json.loads(capsys.readouterr().out)
+    assert {item["code"] for item in data} == {"EVAS-COMP-ESPECTRESTRICT"}
+    assert {item["support_tier"] for item in data} == {AMS_DIGITAL}

@@ -1000,19 +1000,27 @@ def _log_ahdllint_diagnostics(
     log: "_Logger",
     *,
     min_transition: float,
-) -> int:
+    strict_spectre: bool = False,
+) -> tuple[int, bool]:
     """Run EVAS lint during simulation and write diagnostics to the run log."""
-    from evas.compiler.linter import lint_file
+    from evas.compiler.linter import has_compat_errors, lint_file
 
-    diagnostics = lint_file(scs_path, min_transition=min_transition)
+    diagnostics = lint_file(
+        scs_path,
+        min_transition=min_transition,
+        strict_spectre=strict_spectre,
+    )
     log.write("")
-    log.write("AHDL lint diagnostics:")
+    if strict_spectre:
+        log.write("Spectre strict lint diagnostics:")
+    else:
+        log.write("AHDL lint diagnostics:")
     if not diagnostics:
         log.write("    No EVAS lint diagnostics.")
-        return 0
+        return 0, False
     for diagnostic in diagnostics:
         log.write(f"    {diagnostic.format_text()}")
-    return len(diagnostics)
+    return len(diagnostics), has_compat_errors(diagnostics)
 
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1047,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 output_dir: str = './output',
                 strobe_log_path: Optional[str] = None,
                 ahdllint: bool = False,
-                ahdllint_min_transition: float = 1e-12) -> bool:
+                ahdllint_min_transition: float = 1e-12,
+                spectre_strict: bool = False) -> bool:
     """Run an EVAS .scs netlist. Returns True on success.
 
     Args:
@@ -1050,6 +1059,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         ahdllint:        Run EVAS AHDL-style lint before compiling models.
         ahdllint_min_transition:
                          Minimum transition rise/fall time for lint warnings.
+        spectre_strict:  Reject EVAS extension syntax outside strict standalone
+                         Spectre Verilog-A before compiling models.
     """
     scs_path = Path(scs_file).resolve()
     out_dir = Path(output_dir)
@@ -1096,12 +1107,26 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         or _simopt_bool(simopt, 'ahdllint', False)
         or _simopt_bool(simopt, 'evas_ahdllint', False)
     )
-    if ahdllint_enabled:
-        warnings += _log_ahdllint_diagnostics(
+    spectre_strict_enabled = (
+        spectre_strict
+        or _simopt_bool(simopt, 'spectre_strict', False)
+        or _simopt_bool(simopt, 'evas_spectre_strict', False)
+    )
+    if ahdllint_enabled or spectre_strict_enabled:
+        lint_count, lint_has_errors = _log_ahdllint_diagnostics(
             scs_path,
             log,
             min_transition=ahdllint_min_transition,
+            strict_spectre=spectre_strict_enabled,
         )
+        warnings += lint_count
+        if spectre_strict_enabled and lint_has_errors:
+            errors += 1
+            log.write("ERROR: Spectre strict lint rejected this input.")
+            log.write(f"evas completes with {errors} errors, {warnings} warnings.")
+            if log_file:
+                log_file.close()
+            return False
 
     static_branch_fastpath = _simopt_bool(
         simopt,
