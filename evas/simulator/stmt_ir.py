@@ -81,7 +81,11 @@ class StatementLoweringContext:
             "$bound_step",
             "$fclose",
             "$fdisplay",
+            "$fgets",
+            "$fscanf",
+            "$fseek",
             "$fwrite",
+            "$rewind",
             "$strobe",
             "$display",
         }

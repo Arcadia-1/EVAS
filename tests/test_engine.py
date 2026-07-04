@@ -9141,6 +9141,152 @@ endmodule
         assert lines[0].startswith("edge 1 at")
         assert lines[4].startswith("edge 5 at")
 
+    def test_rust_sim_program_initial_fscanf_sidecar_drives_waveform(self, tmp_path):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        infile = tmp_path / "stimulus_profile.txt"
+        infile.write_text("3e-9 0.72\n", encoding="utf-8")
+        infile_s = str(infile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_initial_fscanf_probe(clk, out, metric);
+    input voltage clk;
+    output voltage out;
+    output voltage metric;
+    parameter string filename = "{infile_s}";
+    parameter real tr = 100p;
+    integer fd;
+    integer nread;
+    integer count_q;
+    real prof_t;
+    real prof_v;
+    real out_v;
+    real metric_v;
+    analog begin
+        @(initial_step) begin
+            out_v = 0.0;
+            metric_v = 0.0;
+            count_q = 0;
+            fd = $fopen(filename, "r");
+            nread = $fscanf(fd, "%f %f", prof_t, prof_v);
+            $fclose(fd);
+            out_v = nread == 2 ? prof_v : 0.0;
+            metric_v = nread;
+        end
+        @(cross(V(clk) - 0.5, +1)) begin
+            out_v = prof_v;
+            metric_v = prof_t;
+            count_q = count_q + 1;
+        end
+        V(out) <+ transition(out_v, 0.0, tr, tr);
+        V(metric) <+ transition(metric_v, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        sim.record("metric")
+        result = sim.run(
+            tstop=30e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert model.state["nread"] == 2
+        assert model.state["prof_v"] == pytest.approx(0.72)
+        assert model.state["count_q"] >= 1
+        assert max(result.signals["out"]) == pytest.approx(0.72, abs=5e-3)
+
+    def test_rust_sim_program_initial_file_position_sidecar(self, tmp_path):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        infile = tmp_path / "stimulus_profile.txt"
+        infile.write_text("alpha\nbeta\n", encoding="utf-8")
+        infile_s = str(infile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_initial_file_position_probe(vin, clk, out, metric);
+    input voltage vin;
+    input voltage clk;
+    output voltage out;
+    output voltage metric;
+    parameter string filename = "{infile_s}";
+    parameter real tr = 100p;
+    integer fd;
+    integer pos0;
+    integer pos1;
+    integer count_q;
+    string line_buf;
+    real out_v;
+    real metric_v;
+    analog begin
+        @(initial_step) begin
+            out_v = 0.0;
+            metric_v = 0.0;
+            count_q = 0;
+            fd = $fopen(filename, "r");
+            pos0 = $ftell(fd);
+            $fgets(line_buf, fd);
+            pos1 = $ftell(fd);
+            $fseek(fd, pos0, 0);
+            $fgets(line_buf, fd);
+            $rewind(fd);
+            $fclose(fd);
+            metric_v = pos1 >= pos0 ? 1.0 : 0.0;
+        end
+        @(cross(V(clk) - 0.5, +1)) begin
+            out_v = V(vin) > 0.5 ? 1.0 : 0.0;
+            metric_v = metric_v + 0.25;
+            count_q = count_q + 1;
+        end
+        V(out) <+ transition(out_v, 0.0, tr, tr);
+        V(metric) <+ transition(metric_v, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("vin", dc(0.8))
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        sim.record("metric")
+        result = sim.run(
+            tstop=30e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert model.state["pos0"] == 0
+        assert model.state["pos1"] > model.state["pos0"]
+        assert model.state["line_buf"] == "alpha"
+        assert model.state["count_q"] >= 1
+        assert max(result.signals["out"]) == pytest.approx(1.0, abs=5e-3)
+        assert max(result.signals["metric"]) > 1.0
+
     def test_direct_filename_fstrobe_does_not_crash_evas(self, tmp_path):
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module
