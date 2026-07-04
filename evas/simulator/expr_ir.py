@@ -72,7 +72,10 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_NOT,
     BODY_EXPR_POW,
     BODY_EXPR_RANDOM_INT32,
+    BODY_EXPR_RDIST_ERLANG,
+    BODY_EXPR_RDIST_EXPONENTIAL,
     BODY_EXPR_RDIST_NORMAL,
+    BODY_EXPR_RDIST_POISSON,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
@@ -132,7 +135,10 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$dist_uniform",
         "$fopen",
         "$random",
+        "$rdist_erlang",
+        "$rdist_exponential",
         "$rdist_normal",
+        "$rdist_poisson",
     }
 )
 
@@ -198,7 +204,10 @@ _BODY_FUNCTION_OPS = {
     "max": (BODY_EXPR_MAX, 2),
     "pow": (BODY_EXPR_POW, 2),
     "$random": (BODY_EXPR_RANDOM_INT32, 1),
+    "$rdist_exponential": (BODY_EXPR_RDIST_EXPONENTIAL, 2),
+    "$rdist_poisson": (BODY_EXPR_RDIST_POISSON, 2),
     "$rdist_normal": (BODY_EXPR_RDIST_NORMAL, 3),
+    "$rdist_erlang": (BODY_EXPR_RDIST_ERLANG, 3),
 }
 
 

@@ -1618,7 +1618,18 @@ fn rust_sim_transition_target_values_after_pre_always(
     Ok(values)
 }
 
-fn rust_sim_transition_targets_contain_rdist_normal(
+fn rust_sim_op_is_stochastic(op_kind: u8) -> bool {
+    matches!(
+        op_kind,
+        BODY_EXPR_RANDOM_INT32
+            | BODY_EXPR_RDIST_NORMAL
+            | BODY_EXPR_RDIST_EXPONENTIAL
+            | BODY_EXPR_RDIST_POISSON
+            | BODY_EXPR_RDIST_ERLANG
+    )
+}
+
+fn rust_sim_transition_targets_contain_stochastic_expr(
     transitions: &[EvasRustSimTransitionSpec],
     body_expr_ops: &[EvasRustBodyExprOp],
 ) -> Result<bool, i32> {
@@ -1632,7 +1643,7 @@ fn rust_sim_transition_targets_contain_rdist_normal(
         }
         if body_expr_ops[start..end]
             .iter()
-            .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL)
+            .any(|op| rust_sim_op_is_stochastic(op.op_kind))
         {
             return Ok(true);
         }
@@ -1640,7 +1651,7 @@ fn rust_sim_transition_targets_contain_rdist_normal(
     Ok(false)
 }
 
-fn rust_sim_expr_segment_contains_rdist_normal(
+fn rust_sim_expr_segment_contains_stochastic_expr(
     body_expr_ops: &[EvasRustBodyExprOp],
     start: usize,
     count: usize,
@@ -1651,10 +1662,10 @@ fn rust_sim_expr_segment_contains_rdist_normal(
     }
     Ok(body_expr_ops[start..end]
         .iter()
-        .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL))
+        .any(|op| rust_sim_op_is_stochastic(op.op_kind)))
 }
 
-fn rust_sim_always_event_body_contains_rdist_normal(
+fn rust_sim_always_event_body_contains_stochastic_expr(
     events: &[EvasRustSimEventSpec],
     body_stmt_ops: &[EvasRustBodyStmtOp],
     body_expr_ops: &[EvasRustBodyExprOp],
@@ -1671,7 +1682,7 @@ fn rust_sim_always_event_body_contains_rdist_normal(
             return Err(-981);
         }
         for stmt in &body_stmt_ops[event.body_stmt_start..body_end] {
-            if rust_sim_expr_segment_contains_rdist_normal(
+            if rust_sim_expr_segment_contains_stochastic_expr(
                 body_expr_ops,
                 stmt.expr_start,
                 stmt.expr_count,
@@ -1703,8 +1714,12 @@ pub(crate) fn rust_sim_next_transition_target_change_breakpoint(
     if transitions.is_empty() || dt <= 0.0 {
         return Ok(None);
     }
-    if rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
-        || rust_sim_always_event_body_contains_rdist_normal(events, body_stmt_ops, body_expr_ops)?
+    if rust_sim_transition_targets_contain_stochastic_expr(transitions, body_expr_ops)?
+        || rust_sim_always_event_body_contains_stochastic_expr(
+            events,
+            body_stmt_ops,
+            body_expr_ops,
+        )?
     {
         return Ok(None);
     }

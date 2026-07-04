@@ -1854,6 +1854,65 @@ endmodule
         assert sim._perf_stats["rust_sim_program_enabled"] == 1
         assert sim._perf_stats["rust_full_model_required_failures"] == 0
 
+    def test_rust_sim_program_extra_rdist_event_body_lowers(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_extra_rdist_event(vin, clk, out, metric);
+    input voltage vin, clk;
+    output voltage out, metric;
+    integer seed_q;
+    real noise_q;
+    real out_q;
+    analog begin
+        @(initial_step) begin
+            seed_q = 37;
+            noise_q = 0.0;
+            out_q = 0.0;
+        end
+        @(cross(V(clk) - 0.45, +1)) begin
+            noise_q = $rdist_exponential(seed_q, 1.0)
+                    + $rdist_poisson(seed_q + 1, 2.0)
+                    + $rdist_erlang(seed_q + 2, 2, 0.5);
+            out_q = V(vin) + 0.01 * noise_q;
+        end
+        V(out) <+ transition(out_q, 0, 50p, 50p);
+        V(metric) <+ transition(noise_q, 0, 50p, 50p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"vin": "VIN", "clk": "CLK", "out": "OUT", "metric": "METRIC"}
+        sim = Simulator()
+        sim.add_source("VIN", dc(0.4))
+        sim.add_source(
+            "CLK",
+            pulse(0.0, 1.0, delay=1e-9, period=2e-9, width=0.8e-9),
+        )
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.record("METRIC")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=0.25e-9,
+            record_step=0.25e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        metrics = [float(value) for value in result.signals["METRIC"].tolist()]
+        assert max(metrics) > 0.0
+        assert min(metrics) >= 0.0
+        assert float(result.signals["OUT"][-1]) == pytest.approx(
+            0.4 + 0.01 * metrics[-1],
+            abs=1e-9,
+        )
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_time_array_starts_at_zero(self):
         sim = Simulator()
         sim.add_source("v", dc(0.0))

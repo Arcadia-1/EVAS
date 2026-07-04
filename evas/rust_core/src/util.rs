@@ -91,10 +91,13 @@ fn next_rdist_draw_index(seed_bits: u64) -> u64 {
     })
 }
 
-fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
+fn rdist_stream(seed: f64, salt: u64) -> u64 {
     let seed_bits = seed.to_bits();
     let index = next_rdist_draw_index(seed_bits);
-    let stream = seed_bits ^ index.rotate_left(17) ^ 0xd1b5_4a32_d192_ed03_u64;
+    seed_bits ^ index.rotate_left(17) ^ salt
+}
+
+fn normal_from_stream(stream: u64, mean: f64, std: f64) -> f64 {
     let u1 = uniform01_from_u64(splitmix64(stream));
     let u2 = uniform01_from_u64(splitmix64(stream ^ 0xa076_1d64_78bd_642f_u64));
     let radius = (-2.0 * u1.ln()).sqrt();
@@ -102,11 +105,64 @@ fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
     mean + std * radius * angle.cos()
 }
 
+fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
+    normal_from_stream(rdist_stream(seed, 0xd1b5_4a32_d192_ed03_u64), mean, std)
+}
+
 fn deterministic_random_int32(seed: f64) -> f64 {
-    let seed_bits = seed.to_bits();
-    let index = next_rdist_draw_index(seed_bits);
-    let stream = seed_bits ^ index.rotate_left(17) ^ 0x91e1_0da5_c79e_7b1d_u64;
+    let stream = rdist_stream(seed, 0x91e1_0da5_c79e_7b1d_u64);
     (splitmix64(stream) as u32 as i32) as f64
+}
+
+fn deterministic_exponential(seed: f64, mean: f64) -> f64 {
+    let mean = mean.max(0.0);
+    if mean == 0.0 {
+        return 0.0;
+    }
+    let stream = rdist_stream(seed, 0x94d0_49bb_1331_11eb_u64);
+    let u = uniform01_from_u64(splitmix64(stream));
+    -mean * u.ln()
+}
+
+fn deterministic_poisson(seed: f64, mean: f64) -> f64 {
+    let lambda = mean.max(0.0);
+    if lambda == 0.0 {
+        return 0.0;
+    }
+    let stream = rdist_stream(seed, 0xbf58_476d_1ce4_e5b9_u64);
+    if lambda < 50.0 {
+        let limit = (-lambda).exp();
+        let mut product = 1.0;
+        let mut count: i64 = 0;
+        while product > limit {
+            count += 1;
+            let draw_stream = stream ^ (count as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15_u64);
+            product *= uniform01_from_u64(splitmix64(draw_stream));
+            if count > 100_000 {
+                break;
+            }
+        }
+        return (count - 1).max(0) as f64;
+    }
+    let normal = normal_from_stream(stream, lambda, lambda.sqrt()).round();
+    normal.max(0.0)
+}
+
+fn deterministic_erlang(seed: f64, stages: f64, mean: f64) -> f64 {
+    let stage_count = to_veriloga_integer(stages).max(1) as u64;
+    let mean = mean.max(0.0);
+    if mean == 0.0 {
+        return 0.0;
+    }
+    let stream = rdist_stream(seed, 0xe703_7ed1_a0b4_28db_u64);
+    let scale = mean / stage_count as f64;
+    let mut total = 0.0;
+    for stage in 0..stage_count.min(100_000) {
+        let draw_stream = stream ^ (stage + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_u64);
+        let u = uniform01_from_u64(splitmix64(draw_stream));
+        total += -scale * u.ln();
+    }
+    total
 }
 
 pub(crate) fn evaluate_body_expr_segment(
@@ -305,6 +361,18 @@ pub(crate) fn evaluate_body_expr_segment(
             BODY_EXPR_RANDOM_INT32 => {
                 let seed = pop1(stack)?;
                 stack.push(deterministic_random_int32(seed));
+            }
+            BODY_EXPR_RDIST_EXPONENTIAL => {
+                let (seed, mean) = pop2(stack)?;
+                stack.push(deterministic_exponential(seed, mean));
+            }
+            BODY_EXPR_RDIST_POISSON => {
+                let (seed, mean) = pop2(stack)?;
+                stack.push(deterministic_poisson(seed, mean));
+            }
+            BODY_EXPR_RDIST_ERLANG => {
+                let (seed, stages, mean) = pop3(stack)?;
+                stack.push(deterministic_erlang(seed, stages, mean));
             }
             BODY_EXPR_FLOOR => {
                 let value = pop1(stack)?;
