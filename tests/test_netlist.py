@@ -2846,6 +2846,57 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(40e-9) == pytest.approx(-1.95e-23, rel=0.02)
         assert sample_at(80e-9) == pytest.approx(-5.95e-23, rel=0.02)
 
+    def test_evas_rust_branch_current_idt_matches_spectre_probe(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+        va_file = tmp_path / "kcl_inductor_idt_voltage.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module kcl_inductor_idt_voltage(p, n);
+                inout p, n;
+                electrical p, n;
+                parameter real l = 1n;
+                analog begin
+                    V(p, n) <+ l * idt(I(p, n), 0.0);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_kcl_inductor_idt_voltage.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "kcl_inductor_idt_voltage.va"
+            Istep (p 0) isource type=pwl wave=[0 0.0 20n 0.0 21n 1u 80n 1u 81n -1u 160n -1u]
+            XDUT (p 0) kcl_inductor_idt_voltage l=1n
+            simulatorOptions options evas_engine=evas-rust evas_skip_source_error_control=true
+            tran tran stop=160n
+            save p
+        """))
+
+        out_dir = tmp_path / "out_kcl_inductor_idt_voltage"
+        log_path = tmp_path / "evas.log"
+        assert evas_simulate(str(scs_file), log_path=str(log_path), output_dir=str(out_dir))
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas-rust" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "rust_full_model_required_failures = 0" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["p"])
+
+        assert sample_at(21e-9) == pytest.approx(-5.0e-25, abs=1e-27)
+        assert sample_at(40e-9) == pytest.approx(-1.95e-23, rel=0.02)
+        assert sample_at(80e-9) == pytest.approx(-5.95e-23, rel=0.02)
+        assert sample_at(100e-9) == pytest.approx(-4.05e-23, rel=0.03)
+
     def test_zi_nd_sampled_data_filter_matches_spectre_samples(self, tmp_path):
         va_file = tmp_path / "continuous_zi_nd_filter.va"
         va_file.write_text(textwrap.dedent("""\

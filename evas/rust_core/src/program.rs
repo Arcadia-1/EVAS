@@ -204,6 +204,25 @@ impl RustSimZiNdState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RustSimBranchIdtState {
+    last_t: f64,
+    last_x: f64,
+    last_eval_t: f64,
+    has_last_eval: bool,
+}
+
+impl RustSimBranchIdtState {
+    fn new() -> Self {
+        Self {
+            last_t: 0.0,
+            last_x: 0.0,
+            last_eval_t: 0.0,
+            has_last_eval: false,
+        }
+    }
+}
+
 fn rust_sim_init_zi_nd_states(zi_nd_ops: &[EvasRustZiNdOp]) -> Result<Vec<RustSimZiNdState>, i32> {
     let mut states = Vec::with_capacity(zi_nd_ops.len());
     for op in zi_nd_ops {
@@ -213,6 +232,12 @@ fn rust_sim_init_zi_nd_states(zi_nd_ops: &[EvasRustZiNdOp]) -> Result<Vec<RustSi
         states.push(RustSimZiNdState::new(op.num_count, op.den_count));
     }
     Ok(states)
+}
+
+fn rust_sim_init_branch_idt_states(
+    branch_idt_ops: &[EvasRustBranchIdtOp],
+) -> Vec<RustSimBranchIdtState> {
+    vec![RustSimBranchIdtState::new(); branch_idt_ops.len()]
 }
 
 fn rust_sim_coeff_slice<'a>(
@@ -301,6 +326,62 @@ fn rust_sim_step_zi_nd_ops(
         state.last_eval_t = time;
         state.has_last_eval = true;
         node_values[op.target_node_id] = y;
+    }
+    Ok(())
+}
+
+fn rust_sim_step_branch_idt_ops(
+    branch_idt_ops: &[EvasRustBranchIdtOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    states: &mut [RustSimBranchIdtState],
+    time: f64,
+) -> Result<(), i32> {
+    if branch_idt_ops.len() != states.len() {
+        return Err(-862);
+    }
+    for (idx, op) in branch_idt_ops.iter().enumerate() {
+        if op.target_node_id >= node_values.len() || op.input_node_id >= node_values.len() {
+            return Err(-863);
+        }
+        if op.reference_node_id != usize::MAX && op.reference_node_id >= node_values.len() {
+            return Err(-864);
+        }
+        if op.state_id >= state_values.len() {
+            return Err(-865);
+        }
+        if !op.gain.is_finite() || !op.ic.is_finite() {
+            return Err(-866);
+        }
+
+        let x = node_values[op.input_node_id];
+        let state = &mut states[idx];
+        if !state.has_last_eval {
+            state.last_t = time;
+            state.last_x = x;
+            state.last_eval_t = time;
+            state.has_last_eval = true;
+            state_values[op.state_id] = op.ic;
+        } else if time != state.last_eval_t {
+            let dt = time - state.last_t;
+            if dt > 0.0 {
+                state_values[op.state_id] += 0.5 * (state.last_x + x) * dt;
+                state.last_t = time;
+                state.last_x = x;
+            } else if dt < 0.0 {
+                state_values[op.state_id] = op.ic;
+                state.last_t = time;
+                state.last_x = x;
+            }
+            state.last_eval_t = time;
+        }
+
+        let reference = if op.reference_node_id == usize::MAX {
+            0.0
+        } else {
+            node_values[op.reference_node_id]
+        };
+        node_values[op.target_node_id] = reference + op.gain * state_values[op.state_id];
     }
     Ok(())
 }
@@ -550,6 +631,7 @@ pub fn rust_sim_source_linear_record_trace(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
     zi_nd_ops: &[EvasRustZiNdOp],
+    branch_idt_ops: &[EvasRustBranchIdtOp],
     linear_ops: &[EvasRustLinearOp],
     linear_terms: &[EvasRustLinearTerm],
     linear_conditions: &[EvasRustLinearCondition],
@@ -597,8 +679,16 @@ pub fn rust_sim_source_linear_record_trace(
         f64::INFINITY
     };
     let mut zi_nd_states = rust_sim_init_zi_nd_states(zi_nd_ops)?;
+    let mut branch_idt_states = rust_sim_init_branch_idt_states(branch_idt_ops);
 
     rust_sim_write_sources(sources, source_data, node_values, 0.0)?;
+    rust_sim_step_branch_idt_ops(
+        branch_idt_ops,
+        node_values,
+        state_values,
+        &mut branch_idt_states,
+        0.0,
+    )?;
     rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, 0.0)?;
     evaluate_static_linear_ops(
         linear_ops,
@@ -667,6 +757,13 @@ pub fn rust_sim_source_linear_record_trace(
             time = tstop;
         }
         rust_sim_write_sources(sources, source_data, node_values, time)?;
+        rust_sim_step_branch_idt_ops(
+            branch_idt_ops,
+            node_values,
+            state_values,
+            &mut branch_idt_states,
+            time,
+        )?;
         rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, time)?;
         evaluate_static_linear_ops(
             linear_ops,

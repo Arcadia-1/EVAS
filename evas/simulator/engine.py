@@ -629,6 +629,7 @@ class Simulator:
         lower_t0 = _wall_time.perf_counter()
         report = build_source_record_rust_program(
             sources=self.sources,
+            current_sources=self.current_sources,
             recorded_signals=self.recorded_signals.keys(),
             models=self.models,
         )

@@ -12,6 +12,16 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
+from evas.compiler.ast_nodes import (
+    BinaryExpr as AstBinaryExpr,
+    Block as AstBlock,
+    BranchAccess as AstBranchAccess,
+    Contribution as AstContribution,
+    FunctionCall as AstFunctionCall,
+    Identifier as AstIdentifier,
+    NumberLiteral as AstNumberLiteral,
+    UnaryExpr as AstUnaryExpr,
+)
 from evas.simulator.evaluate_ir import (
     SOURCE_NODE,
     SOURCE_STATE,
@@ -211,6 +221,18 @@ class RustSimZiNdOp:
 
 
 @dataclass(frozen=True)
+class RustSimBranchIdtOp:
+    """A branch-current idt() voltage contribution executed by Rust."""
+
+    target_node_id: int
+    reference_node_id: Optional[int]
+    input_node_id: int
+    state_id: int
+    gain: float
+    ic: float
+
+
+@dataclass(frozen=True)
 class RustSimTransition:
     """A transition() state slot and its output target."""
 
@@ -286,6 +308,7 @@ class RustSimProgram:
     side_effects: Tuple[RustSimSideEffect, ...] = ()
     continuous_linear_ops: Tuple[RustSimLinearOp, ...] = ()
     zi_nd_ops: Tuple[RustSimZiNdOp, ...] = ()
+    branch_idt_ops: Tuple[RustSimBranchIdtOp, ...] = ()
     body_stmt_ops: Tuple[BodyStmtOp, ...] = ()
     body_expr_ops: Tuple[BodyExprOp, ...] = ()
     source_data: Tuple[float, ...] = ()
@@ -732,6 +755,10 @@ def _external_node(model: Any, local_name: str) -> str:
         if str(key).casefold() == local_folded:
             return str(value)
     return str(local_name)
+
+
+def _branch_current_node_name(node1: str, node2: str) -> str:
+    return f"@I:{node1}:{node2}"
 
 
 def _scalar(model: Any, value: Any) -> tuple[Optional[float], Optional[str]]:
@@ -1624,6 +1651,226 @@ def _convert_sampled_zi_nd_ops(
     return tuple(converted), tuple(reasons)
 
 
+def _ast_number(value: float) -> AstNumberLiteral:
+    return AstNumberLiteral(float(value), raw=str(float(value)))
+
+
+def _ast_number_value(expr: Any) -> Optional[float]:
+    if isinstance(expr, AstNumberLiteral):
+        try:
+            return float(expr.value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _is_ast_one(expr: Any) -> bool:
+    value = _ast_number_value(expr)
+    return value is not None and abs(value - 1.0) <= 1.0e-18
+
+
+def _scale_ast_scalar(left: Any, right: Any) -> Any:
+    if _is_ast_one(left):
+        return right
+    if _is_ast_one(right):
+        return left
+    left_value = _ast_number_value(left)
+    right_value = _ast_number_value(right)
+    if left_value is not None and right_value is not None:
+        return _ast_number(left_value * right_value)
+    return AstBinaryExpr("*", left, right)
+
+
+def _ast_static_scalar_expr(expr: Any) -> Any:
+    if isinstance(expr, AstNumberLiteral):
+        return float(expr.value)
+    if isinstance(expr, AstIdentifier):
+        return ("param", str(expr.name))
+    if isinstance(expr, AstUnaryExpr):
+        operand = _ast_static_scalar_expr(expr.operand)
+        if expr.op == "+":
+            return operand
+        if expr.op == "-":
+            if isinstance(operand, (int, float)):
+                return -float(operand)
+            return ("neg", operand)
+        return expr
+    if isinstance(expr, AstBinaryExpr):
+        left = _ast_static_scalar_expr(expr.left)
+        right = _ast_static_scalar_expr(expr.right)
+        op = {
+            "+": "add",
+            "-": "sub",
+            "*": "mul",
+            "/": "div",
+        }.get(str(expr.op))
+        if op is None:
+            return expr
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            if op == "add":
+                return float(left) + float(right)
+            if op == "sub":
+                return float(left) - float(right)
+            if op == "mul":
+                return float(left) * float(right)
+            if op == "div" and float(right) != 0.0:
+                return float(left) / float(right)
+        return (op, left, right)
+    return expr
+
+
+def _is_plain_branch_access(expr: Any, access_type: str) -> bool:
+    return (
+        isinstance(expr, AstBranchAccess)
+        and str(expr.access_type) == access_type
+        and expr.node1_index is None
+        and expr.node1_index2 is None
+        and expr.node2_index is None
+        and expr.node2_index2 is None
+    )
+
+
+def _match_scaled_idt_call(expr: Any) -> Optional[tuple[Any, AstFunctionCall]]:
+    if isinstance(expr, AstFunctionCall) and str(expr.name).lower() == "idt":
+        return _ast_number(1.0), expr
+    if isinstance(expr, AstUnaryExpr):
+        matched = _match_scaled_idt_call(expr.operand)
+        if matched is None:
+            return None
+        gain_expr, call = matched
+        if expr.op == "+":
+            return gain_expr, call
+        if expr.op == "-":
+            return _scale_ast_scalar(_ast_number(-1.0), gain_expr), call
+        return None
+    if isinstance(expr, AstBinaryExpr) and expr.op == "*":
+        left = _match_scaled_idt_call(expr.left)
+        if left is not None:
+            gain_expr, call = left
+            return _scale_ast_scalar(expr.right, gain_expr), call
+        right = _match_scaled_idt_call(expr.right)
+        if right is not None:
+            gain_expr, call = right
+            return _scale_ast_scalar(expr.left, gain_expr), call
+    return None
+
+
+def _iter_ast_block_contributions(stmt: Any):
+    if isinstance(stmt, AstBlock):
+        for child in stmt.statements:
+            yield from _iter_ast_block_contributions(child)
+        return
+    if isinstance(stmt, AstContribution):
+        yield stmt
+
+
+def _collect_branch_current_idt_raw_ops(model_cls: Any) -> tuple[tuple[Any, ...], ...]:
+    module = getattr(model_cls, "_module_ast", None)
+    analog_block = getattr(module, "analog_block", None)
+    body = getattr(analog_block, "body", None)
+    if body is None:
+        return ()
+    ops: list[tuple[Any, ...]] = []
+    for stmt in _iter_ast_block_contributions(body):
+        branch = stmt.branch
+        if not _is_plain_branch_access(branch, "V"):
+            continue
+        matched = _match_scaled_idt_call(stmt.expr)
+        if matched is None:
+            continue
+        gain_expr, idt_call = matched
+        args = list(getattr(idt_call, "args", ()) or ())
+        if not args:
+            continue
+        current = args[0]
+        if not _is_plain_branch_access(current, "I") or current.node2 is None:
+            continue
+        ic_expr = args[1] if len(args) > 1 else _ast_number(0.0)
+        ops.append(
+            (
+                branch.node1,
+                branch.node2,
+                current.node1,
+                current.node2,
+                gain_expr,
+                ic_expr,
+            )
+        )
+    return tuple(ops)
+
+
+def _model_has_branch_current_idt_ops(model_cls: Any) -> bool:
+    return bool(_collect_branch_current_idt_raw_ops(model_cls))
+
+
+def _convert_branch_current_idt_ops(
+    *,
+    model: Any,
+    model_index: int,
+    node_ids: dict[str, int],
+    nodes: list[RustSimNode],
+    state_ids: dict[tuple[int, str], int],
+    states: list[RustSimState],
+) -> tuple[Tuple[RustSimBranchIdtOp, ...], Tuple[str, ...]]:
+    model_cls = getattr(model, "__class__", type(model))
+    raw_ops = _collect_branch_current_idt_raw_ops(model_cls)
+    if not raw_ops:
+        return (), ()
+
+    converted: list[RustSimBranchIdtOp] = []
+    reasons: list[str] = []
+    prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
+    for op_index, (target, reference, current_p, current_n, gain_expr, ic_expr) in enumerate(raw_ops):
+        gain, gain_reason = _scalar(model, _ast_static_scalar_expr(gain_expr))
+        ic, ic_reason = _scalar(model, _ast_static_scalar_expr(ic_expr))
+        if gain_reason is not None or gain is None:
+            reasons.append(f"{prefix}:branch_idt:{op_index}:gain:{gain_reason}")
+            continue
+        if ic_reason is not None or ic is None:
+            reasons.append(f"{prefix}:branch_idt:{op_index}:ic:{ic_reason}")
+            continue
+        if not math.isfinite(float(gain)) or not math.isfinite(float(ic)):
+            reasons.append(f"{prefix}:branch_idt:{op_index}:nonfinite_gain_or_ic")
+            continue
+
+        target_id = _add_node(_external_node(model, str(target)), node_ids, nodes)
+        reference_id = (
+            None
+            if reference is None
+            else _add_node(_external_node(model, str(reference)), node_ids, nodes)
+        )
+        current_node = _branch_current_node_name(
+            _external_node(model, str(current_p)),
+            _external_node(model, str(current_n)),
+        )
+        input_id = _add_node(current_node, node_ids, nodes)
+        state_name = f"$branch_idt_{op_index}"
+        state_key = (model_index, state_name)
+        if state_key not in state_ids:
+            state_id = len(state_ids)
+            state_ids[state_key] = state_id
+            states.append(
+                RustSimState(
+                    name=f"{model_index}:{state_name}",
+                    state_id=state_id,
+                    initial_value=float(ic),
+                    is_integer=False,
+                )
+            )
+        converted.append(
+            RustSimBranchIdtOp(
+                target_node_id=target_id,
+                reference_node_id=reference_id,
+                input_node_id=input_id,
+                state_id=state_ids[state_key],
+                gain=float(gain),
+                ic=float(ic),
+            )
+        )
+
+    return tuple(converted), tuple(reasons)
+
+
 def _convert_event_transition_ops(
     *,
     model: Any,
@@ -2058,15 +2305,17 @@ def _source_from_metadata(
     node_id: int,
     meta: Mapping[str, Any],
     source_data: list[float],
+    scale: float = 1.0,
 ) -> tuple[Optional[RustSimSource], Optional[str]]:
     kind = str(meta.get("kind", ""))
+    scale_f = float(scale)
     if kind == SOURCE_DC:
         return (
             RustSimSource(
                 node=node,
                 node_id=node_id,
                 kind=SOURCE_DC,
-                params=(float(meta.get("voltage", 0.0) or 0.0),),
+                params=(scale_f * float(meta.get("voltage", 0.0) or 0.0),),
             ),
             None,
         )
@@ -2083,8 +2332,8 @@ def _source_from_metadata(
                 kind=SOURCE_PULSE,
                 flags=flags,
                 params=(
-                    float(meta.get("v_lo", 0.0) or 0.0),
-                    float(meta.get("v_hi", 0.0) or 0.0),
+                    scale_f * float(meta.get("v_lo", 0.0) or 0.0),
+                    scale_f * float(meta.get("v_hi", 0.0) or 0.0),
                     float(meta.get("period", 0.0) or 0.0),
                     float(meta.get("duty", 0.5) or 0.5),
                     float(meta.get("rise", 0.0) or 0.0),
@@ -2102,8 +2351,8 @@ def _source_from_metadata(
                 node_id=node_id,
                 kind=SOURCE_SINE,
                 params=(
-                    float(meta.get("offset", 0.0) or 0.0),
-                    float(meta.get("amplitude", 0.0) or 0.0),
+                    scale_f * float(meta.get("offset", 0.0) or 0.0),
+                    scale_f * float(meta.get("amplitude", 0.0) or 0.0),
                     float(meta.get("freq", 0.0) or 0.0),
                     float(meta.get("phase", 0.0) or 0.0),
                 ),
@@ -2112,7 +2361,7 @@ def _source_from_metadata(
         )
     if kind == SOURCE_PWL:
         times = tuple(float(value) for value in meta.get("times", ()) or ())
-        values = tuple(float(value) for value in meta.get("values", ()) or ())
+        values = tuple(scale_f * float(value) for value in meta.get("values", ()) or ())
         if not times or len(times) != len(values):
             return None, f"source:{node}:invalid_pwl_payload"
         data_start = len(source_data)
@@ -2135,6 +2384,7 @@ def _source_from_metadata(
 def build_source_record_rust_program(
     *,
     sources: Iterable[Any],
+    current_sources: Iterable[Any] = (),
     recorded_signals: Iterable[str],
     models: Iterable[Any],
 ) -> RustSimCompileReport:
@@ -2146,6 +2396,7 @@ def build_source_record_rust_program(
     """
 
     source_list = tuple(sources)
+    current_source_list = tuple(current_sources)
     record_names = tuple(str(name) for name in recorded_signals)
     model_list = tuple(models)
     global_contributed_nodes = _collect_global_contributed_nodes(model_list)
@@ -2162,6 +2413,7 @@ def build_source_record_rust_program(
     rust_sources: list[RustSimSource] = []
     continuous_linear_ops: list[RustSimLinearOp] = []
     zi_nd_ops: list[RustSimZiNdOp] = []
+    branch_idt_ops: list[RustSimBranchIdtOp] = []
     rust_events: list[RustSimEvent] = []
     rust_transitions: list[RustSimTransition] = []
     rust_slews: list[RustSimSlew] = []
@@ -2190,26 +2442,61 @@ def build_source_record_rust_program(
         elif rust_source is not None:
             rust_sources.append(rust_source)
 
+    for current_index, item in enumerate(current_source_list):
+        try:
+            pos, neg, source = item
+        except (TypeError, ValueError):
+            reasons.append(f"current_source:{current_index}:malformed")
+            continue
+        pos_name = str(pos)
+        neg_name = str(neg)
+        meta = _waveform_metadata(getattr(source, "waveform", None))
+        if meta is None:
+            reasons.append(f"current_source:{pos_name}:{neg_name}:missing_waveform_metadata")
+            continue
+        for node, scale in (
+            (_branch_current_node_name(pos_name, neg_name), -1.0),
+            (_branch_current_node_name(neg_name, pos_name), 1.0),
+        ):
+            node_id = _add_node(node, node_ids, nodes)
+            rust_source, reason = _source_from_metadata(
+                node=node,
+                node_id=node_id,
+                meta=meta,
+                source_data=source_data,
+                scale=scale,
+            )
+            if reason is not None:
+                reasons.append(f"current_{reason}")
+            elif rust_source is not None:
+                rust_sources.append(rust_source)
+
     for model_index, model in enumerate(model_list):
         model_cls = getattr(model, "__class__", type(model))
         sampled_zi_nd_raw_ops = tuple(
             getattr(model_cls, "_evaluate_ir_sampled_zi_nd_ops", ()) or ()
         )
+        has_branch_current_idt_ops = _model_has_branch_current_idt_ops(model_cls)
         has_continuous_body_candidate = (
-            _model_has_rustsim_continuous_body_candidate(model_cls)
+            not has_branch_current_idt_ops
             and not sampled_zi_nd_raw_ops
+            and _model_has_rustsim_continuous_body_candidate(model_cls)
         )
         has_event_transition_ir = bool(
             tuple(getattr(model_cls, "_event_static_linear_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_event_timer_static_linear_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_transition_target_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_whole_segment_candidates", ()) or ())
-            or _model_has_rustsim_event_transition_candidate(model_cls)
+            or (
+                not has_branch_current_idt_ops
+                and _model_has_rustsim_event_transition_candidate(model_cls)
+            )
             or has_continuous_body_candidate
         )
         has_rustsim_program_ir = bool(
             has_event_transition_ir
             or sampled_zi_nd_raw_ops
+            or has_branch_current_idt_ops
         )
         if has_event_transition_ir:
             event_reasons = _convert_event_transition_ops(
@@ -2252,6 +2539,17 @@ def build_source_record_rust_program(
         if model_zi_reasons:
             reasons.extend(model_zi_reasons)
         zi_nd_ops.extend(model_zi_nd_ops)
+        model_branch_idt_ops, model_branch_idt_reasons = _convert_branch_current_idt_ops(
+            model=model,
+            model_index=model_index,
+            node_ids=node_ids,
+            nodes=nodes,
+            state_ids=state_ids,
+            states=states,
+        )
+        if model_branch_idt_reasons:
+            reasons.extend(model_branch_idt_reasons)
+        branch_idt_ops.extend(model_branch_idt_ops)
         model_ops, model_reasons = _convert_continuous_linear_ops(
             model=model,
             model_index=model_index,
@@ -2295,6 +2593,7 @@ def build_source_record_rust_program(
             side_effects=tuple(side_effects),
             continuous_linear_ops=tuple(continuous_linear_ops),
             zi_nd_ops=tuple(zi_nd_ops),
+            branch_idt_ops=tuple(branch_idt_ops),
             body_stmt_ops=tuple(body_stmt_ops),
             body_expr_ops=tuple(body_expr_ops),
             source_data=tuple(source_data),
