@@ -2915,7 +2915,7 @@ class TestCadenceLrmGapFillRunnerAllowlist:
             Vin (inp 0) vsource type=pwl wave=[0 0.0 20n 0.0 21n 1.0 80n 1.0 81n 0.0 160n 0.0]
             XDUT (inp out) continuous_zi_nd_filter
             simulatorOptions options evas_engine=evas-rust evas_skip_source_error_control=true
-            tran tran stop=160n maxstep=1n
+            tran tran stop=160n
             save inp out
         """))
 

@@ -305,6 +305,35 @@ fn rust_sim_step_zi_nd_ops(
     Ok(())
 }
 
+fn rust_sim_next_zi_nd_breakpoint_after(
+    zi_nd_ops: &[EvasRustZiNdOp],
+    states: &[RustSimZiNdState],
+    time: f64,
+    eps: f64,
+) -> Result<Option<f64>, i32> {
+    if zi_nd_ops.len() != states.len() {
+        return Err(-880);
+    }
+
+    let mut best: Option<f64> = None;
+    for (op, state) in zi_nd_ops.iter().zip(states.iter()) {
+        if !op.interval.is_finite() || op.interval <= 0.0 || !state.last_sample_t.is_finite() {
+            continue;
+        }
+        let mut candidate = state.last_sample_t + op.interval;
+        while candidate <= time + eps {
+            candidate += op.interval;
+        }
+        if candidate.is_finite()
+            && candidate > time
+            && (best.is_none() || candidate < best.unwrap())
+        {
+            best = Some(candidate);
+        }
+    }
+    Ok(best)
+}
+
 pub(crate) fn rust_sim_next_source_breakpoint_after(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
@@ -619,6 +648,16 @@ pub fn rust_sim_source_linear_record_trace(
         if use_record_step && next_record_time > time && next_record_time < time + dt {
             dt = next_record_time - time;
             force_record = true;
+        }
+        if let Some(bp) = rust_sim_next_zi_nd_breakpoint_after(zi_nd_ops, &zi_nd_states, time, eps)?
+        {
+            if bp < time + dt {
+                dt = bp - time;
+                force_record = true;
+                if dt < eps {
+                    dt = eps;
+                }
+            }
         }
         if dt <= 0.0 {
             return Err(-887);
