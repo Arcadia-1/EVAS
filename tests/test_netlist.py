@@ -587,17 +587,62 @@ class TestAhdlIncludePathFallback:
         assert float(low_row["out"]) == pytest.approx(0.1, abs=1e-6)
         assert float(high_row["out"]) == pytest.approx(0.8, abs=1e-6)
 
-    def test_mfactor_reads_spectre_instance_m_parameter(self, tmp_path):
+    def test_nested_analog_function_inputs_use_argument_values(self, tmp_path):
+        va_file = tmp_path / "nested_fn.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module nested_fn(input electrical in, output electrical out);
+                analog function real f2;
+                    input x;
+                    real x;
+                    begin
+                        f2 = x * x;
+                    end
+                endfunction
+                analog function real f1;
+                    input x;
+                    real x;
+                    begin
+                        f1 = f2(x) + 1.0;
+                    end
+                endfunction
+                analog begin
+                    V(out) <+ f1(V(in));
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_nested_fn.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "nested_fn.va"
+
+            Vin (in 0) vsource dc=-0.75 type=dc
+            XDUT (in out) nested_fn
+
+            tran tran stop=1n maxstep=100p
+            save in out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(1.5625, abs=1e-9)
+
+    @pytest.mark.parametrize("mfactor_expr", ["$mfactor()", "$mfactor"])
+    def test_mfactor_reads_spectre_instance_m_parameter(self, tmp_path, mfactor_expr):
         va_file = tmp_path / "mfactor_gain.va"
         va_file.write_text(textwrap.dedent("""\
             `include "disciplines.vams"
 
             module mfactor_gain(input electrical in, output electrical out);
                 analog begin
-                    V(out) <+ $mfactor() * V(in);
+                    V(out) <+ M_FACTOR_EXPR * V(in);
                 end
             endmodule
-        """))
+        """).replace("M_FACTOR_EXPR", mfactor_expr))
 
         scs_file = tmp_path / "tb_mfactor_gain.scs"
         scs_file.write_text(textwrap.dedent("""\

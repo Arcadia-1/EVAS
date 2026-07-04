@@ -701,7 +701,9 @@ class TestParserSubprograms:
 
         assert len(m.functions) == 1
         fn = m.functions[0]
+        assert isinstance(fn, FunctionDecl)
         assert fn.name == "clamp"
+        assert fn.return_type == ParamType.REAL
         assert [arg.name for arg in fn.args] == ["x"]
         assert fn.variables == []
 

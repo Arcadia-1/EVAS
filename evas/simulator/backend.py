@@ -4973,23 +4973,30 @@ class CompiledModel:
         """
         Minimal behavioral laplace_zd approximation for event-level tests.
 
-        Supports the first-order denominator form zeros={z0}, den={d0,d1},
-        interpreted as z0 / (d0 + d1*s). Unsupported coefficient shapes
-        conservatively return x, matching the legacy compile-supported
-        behavior.
+        Supports the legacy compile-supported first-order denominator form
+        zeros={z0}, den={d0,d1}, and the Spectre zero-at-origin form
+        zeros={0,0}, den={d0,d1}. Cadence treats a zero at the origin as ``s``,
+        so the latter is evaluated as s / (d0 + d1*s).
         """
         try:
             zero_values = [float(v) for v in zeros]
             den_values = [float(v) for v in den]
         except Exception:
             return float(x)
-        if len(zero_values) != 1 or len(den_values) != 2:
+        if len(den_values) != 2:
             return float(x)
         d0 = den_values[0]
         d1 = den_values[1]
         if d0 == 0.0 or d1 == 0.0:
             return float(x)
 
+        if len(zero_values) == 2 and zero_values[0] == 0.0 and zero_values[1] == 0.0:
+            tau = abs(d1 / d0)
+            lowpass = self._laplace_first_order_update(f"{key}:origin_zero", time, float(x) / d0, tau)
+            return (float(x) - d0 * lowpass) / d1
+
+        if len(zero_values) != 1:
+            return float(x)
         target = (zero_values[0] / d0) * float(x)
         tau = abs(d1 / d0)
         return self._laplace_first_order_update(key, time, target, tau)
@@ -4998,20 +5005,33 @@ class CompiledModel:
         """
         Minimal behavioral laplace_zp approximation for event-level tests.
 
-        Supports the task-oriented first real pole form zeros={z0}, poles={p0,...},
-        using abs(p0) as the pole frequency and z0 as the DC gain. Unsupported
-        shapes conservatively return x, matching the legacy compile-supported
-        behavior.
+        Supports the legacy compile-supported first real pole form zeros={z0}
+        and the Spectre zero-at-origin form zeros={0,0}. In Cadence zero-pole
+        notation, real poles are represented as 1 - s / p, so a pole at -1/tau
+        yields a first-order denominator with time constant tau.
         """
         try:
             zero_values = [float(v) for v in zeros]
             pole_values = [float(v) for v in poles]
         except Exception:
             return float(x)
-        if len(zero_values) != 1 or not pole_values or pole_values[0] == 0.0:
+        if not pole_values or pole_values[0] == 0.0:
+            return float(x)
+
+        tau = 1.0 / abs(pole_values[0])
+        if (
+            len(zero_values) == 2
+            and zero_values[0] == 0.0
+            and zero_values[1] == 0.0
+            and len(pole_values) >= 2
+            and pole_values[1] == 0.0
+        ):
+            lowpass = self._laplace_first_order_update(f"{key}:origin_zero", time, float(x), tau)
+            return (float(x) - lowpass) / tau
+
+        if len(zero_values) != 1:
             return float(x)
         target = zero_values[0] * float(x)
-        tau = 1.0 / abs(pole_values[0])
         return self._laplace_first_order_update(key, time, target, tau)
 
     def _zi_nd(self, key: str, time: float, x: float, num: Any, den: Any, interval: Any) -> float:
@@ -5070,6 +5090,125 @@ class CompiledModel:
         st["last_sample_t"] = t
         st["last_eval_t"] = t
         return float(y)
+
+    def _zi_np(self, key: str, time: float, x: float, num: Any, poles: Any, interval: Any) -> float:
+        """
+        Minimal sampled-data zi_np approximation for a first real pole.
+
+        Supports num={b0}, poles={p0,0}. The resulting first-order recurrence
+        is y[n] = b0*x[n] + p0*y[n-1], initialized to the input's initial value
+        to match Spectre's DC-consistent sampled-filter startup for this form.
+        """
+        try:
+            num_values = [float(v) for v in num]
+            pole_values = [float(v) for v in poles]
+            interval_f = float(interval)
+        except Exception:
+            return float(x)
+        if len(num_values) != 1 or len(pole_values) < 2 or pole_values[1] != 0.0:
+            return float(x)
+        if interval_f <= 0.0:
+            interval_f = 0.0
+        if self._zi_states is None:
+            self._zi_states = {}
+
+        t = float(time)
+        x_f = float(x)
+        if key not in self._zi_states:
+            self._zi_states[key] = {
+                "last_sample_t": t,
+                "last_eval_t": t,
+                "y": x_f,
+            }
+            return x_f
+        st = self._zi_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        if t < float(st["last_sample_t"]):
+            st["last_sample_t"] = t
+            st["y"] = x_f
+        elif interval_f > 0.0 and (t - float(st["last_sample_t"])) < (interval_f * 0.999999):
+            st["last_eval_t"] = t
+            return float(st["y"])
+        else:
+            st["y"] = num_values[0] * x_f + pole_values[0] * float(st["y"])
+            st["last_sample_t"] = t
+        st["last_eval_t"] = t
+        return float(st["y"])
+
+    def _zi_first_order_zero_update(
+        self,
+        key: str,
+        time: float,
+        x: float,
+        zero: float,
+        pole: float,
+        interval: float,
+    ) -> float:
+        if interval <= 0.0:
+            interval = 0.0
+        if self._zi_states is None:
+            self._zi_states = {}
+
+        t = float(time)
+        x_f = float(x)
+        if key not in self._zi_states:
+            self._zi_states[key] = {
+                "last_sample_t": t,
+                "last_eval_t": t,
+                "last_x": x_f,
+                "y": 0.0,
+            }
+            return 0.0
+        st = self._zi_states[key]
+        if t == st["last_eval_t"]:
+            return float(st["y"])
+        if t < float(st["last_sample_t"]):
+            st["last_sample_t"] = t
+            st["last_x"] = x_f
+            st["y"] = 0.0
+        elif interval > 0.0 and (t - float(st["last_sample_t"])) < (interval * 0.999999):
+            st["last_eval_t"] = t
+            return float(st["y"])
+        else:
+            y = x_f - zero * float(st["last_x"]) + pole * float(st["y"])
+            st["last_x"] = x_f
+            st["y"] = y
+            st["last_sample_t"] = t
+        st["last_eval_t"] = t
+        return float(st["y"])
+
+    def _zi_zd(self, key: str, time: float, x: float, zeros: Any, den: Any, interval: Any) -> float:
+        """
+        Minimal sampled-data zi_zd approximation for a real zero and first-order
+        denominator, e.g. zeros={1,0}, den={1,-0.75}.
+        """
+        try:
+            zero_values = [float(v) for v in zeros]
+            den_values = [float(v) for v in den]
+            interval_f = float(interval)
+        except Exception:
+            return float(x)
+        if len(zero_values) != 2 or zero_values[1] != 0.0 or len(den_values) != 2 or den_values[0] == 0.0:
+            return float(x)
+        zero = zero_values[0]
+        pole = -den_values[1] / den_values[0]
+        return self._zi_first_order_zero_update(key, time, x, zero, pole, interval_f)
+
+    def _zi_zp(self, key: str, time: float, x: float, zeros: Any, poles: Any, interval: Any) -> float:
+        """
+        Minimal sampled-data zi_zp approximation for one real zero and one real
+        pole, e.g. zeros={1,0}, poles={0.75,0}.
+        """
+        try:
+            zero_values = [float(v) for v in zeros]
+            pole_values = [float(v) for v in poles]
+            interval_f = float(interval)
+        except Exception:
+            return float(x)
+        if len(zero_values) != 2 or zero_values[1] != 0.0 or len(pole_values) < 2 or pole_values[1] != 0.0:
+            return float(x)
+        return self._zi_first_order_zero_update(key, time, x, zero_values[0], pole_values[0], interval_f)
 
     @staticmethod
     def _limexp(x: Any) -> float:
@@ -6395,10 +6534,13 @@ class _ModuleCompiler:
             local_types: Dict[str, ParamType] = {
                 arg.name: arg.var_type for arg in decl.args
             }
+            arg_name_set = set(local_names)
             ret_name = self._local_python_name("ret", decl.name)
             local_names[decl.name] = ret_name
             local_types[decl.name] = decl.return_type
             for var in decl.variables:
+                if var.name in arg_name_set:
+                    continue
                 local_names[var.name] = self._local_python_name("local", var.name)
                 local_types[var.name] = var.var_type
 
@@ -6413,6 +6555,8 @@ class _ModuleCompiler:
                 f"            {ret_name} = {self._default_value_for_type(decl.return_type)}"
             )
             for var in decl.variables:
+                if var.name in arg_name_set:
+                    continue
                 py_name = local_names[var.name]
                 if var.init_values:
                     init = self._compile_expr(var.init_values[0])
@@ -14764,6 +14908,8 @@ class _ModuleCompiler:
                 return "(self._temperature + 273.15)"
             if name == "$vt":
                 return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
+            if name == "$mfactor":
+                return "self._mfactor()"
             return f"_probe_state.get({name!r}, self.state.get({name!r}, 0.0))"
         if isinstance(expr, ArrayAccess):
             idx = self._compile_transition_probe_expr(expr.index)
@@ -15105,6 +15251,8 @@ class _ModuleCompiler:
                 return "(self._temperature + 273.15)"
             if name == '$vt':
                 return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
+            if name == '$mfactor':
+                return "self._mfactor()"
             return f"self.state[{name!r}]"
 
         if isinstance(expr, ArrayAccess):
@@ -15545,7 +15693,7 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._laplace_zp(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {poles})"
             return f"self._laplace_zp({base_key!r}, time, {x}, {zeros}, {poles})"
-        if name in {'zi_nd', 'zi_np', 'zi_zd', 'zi_zp'}:
+        if name == 'zi_nd':
             base_key = self._alloc_stateful_func_key("zi", expr)
             x = args[0] if len(args) > 0 else "0.0"
             num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
@@ -15554,6 +15702,33 @@ class _ModuleCompiler:
             if self._in_loop_var:
                 return f"self._zi_nd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {den}, {interval})"
             return f"self._zi_nd({base_key!r}, time, {x}, {num}, {den}, {interval})"
+        if name == 'zi_np':
+            base_key = self._alloc_stateful_func_key("zi", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            num = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            poles = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            interval = args[3] if len(args) > 3 else "0.0"
+            if self._in_loop_var:
+                return f"self._zi_np(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {num}, {poles}, {interval})"
+            return f"self._zi_np({base_key!r}, time, {x}, {num}, {poles}, {interval})"
+        if name == 'zi_zd':
+            base_key = self._alloc_stateful_func_key("zi", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            zeros = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            den = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            interval = args[3] if len(args) > 3 else "0.0"
+            if self._in_loop_var:
+                return f"self._zi_zd(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {den}, {interval})"
+            return f"self._zi_zd({base_key!r}, time, {x}, {zeros}, {den}, {interval})"
+        if name == 'zi_zp':
+            base_key = self._alloc_stateful_func_key("zi", expr)
+            x = args[0] if len(args) > 0 else "0.0"
+            zeros = self._compile_coeff_vector(expr.args[1]) if len(expr.args) > 1 else "[1.0]"
+            poles = self._compile_coeff_vector(expr.args[2]) if len(expr.args) > 2 else "[1.0]"
+            interval = args[3] if len(args) > 3 else "0.0"
+            if self._in_loop_var:
+                return f"self._zi_zp(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {x}, {zeros}, {poles}, {interval})"
+            return f"self._zi_zp({base_key!r}, time, {x}, {zeros}, {poles}, {interval})"
         if name == '$rdist_normal':
             # $rdist_normal(seed, mean, std_dev)
             # Also accept $rdist_normal(mean, std_dev) as a seedless shorthand.
@@ -15787,6 +15962,8 @@ class _ModuleCompiler:
                 return 300.15
             if expr.name == '$vt':
                 return 1.380649e-23 * 300.15 / 1.602176634e-19
+            if expr.name == '$mfactor':
+                return 1.0
             if expr.name in env:
                 return env[expr.name]
             return 0
