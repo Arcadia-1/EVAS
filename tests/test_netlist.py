@@ -576,6 +576,108 @@ class TestAhdlIncludePathFallback:
         assert "ERROR: Spectre strict lint rejected this input." in log
         assert "evas completes with 1 errors" in log
 
+    def test_evas_simulate_spectre_strict_env_rejects_seeded_rdist_gap(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("EVAS_SPECTRE_STRICT", "1")
+        va_file = tmp_path / "strict_random.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module strict_random(out);
+                output out;
+                electrical out;
+
+                analog begin
+                    V(out) <+ $rdist_exponential(17, 2.0)
+                            + $rdist_poisson(17, 4.0)
+                            + $rdist_normal(17, 0.0, 1.0)
+                            + $rdist_erlang(17, 3.0, 6.0);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_strict_random.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "strict_random.va"
+
+            XDUT (out) strict_random
+
+            tran tran stop=1n maxstep=100p
+            save out
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert not ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "Spectre strict lint diagnostics:" in log
+        assert "$rdist_exponential()" in log
+        assert "$rdist_poisson()" in log
+        assert "$rdist_normal()" in log
+        assert "$rdist_erlang()" in log
+        assert "seeded Spectre PRNG sequence parity is not certified" in log
+        assert "ERROR: Spectre strict lint rejected this input." in log
+
+    def test_evas_simulate_spectre_strict_rejects_integer_select_concat_gap(
+        self,
+        tmp_path,
+    ):
+        va_file = tmp_path / "strict_vectors.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module strict_vectors(out);
+                output out;
+                electrical out;
+                integer code_q;
+                integer count_q;
+                integer window_q;
+
+                analog begin
+                    window_q = code_q[3:1];
+                    code_q = {2'b10, count_q[1:0]};
+                    V(out) <+ code_q + window_q;
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_strict_vectors.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "strict_vectors.va"
+
+            XDUT (out) strict_vectors
+
+            simulatorOptions options spectre_strict=true
+            tran tran stop=1n maxstep=100p
+            save out
+        """))
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert not ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "Spectre strict lint diagnostics:" in log
+        assert "integer part-select" in log
+        assert "integer select concatenation" in log
+        assert "ERROR: Spectre strict lint rejected this input." in log
+
     def test_user_defined_function_call_allowed_by_netlist_runner(self, tmp_path):
         va_file = tmp_path / "fn_clamp.va"
         va_file.write_text(textwrap.dedent("""\

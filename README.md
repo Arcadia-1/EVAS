@@ -65,7 +65,9 @@ diagnostics into the simulation log before model compilation. Netlists may also
 request this with `simulatorOptions options ahdllint=true`.
 `--spectre-strict` runs the same lint preflight in blocking strict standalone
 Spectre mode, rejecting EVAS extension syntax before compilation. Netlists may
-also request this with `simulatorOptions options spectre_strict=true`.
+also request this with `simulatorOptions options spectre_strict=true`; CI and
+benchmark wrappers can enable the same behavior globally with
+`EVAS_SPECTRE_STRICT=1`.
 
 Before a full simulation, you can run a Spectre/AHDL-style static lint pass:
 

@@ -1111,6 +1111,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         spectre_strict
         or _simopt_bool(simopt, 'spectre_strict', False)
         or _simopt_bool(simopt, 'evas_spectre_strict', False)
+        or os.environ.get("EVAS_SPECTRE_STRICT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "enabled",
+        }
     )
     if ahdllint_enabled or spectre_strict_enabled:
         lint_count, lint_has_errors = _log_ahdllint_diagnostics(
