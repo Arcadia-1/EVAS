@@ -379,8 +379,9 @@ parameter constant expressions.
 syntax that standalone Spectre rejects in the current target, including AMS
 bridge constructs (<code class="docutils literal notranslate"><span class="pre">logic</span></code>, <code class="docutils literal notranslate"><span class="pre">wreal</span></code>, continuous <code class="docutils literal notranslate"><span class="pre">assign</span></code>, <code class="docutils literal notranslate"><span class="pre">always</span></code>),
 task/do-while extensions, runtime electrical-node indexing, selected
-version-gated random distributions, <code class="docutils literal notranslate"><span class="pre">generate</span></code>, <code class="docutils literal notranslate"><span class="pre">specify</span></code>, <code class="docutils literal notranslate"><span class="pre">connectmodule</span></code>, and
-<code class="docutils literal notranslate"><span class="pre">connectrules</span></code>.
+version-gated random distributions, seeded <code class="docutils literal notranslate"><span class="pre">$rdist_*</span></code> distributions whose
+Spectre PRNG sequence parity is not certified, integer bit/part-select
+concatenation gaps, <code class="docutils literal notranslate"><span class="pre">generate</span></code>, <code class="docutils literal notranslate"><span class="pre">specify</span></code>, <code class="docutils literal notranslate"><span class="pre">connectmodule</span></code>, and <code class="docutils literal notranslate"><span class="pre">connectrules</span></code>.
 The repository keeps small public oracle fixtures in
 <code class="docutils literal notranslate"><span class="pre">tests/fixtures/lint_oracle_cases</span></code> for lint regression tests. These fixtures
 store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre
