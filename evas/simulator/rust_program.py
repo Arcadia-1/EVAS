@@ -14,12 +14,26 @@ from typing import Any, Iterable, Mapping, Optional, Tuple
 
 from evas.compiler.ast_nodes import (
     BinaryExpr as AstBinaryExpr,
+)
+from evas.compiler.ast_nodes import (
     Block as AstBlock,
+)
+from evas.compiler.ast_nodes import (
     BranchAccess as AstBranchAccess,
+)
+from evas.compiler.ast_nodes import (
     Contribution as AstContribution,
+)
+from evas.compiler.ast_nodes import (
     FunctionCall as AstFunctionCall,
+)
+from evas.compiler.ast_nodes import (
     Identifier as AstIdentifier,
+)
+from evas.compiler.ast_nodes import (
     NumberLiteral as AstNumberLiteral,
+)
+from evas.compiler.ast_nodes import (
     UnaryExpr as AstUnaryExpr,
 )
 from evas.simulator.evaluate_ir import (
