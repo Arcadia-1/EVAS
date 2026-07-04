@@ -29,6 +29,16 @@ unregistered function/operator calls report `support_tier="outside-current-scope
 so benchmark tooling can separate truly unclassified constructs from the four
 documented support tiers.
 
+Strict standalone Spectre compatibility is available through
+`evas lint --spectre-strict`, `evas simulate --spectre-strict`, or
+`simulatorOptions options spectre_strict=true`. This mode is intentionally
+narrower than the default EVAS extension mode: it reports
+`EVAS-COMP-ESPECTRESTRICT` for EVAS-supported syntax that the current standalone
+Spectre target rejects, such as AMS bridge constructs (`logic`, `wreal`,
+continuous `assign`, `always`), task/do-while extensions, runtime
+electrical-node indexing, selected version-gated random distributions,
+`generate`, `specify`, `connectmodule`, and `connectrules`.
+
 ## Continuous-Time Operators
 
 EVAS supports `ddt()`, `idt()`, `idtmod()`, `laplace_nd()`, `laplace_np()`,
@@ -81,6 +91,10 @@ Runtime voltage-domain electrical indexing such as `V(bus[i])` and
 `V(bus[i]) <+ ...` is supported by dynamic node resolution and cache-backed
 node lookup. Runtime current-domain indexing belongs to the unsupported
 `conservative-current-kcl` tier.
+
+Strict Spectre mode accepts constant or statically elaborated electrical indexes
+but rejects runtime electrical-node indexing so benchmark rows can be separated
+from EVAS extension-mode capabilities.
 
 ## AMS-Digital Boundary
 

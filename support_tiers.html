@@ -304,6 +304,15 @@ reports <code class="docutils literal notranslate"><span class="pre">support_tie
 unregistered function/operator calls report <code class="docutils literal notranslate"><span class="pre">support_tier=&quot;outside-current-scope&quot;</span></code>
 so benchmark tooling can separate truly unclassified constructs from the four
 documented support tiers.</p>
+<p>Strict standalone Spectre compatibility is available through
+<code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span> <span class="pre">--spectre-strict</span></code>, <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span> <span class="pre">--spectre-strict</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">spectre_strict=true</span></code>. This mode is intentionally
+narrower than the default EVAS extension mode: it reports
+<code class="docutils literal notranslate"><span class="pre">EVAS-COMP-ESPECTRESTRICT</span></code> for EVAS-supported syntax that the current standalone
+Spectre target rejects, such as AMS bridge constructs (<code class="docutils literal notranslate"><span class="pre">logic</span></code>, <code class="docutils literal notranslate"><span class="pre">wreal</span></code>,
+continuous <code class="docutils literal notranslate"><span class="pre">assign</span></code>, <code class="docutils literal notranslate"><span class="pre">always</span></code>), task/do-while extensions, runtime
+electrical-node indexing, selected version-gated random distributions,
+<code class="docutils literal notranslate"><span class="pre">generate</span></code>, <code class="docutils literal notranslate"><span class="pre">specify</span></code>, <code class="docutils literal notranslate"><span class="pre">connectmodule</span></code>, and <code class="docutils literal notranslate"><span class="pre">connectrules</span></code>.</p>
 </section>
 <section id="continuous-time-operators">
 <h2>Continuous-Time Operators<a class="headerlink" href="#continuous-time-operators" title="Link to this heading">¶</a></h2>
@@ -352,6 +361,9 @@ not the same as a full AMS generate/connect-rule implementation.</p>
 <code class="docutils literal notranslate"><span class="pre">V(bus[i])</span> <span class="pre">&lt;+</span> <span class="pre">...</span></code> is supported by dynamic node resolution and cache-backed
 node lookup. Runtime current-domain indexing belongs to the unsupported
 <code class="docutils literal notranslate"><span class="pre">conservative-current-kcl</span></code> tier.</p>
+<p>Strict Spectre mode accepts constant or statically elaborated electrical indexes
+but rejects runtime electrical-node indexing so benchmark rows can be separated
+from EVAS extension-mode capabilities.</p>
 </section>
 <section id="ams-digital-boundary">
 <h2>AMS-Digital Boundary<a class="headerlink" href="#ams-digital-boundary" title="Link to this heading">¶</a></h2>

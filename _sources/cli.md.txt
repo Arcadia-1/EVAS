@@ -47,6 +47,7 @@ Simulate an arbitrary Spectre netlist file directly.
 evas simulate path/to/tb_mydesign.scs -o output/mydesign -log sim.log
 evas simulate path/to/tb_mydesign.scs --engine python
 evas simulate path/to/tb_mydesign.scs --ahdllint
+evas simulate path/to/tb_mydesign.scs --spectre-strict
 ```
 
 | Option | Default | Description |
@@ -56,12 +57,16 @@ evas simulate path/to/tb_mydesign.scs --ahdllint
 | `--engine` | `evas-rust` | Engine override: `python`, `evas-rust`, `evas2`, or `rust2` |
 | `--ahdllint` | off | Run EVAS AHDL-style lint as a non-blocking simulation preflight |
 | `--ahdllint-min-transition` | `1e-12` | Minimum transition rise/fall time used by `--ahdllint` |
+| `--spectre-strict` | off | Reject EVAS extension syntax outside strict standalone Spectre Verilog-A before compilation |
 
 Exit code is `0` on success, `1` on simulation error.
 The lint preflight reports diagnostics in the simulator log and increments the
 warning count, but it does not by itself change simulation pass/fail status.
 Netlists may also enable it with `simulatorOptions options ahdllint=true` or
 `evas_ahdllint=true`.
+Strict Spectre mode is blocking: `--spectre-strict` or
+`simulatorOptions options spectre_strict=true` runs the lint preflight before
+compilation and fails the simulation when strict compatibility errors are found.
 
 ## `evas lint <file.va|file.scs>`
 
@@ -70,6 +75,7 @@ Run EVAS/Spectre-style static checks without simulating.
 ```bash
 evas lint path/to/model.va
 evas lint path/to/tb_mydesign.scs --format json
+evas lint path/to/model.va --spectre-strict
 ```
 
 For `.scs` inputs, EVAS parses the netlist and follows `ahdl_include` entries.
@@ -98,6 +104,12 @@ front-end failures when possible. Current examples include conditionally
 executed analog operators such as `transition`, `slew`, and `idt`, plus
 discipline vector ranges that use runtime variables instead of numeric or
 parameter constant expressions.
+`--spectre-strict` adds a blocking compatibility filter for EVAS extension
+syntax that standalone Spectre rejects in the current target, including AMS
+bridge constructs (`logic`, `wreal`, continuous `assign`, `always`),
+task/do-while extensions, runtime electrical-node indexing, selected
+version-gated random distributions, `generate`, `specify`, `connectmodule`, and
+`connectrules`.
 The repository keeps small public oracle fixtures in
 `tests/fixtures/lint_oracle_cases` for lint regression tests. These fixtures
 store distilled expected EVAS diagnostic codes only, not raw Cadence/Spectre
@@ -107,3 +119,4 @@ reports or generated certification output.
 |--------|---------|-------------|
 | `--format` | `text` | Diagnostic output: `text` or `json` |
 | `--min-transition` | `1e-12` | Minimum transition rise/fall time used by lint warnings |
+| `--spectre-strict` | off | Reject EVAS extension syntax outside strict standalone Spectre Verilog-A |
