@@ -622,7 +622,13 @@ def _iter_expr_rejection_tags(
             yield "transition_expr"
         elif name in {"cross", "above", "timer", "idtmod", "last_crossing", "slew"}:
             yield f"stateful_analog_function:{name}"
-        elif name.startswith("$") and name not in {"$random", "$rdist_normal"}:
+        elif name.startswith("$") and name not in {
+            "$random",
+            "$rdist_erlang",
+            "$rdist_exponential",
+            "$rdist_normal",
+            "$rdist_poisson",
+        }:
             yield f"system_function:{name}"
         elif name not in {
             "abs",

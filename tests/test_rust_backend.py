@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import shutil
 import subprocess
@@ -21,6 +22,9 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
+    BODY_EXPR_RDIST_ERLANG,
+    BODY_EXPR_RDIST_EXPONENTIAL,
+    BODY_EXPR_RDIST_POISSON,
     BODY_EXPR_SUB,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
@@ -1361,6 +1365,45 @@ def test_rust_backend_body_ir_random_state_writes_match_python_oracle():
         backend.evaluate_body_ir(batch, node_values, state_values, param_values)
 
         assert state_values[1] == pytest.approx(expected)
+
+
+def test_rust_backend_body_ir_extra_rdist_ops_are_supported():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+
+    values = (
+        backend.evaluate_body_expr(
+            [
+                BodyExprOp(BODY_EXPR_CONST, value=8001.0),
+                BodyExprOp(BODY_EXPR_CONST, value=1.0),
+                BodyExprOp(BODY_EXPR_RDIST_EXPONENTIAL),
+            ],
+            [],
+        ),
+        backend.evaluate_body_expr(
+            [
+                BodyExprOp(BODY_EXPR_CONST, value=8002.0),
+                BodyExprOp(BODY_EXPR_CONST, value=2.0),
+                BodyExprOp(BODY_EXPR_RDIST_POISSON),
+            ],
+            [],
+        ),
+        backend.evaluate_body_expr(
+            [
+                BodyExprOp(BODY_EXPR_CONST, value=8003.0),
+                BodyExprOp(BODY_EXPR_CONST, value=2.0),
+                BodyExprOp(BODY_EXPR_CONST, value=0.5),
+                BodyExprOp(BODY_EXPR_RDIST_ERLANG),
+            ],
+            [],
+        ),
+    )
+
+    assert all(math.isfinite(value) for value in values)
+    assert values[0] >= 0.0
+    assert values[1] >= 0.0
+    assert values[1] == pytest.approx(round(values[1]))
+    assert values[2] >= 0.0
 
 
 def test_rust_backend_evaluates_transition_target_batch():
