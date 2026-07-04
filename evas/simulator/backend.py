@@ -5430,22 +5430,57 @@ class CompiledModel:
         ]
 
     @staticmethod
+    def _scan_literal_regex(literal: str) -> str:
+        parts: List[str] = []
+        idx = 0
+        while idx < len(literal):
+            if literal[idx].isspace():
+                while idx < len(literal) and literal[idx].isspace():
+                    idx += 1
+                parts.append(r"\s*")
+                continue
+            parts.append(re.escape(literal[idx]))
+            idx += 1
+        return "".join(parts)
+
+    @classmethod
+    def _scan_format_regex(cls, fmt: Any) -> Tuple[re.Pattern[str], List[str]]:
+        fmt_s = str(fmt)
+        spec_re = re.compile(r"%(\*)?(?:\d+)?(?:\.\d+)?(?:[lLhH])?([deEfgGs])")
+        parts: List[str] = []
+        types: List[str] = []
+        pos = 0
+        for match in spec_re.finditer(fmt_s):
+            parts.append(cls._scan_literal_regex(fmt_s[pos:match.start()]))
+            spec = match.group(2).lower()
+            if spec == "d":
+                value_re = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+            elif spec == "s":
+                value_re = r"\S+"
+            else:
+                value_re = r"[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+            if match.group(1):
+                parts.append(f"(?:{value_re})")
+            else:
+                parts.append(f"({value_re})")
+                types.append(spec)
+            pos = match.end()
+        parts.append(cls._scan_literal_regex(fmt_s[pos:]))
+        return re.compile("".join(parts)), types
+
+    @staticmethod
     def _scan_tokens(line: str) -> List[str]:
         return [tok for tok in re.split(r"[\s,]+", line.strip()) if tok]
 
-    def _fscanf_values(self, fd: Any, fmt: Any) -> Tuple[int, Tuple[Any, ...]]:
-        handle = self._file_handle(fd)
-        if handle is None:
-            return 0, ()
-        types = self._scan_format_types(fmt)
+    def _scan_values_from_text(self, text: Any, fmt: Any) -> Tuple[int, Tuple[Any, ...]]:
+        regex, types = self._scan_format_regex(fmt)
         if not types:
             return 0, ()
-        line = handle.readline()
-        if line == "":
+        match = regex.match(str(text))
+        if match is None:
             return 0, ()
-        tokens = self._scan_tokens(line)
         values: List[Any] = []
-        for spec, token in zip(types, tokens):
+        for spec, token in zip(types, match.groups()):
             try:
                 if spec == "d":
                     values.append(self._to_integer(float(token)))
@@ -5457,8 +5492,33 @@ class CompiledModel:
                 break
         return len(values), tuple(values)
 
+    def _fscanf_values(self, fd: Any, fmt: Any) -> Tuple[int, Tuple[Any, ...]]:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return 0, ()
+        line = handle.readline()
+        if line == "":
+            return 0, ()
+        return self._scan_values_from_text(line, fmt)
+
     def _fscanf_assign(self, fd: Any, fmt: Any, target_specs) -> int:
         count, values = self._fscanf_values(fd, fmt)
+        for spec, value in zip(target_specs, values):
+            if not spec:
+                continue
+            kind = spec[0]
+            if kind == "state":
+                _kind, name, integer = spec
+                stored = self._to_integer(value) if integer else value
+                self._state_set(name, stored)
+            elif kind == "array":
+                _kind, name, idx, integer = spec
+                stored = self._to_integer(value) if integer else value
+                self._array_set(name, int(idx), stored)
+        return count
+
+    def _sscanf_assign(self, text: Any, fmt: Any, target_specs) -> int:
+        count, values = self._scan_values_from_text(text, fmt)
         for spec, value in zip(target_specs, values):
             if not spec:
                 continue
@@ -11974,6 +12034,23 @@ class _ModuleCompiler:
                 )
             return lines
 
+        if stmt.name == '$sscanf' and len(stmt.args) >= 2:
+            text_expr = self._compile_expr(stmt.args[0])
+            fmt_expr = self._compile_expr(stmt.args[1])
+            count_var = self._alloc_temp_var("sscanf_count")
+            values_var = self._alloc_temp_var("sscanf_values")
+            lines.append(f"{prefix}{count_var}, {values_var} = self._scan_values_from_text({text_expr}, {fmt_expr})")
+            for idx, target in enumerate(stmt.args[2:]):
+                lines.append(f"{prefix}if {count_var} > {idx}:")
+                lines.extend(
+                    self._compile_task_target_assignment(
+                        target,
+                        f"{values_var}[{idx}]",
+                        indent + 1,
+                    )
+                )
+            return lines
+
         if stmt.name == '$rewind' and stmt.args:
             fd = self._compile_expr(stmt.args[0])
             lines.append(f"{prefix}self._rewind({fd})")
@@ -15817,6 +15894,18 @@ class _ModuleCompiler:
             else:
                 specs = "()"
             return f"self._fscanf_assign({fd}, {fmt_expr}, {specs})"
+        if name == '$sscanf':
+            text_expr = args[0] if len(args) > 0 else "''"
+            fmt_expr = args[1] if len(args) > 1 else "''"
+            specs = ", ".join(
+                self._compile_fscanf_target_spec(target)
+                for target in expr.args[2:]
+            )
+            if specs:
+                specs = f"({specs},)"
+            else:
+                specs = "()"
+            return f"self._sscanf_assign({text_expr}, {fmt_expr}, {specs})"
         if name == '$fopen':
             filename = args[0] if len(args) > 0 else "'output.txt'"
             mode = args[1] if len(args) > 1 else "'w'"
