@@ -67,7 +67,11 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
     BODY_STMT_FILE_CLOSE,
+    BODY_STMT_FILE_GETS,
     BODY_STMT_FILE_OPEN,
+    BODY_STMT_FILE_SCANF,
+    BODY_STMT_FILE_SEEK,
+    BODY_STMT_FILE_TELL,
     BODY_STMT_FILE_WRITE,
     BODY_STMT_STROBE,
     BODY_TARGET_NODE,
@@ -307,6 +311,8 @@ class RustSimSideEffect:
     filename: str = ""
     mode: str = "w"
     fmt: str = ""
+    target_ids: Tuple[int, ...] = ()
+    target_integers: Tuple[bool, ...] = ()
     owner: Any = None
 
 
@@ -764,6 +770,30 @@ class _RustSimSideEffectBuilder:
     def add_file_close(self) -> int:
         return self._append(RustSimSideEffect(kind="fclose"))
 
+    def add_file_scanf(
+        self,
+        fmt: str,
+        target_ids: tuple[int, ...],
+        target_integers: tuple[bool, ...],
+    ) -> int:
+        return self._append(
+            RustSimSideEffect(
+                kind="fscanf",
+                fmt=fmt,
+                target_ids=target_ids,
+                target_integers=target_integers,
+            )
+        )
+
+    def add_file_gets(self, target_ids: tuple[int, ...] = ()) -> int:
+        return self._append(RustSimSideEffect(kind="fgets", target_ids=target_ids))
+
+    def add_file_tell(self) -> int:
+        return self._append(RustSimSideEffect(kind="ftell"))
+
+    def add_file_seek(self) -> int:
+        return self._append(RustSimSideEffect(kind="fseek"))
+
     def add_strobe(self, fmt: str) -> int:
         return self._append(RustSimSideEffect(kind="strobe", fmt=fmt, owner=self._model))
 
@@ -1111,9 +1141,23 @@ def _append_body_program(
                 state_slot_to_global=state_slot_to_global,
                 param_slot_to_global=param_slot_to_global,
             )
+            if int(stmt.target_kind) in {BODY_STMT_FILE_SCANF, BODY_STMT_FILE_GETS}:
+                spec_pos = expr_start + expr_count - 1
+                if expr_count <= 0 or spec_pos >= len(body_expr_ops):
+                    continue
+                spec_op = body_expr_ops[spec_pos]
+                body_expr_ops[spec_pos] = BodyExprOp(
+                    op_kind=int(spec_op.op_kind),
+                    index=int(spec_op.index),
+                    value=float(spec_op.value) + float(side_effect_slot_offset),
+                )
         if stmt.target_kind == BODY_TARGET_NODE:
             target_id = int(node_slot_to_global.get(target_id, target_id))
-        elif stmt.target_kind == BODY_TARGET_STATE:
+        elif stmt.target_kind == BODY_TARGET_STATE or int(stmt.target_kind) in {
+            BODY_STMT_FILE_SCANF,
+            BODY_STMT_FILE_TELL,
+            BODY_STMT_FILE_SEEK,
+        }:
             target_id = int(state_slot_to_global.get(target_id, target_id))
         elif int(stmt.target_kind) in {
             BODY_STMT_FILE_WRITE,
@@ -1131,6 +1175,30 @@ def _append_body_program(
             )
         )
     return stmt_start, len(body_stmt_ops) - stmt_start
+
+
+def _remap_side_effect_targets(
+    effects: Iterable[RustSimSideEffect],
+    state_slot_to_global: Mapping[int, int],
+) -> tuple[RustSimSideEffect, ...]:
+    remapped: list[RustSimSideEffect] = []
+    for effect in effects:
+        target_ids = tuple(
+            int(state_slot_to_global.get(int(slot), int(slot)))
+            for slot in tuple(getattr(effect, "target_ids", ()) or ())
+        )
+        remapped.append(
+            RustSimSideEffect(
+                kind=str(effect.kind),
+                filename=str(effect.filename),
+                mode=str(effect.mode),
+                fmt=str(effect.fmt),
+                target_ids=target_ids,
+                target_integers=tuple(bool(v) for v in effect.target_integers),
+                owner=effect.owner,
+            )
+        )
+    return tuple(remapped)
 
 
 def _is_continuous_body_stmt(stmt_ir: object) -> bool:
@@ -2454,7 +2522,9 @@ def _convert_event_transition_ops(
         and converted_slews == 0
     ):
         return (f"{prefix}:no_event_transition_ir",)
-    side_effects.extend(side_effect_builder.effects)
+    side_effects.extend(
+        _remap_side_effect_targets(side_effect_builder.effects, state_slot_to_global)
+    )
     return tuple(reasons)
 
 

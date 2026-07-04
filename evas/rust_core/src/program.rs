@@ -835,6 +835,7 @@ pub(crate) fn rust_sim_execute_event_body(
     param_values: &[f64],
     time: f64,
     bound_step_limit: &mut f64,
+    file_io: Option<&mut RustFileIoRuntime<'_>>,
     side_effect_log: Option<&mut RustSideEffectLog<'_>>,
 ) -> Result<(), i32> {
     let end = event
@@ -853,6 +854,7 @@ pub(crate) fn rust_sim_execute_event_body(
         time,
         bound_step_limit,
         true,
+        file_io,
         side_effect_log,
     )
 }
@@ -988,6 +990,7 @@ fn rust_sim_execute_cross_event_body(
     param_values: &[f64],
     time: f64,
     bound_step_limit: &mut f64,
+    file_io: Option<&mut RustFileIoRuntime<'_>>,
     side_effect_log: Option<&mut RustSideEffectLog<'_>>,
 ) -> Result<(), i32> {
     if candidate.event_idx >= events.len() {
@@ -1077,6 +1080,7 @@ fn rust_sim_execute_cross_event_body(
         param_values,
         time,
         bound_step_limit,
+        file_io,
         side_effect_log,
     );
     for (idx, value) in restored_nodes {
@@ -1291,6 +1295,7 @@ pub(crate) fn rust_sim_execute_events(
     timer_has_last_flags: &mut [u8],
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
     time: f64,
     initial_condition_mode: bool,
     phase: u8,
@@ -1434,6 +1439,7 @@ pub(crate) fn rust_sim_execute_events(
                 param_values,
                 time,
                 bound_step_limit,
+                file_io.as_deref_mut(),
                 Some(&mut *side_effect_log),
             )?;
             if event.kind == RUST_SIM_EVENT_TIMER && event.timer_period_expr_count == 0 {
@@ -1468,6 +1474,7 @@ fn rust_sim_execute_always_events(
     param_values: &[f64],
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    file_io: Option<&mut RustFileIoRuntime<'_>>,
     time: f64,
     phase: u8,
 ) -> Result<usize, i32> {
@@ -1480,6 +1487,7 @@ fn rust_sim_execute_always_events(
         param_values,
         bound_step_limit,
         side_effect_log,
+        file_io,
         time,
         phase,
         0,
@@ -1497,6 +1505,7 @@ fn rust_sim_execute_always_events_in_range(
     param_values: &[f64],
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
     time: f64,
     phase: u8,
     start_idx: usize,
@@ -1517,6 +1526,7 @@ fn rust_sim_execute_always_events_in_range(
             param_values,
             time,
             bound_step_limit,
+            file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
         )?;
         fired_count += 1;
@@ -1535,6 +1545,7 @@ pub(crate) fn rust_sim_execute_final_step_events(
     time: f64,
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
 ) -> Result<usize, i32> {
     let mut fired_count = 0_usize;
     for event in events {
@@ -1550,6 +1561,7 @@ pub(crate) fn rust_sim_execute_final_step_events(
             param_values,
             time,
             bound_step_limit,
+            file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
         )?;
         fired_count += 1;
@@ -1591,6 +1603,7 @@ fn rust_sim_transition_target_values_after_pre_always(
             param_values,
             time,
             &mut scratch_bound_step,
+            None,
             None,
         )?;
     }
@@ -2262,6 +2275,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
     cross_last_times: &mut [f64],
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
     drain_post_cross_events: bool,
     event_fires: &mut usize,
     cursor_time: &mut f64,
@@ -2386,6 +2400,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     param_values,
                     event_time,
                     bound_step_limit,
+                    file_io.as_deref_mut(),
                     Some(&mut *side_effect_log),
                 )?;
                 evaluate_static_linear_ops(
@@ -2513,6 +2528,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
     drain_transition_post_cross_events: bool,
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
     cross_prev_values: &mut [f64],
     cross_prev_times: &mut [f64],
     cross_pprev_values: &mut [f64],
@@ -2579,6 +2595,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             cross_last_times,
             bound_step_limit,
             side_effect_log,
+            file_io.as_deref_mut(),
             drain_transition_post_cross_events && fired > 0,
             &mut fired,
             &mut cursor_time,
@@ -2633,6 +2650,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             param_values,
             event_time,
             bound_step_limit,
+            file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
         )?;
         fired += rust_sim_execute_always_events_in_range(
@@ -2644,6 +2662,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             param_values,
             bound_step_limit,
             side_effect_log,
+            file_io.as_deref_mut(),
             event_time,
             RUST_SIM_EVENT_PHASE_PRE,
             candidate.event_idx.saturating_add(1),
@@ -2726,6 +2745,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
         cross_last_times,
         bound_step_limit,
         side_effect_log,
+        file_io.as_deref_mut(),
         drain_transition_post_cross_events && fired > 0,
         &mut fired,
         &mut cursor_time,
@@ -2757,6 +2777,10 @@ pub fn rust_sim_event_transition_record_trace(
     side_effect_count: &mut usize,
     side_effect_values: &mut [f64],
     side_effect_value_count: &mut usize,
+    file_specs: &[EvasRustFileIoSpec],
+    file_string_bytes: &[u8],
+    file_target_ids: &[usize],
+    file_target_integers: &[u8],
     param_values: &[f64],
     node_values: &mut [f64],
     state_values: &mut [f64],
@@ -2890,6 +2914,12 @@ pub fn rust_sim_event_transition_record_trace(
         count: side_effect_count,
         value_count: side_effect_value_count,
     };
+    let mut file_io_runtime = RustFileIoRuntime::new(
+        file_specs,
+        file_string_bytes,
+        file_target_ids,
+        file_target_integers,
+    );
 
     rust_sim_write_sources(sources, source_data, node_values, 0.0)?;
     if has_pre_initial_runtime_events {
@@ -2917,6 +2947,7 @@ pub fn rust_sim_event_transition_record_trace(
             &mut timer_has_last_flags,
             &mut bound_step_limit,
             &mut side_effect_log,
+            Some(&mut file_io_runtime),
             0.0,
             true,
             RUST_SIM_EVENT_PHASE_PRE,
@@ -3027,6 +3058,7 @@ pub fn rust_sim_event_transition_record_trace(
             &mut timer_has_last_flags,
             &mut bound_step_limit,
             &mut side_effect_log,
+            Some(&mut file_io_runtime),
             0.0,
             false,
             RUST_SIM_EVENT_PHASE_POST,
@@ -3221,6 +3253,7 @@ pub fn rust_sim_event_transition_record_trace(
                 param_values,
                 &mut bound_step_limit,
                 &mut side_effect_log,
+                Some(&mut file_io_runtime),
                 time,
                 RUST_SIM_EVENT_PHASE_PRE,
             )?;
@@ -3281,6 +3314,7 @@ pub fn rust_sim_event_transition_record_trace(
                     false,
                     &mut bound_step_limit,
                     &mut side_effect_log,
+                    Some(&mut file_io_runtime),
                     &mut cross_prev_values,
                     &mut cross_prev_times,
                     &mut cross_pprev_values,
@@ -3320,6 +3354,7 @@ pub fn rust_sim_event_transition_record_trace(
                 &mut timer_has_last_flags,
                 &mut bound_step_limit,
                 &mut side_effect_log,
+                Some(&mut file_io_runtime),
                 time,
                 false,
                 RUST_SIM_EVENT_PHASE_PRE,
@@ -3427,6 +3462,7 @@ pub fn rust_sim_event_transition_record_trace(
                     true,
                     &mut bound_step_limit,
                     &mut side_effect_log,
+                    Some(&mut file_io_runtime),
                     &mut cross_prev_values,
                     &mut cross_prev_times,
                     &mut cross_pprev_values,
@@ -3506,6 +3542,7 @@ pub fn rust_sim_event_transition_record_trace(
                 &mut timer_has_last_flags,
                 &mut bound_step_limit,
                 &mut side_effect_log,
+                Some(&mut file_io_runtime),
                 time,
                 false,
                 RUST_SIM_EVENT_PHASE_POST,
@@ -3593,6 +3630,7 @@ pub fn rust_sim_event_transition_record_trace(
             tstop,
             &mut bound_step_limit,
             &mut side_effect_log,
+            Some(&mut file_io_runtime),
         )?;
     }
 
