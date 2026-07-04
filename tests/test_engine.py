@@ -6457,6 +6457,45 @@ endmodule
         assert math.isfinite(nv1["out"])
         assert nv1["out"] == pytest.approx(nv2["out"])
 
+    def test_rust_sim_program_lowers_rdist_uniform(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_uniform_probe(out);
+    output voltage out;
+    parameter real tr = 100p;
+    integer seed_q;
+    real draw_q;
+    analog begin
+        @(initial_step) begin
+            seed_q = 25;
+            draw_q = $rdist_uniform(seed_q, -0.25, 0.25);
+        end
+        V(out) <+ transition(0.5 + draw_q, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert all(math.isfinite(value) for value in result.signals["out"])
+        assert 0.25 <= result.signals["out"][-1] <= 0.75
+
     def test_compiled_sformat_function_returns_formatted_string(self):
         src = """\
 `include "disciplines.vams"
@@ -9107,7 +9146,7 @@ module rust_fileio_metric(clk, done);
         end
         @(cross(V(clk) - 0.5, 1)) begin
             count = count + 1;
-            $fwrite(fd, "edge %d at %e", count, $abstime);
+            $fwrite(fd, "edge %d at %e\\n", count, $abstime);
         end
         V(done) <+ transition(count > 0, 0.0, tr, tr);
     end
@@ -9140,6 +9179,108 @@ endmodule
         assert len(lines) == 5
         assert lines[0].startswith("edge 1 at")
         assert lines[4].startswith("edge 5 at")
+
+    def test_rust_sim_program_swrite_internal_label_noop(self):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module rust_swrite_label(clk, out);
+    input voltage clk;
+    output voltage out;
+    parameter real tr = 100p;
+    string label_q;
+    integer count_q;
+    analog begin
+        @(initial_step) count_q = 0;
+        @(cross(V(clk) - 0.5, 1)) begin
+            count_q = count_q + 1;
+            $swrite(label_q, "edge=%0d", count_q);
+        end
+        V(out) <+ transition(count_q, 0.0, tr, tr);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(
+            tstop=55e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert result.signals["out"][-1] >= 3.0
+
+    def test_rust_sim_program_swrite_file_metric_line(self, tmp_path):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "metric_lines.log"
+        outfile_s = str(outfile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_swrite_file_metric(clk, out);
+    input voltage clk;
+    output voltage out;
+    parameter string filename = "{outfile_s}";
+    parameter real tr = 100p;
+    string label_q;
+    integer fd;
+    integer count_q;
+    analog begin
+        @(initial_step) count_q = 0;
+        @(cross(V(clk) - 0.5, 1)) begin
+            count_q = count_q + 1;
+            $swrite(label_q, "count=%0d metric=%0.3f", count_q, V(clk));
+            fd = $fopen(filename, "a");
+            $fwrite(fd, "%s\\n", label_q);
+            $fclose(fd);
+        end
+        V(out) <+ transition(count_q, 0.0, tr, tr);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(
+            tstop=55e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert result.signals["out"][-1] >= 3.0
+        assert outfile.exists()
+        lines = outfile.read_text().strip().splitlines()
+        assert lines == ["<string>", "<string>", "<string>"]
 
     def test_direct_filename_fstrobe_does_not_crash_evas(self, tmp_path):
         from evas.compiler.parser import parse

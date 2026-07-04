@@ -142,6 +142,7 @@ pub(crate) const BODY_EXPR_RANDOM_INT32: u8 = 81;
 pub(crate) const BODY_EXPR_RDIST_EXPONENTIAL: u8 = 82;
 pub(crate) const BODY_EXPR_RDIST_POISSON: u8 = 83;
 pub(crate) const BODY_EXPR_RDIST_ERLANG: u8 = 84;
+pub(crate) const BODY_EXPR_RDIST_UNIFORM: u8 = 85;
 pub(crate) const BODY_STMT_LAST_CROSSING: u8 = 243;
 pub(crate) const BODY_STMT_IDTMOD: u8 = 244;
 pub(crate) const BODY_STMT_WHILE: u8 = 245;

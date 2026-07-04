@@ -1626,6 +1626,7 @@ fn rust_sim_op_is_stochastic(op_kind: u8) -> bool {
             | BODY_EXPR_RDIST_EXPONENTIAL
             | BODY_EXPR_RDIST_POISSON
             | BODY_EXPR_RDIST_ERLANG
+            | BODY_EXPR_RDIST_UNIFORM
     )
 }
 

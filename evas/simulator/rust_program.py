@@ -303,6 +303,7 @@ class RustSimSideEffect:
     filename: str = ""
     mode: str = "w"
     fmt: str = ""
+    append_newline: bool = True
     owner: Any = None
 
 
@@ -746,8 +747,14 @@ class _RustSimSideEffectBuilder:
     def add_file_open(self, filename: str, mode: str) -> int:
         return self._append(RustSimSideEffect(kind="fopen", filename=filename, mode=mode))
 
-    def add_file_write(self, fmt: str) -> int:
-        return self._append(RustSimSideEffect(kind="fwrite", fmt=fmt))
+    def add_file_write(self, fmt: str, *, append_newline: bool = True) -> int:
+        return self._append(
+            RustSimSideEffect(
+                kind="fwrite",
+                fmt=fmt,
+                append_newline=bool(append_newline),
+            )
+        )
 
     def add_file_close(self) -> int:
         return self._append(RustSimSideEffect(kind="fclose"))

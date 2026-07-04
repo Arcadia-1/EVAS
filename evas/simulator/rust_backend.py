@@ -242,6 +242,7 @@ BODY_EXPR_RANDOM_INT32 = 81
 BODY_EXPR_RDIST_EXPONENTIAL = 82
 BODY_EXPR_RDIST_POISSON = 83
 BODY_EXPR_RDIST_ERLANG = 84
+BODY_EXPR_RDIST_UNIFORM = 85
 
 BODY_TARGET_NODE = 0
 BODY_TARGET_STATE = 1
@@ -543,6 +544,7 @@ class RustSimSourceRecordProgram:
                         continue
                     handle_id = int(round(float(values[0])))
                     fmt = str(getattr(spec, "fmt", ""))
+                    append_newline = bool(getattr(spec, "append_newline", True))
                     args = tuple(float(value) for value in values[1:])
                     try:
                         msg = (fmt % args) if args else fmt
@@ -556,7 +558,9 @@ class RustSimSourceRecordProgram:
                         msg = (fmt % coerced) if coerced else fmt
                     targets = handles.get(handle_id) or ()
                     for target in targets:
-                        target.write(msg + "\n")
+                        target.write(msg)
+                        if append_newline and not msg.endswith("\n"):
+                            target.write("\n")
                     continue
                 if action == "fclose" and kind == BODY_STMT_FILE_CLOSE:
                     if not values:

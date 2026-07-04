@@ -76,6 +76,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_RDIST_EXPONENTIAL,
     BODY_EXPR_RDIST_NORMAL,
     BODY_EXPR_RDIST_POISSON,
+    BODY_EXPR_RDIST_UNIFORM,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
@@ -139,6 +140,7 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$rdist_exponential",
         "$rdist_normal",
         "$rdist_poisson",
+        "$rdist_uniform",
     }
 )
 
@@ -208,6 +210,8 @@ _BODY_FUNCTION_OPS = {
     "$rdist_poisson": (BODY_EXPR_RDIST_POISSON, 2),
     "$rdist_normal": (BODY_EXPR_RDIST_NORMAL, 3),
     "$rdist_erlang": (BODY_EXPR_RDIST_ERLANG, 3),
+    "$dist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
+    "$rdist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
 }
 
 
@@ -600,6 +604,9 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
 
     for slot, param in enumerate(getattr(module, "parameters", ()) or ()):
         integer = getattr(param, "param_type", None) == ParamType.INTEGER
+        is_string = getattr(param, "param_type", None) == ParamType.STRING
+        if is_string:
+            continue
         bindings.append(
             StateBindingIR(
                 name=str(param.name),
@@ -616,7 +623,10 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     scalar_slot = 0
     for variable in variables:
         integer = getattr(variable, "var_type", None) == ParamType.INTEGER
+        is_string = getattr(variable, "var_type", None) == ParamType.STRING
         if getattr(variable, "is_array", False):
+            continue
+        if is_string:
             continue
         bindings.append(
             StateBindingIR(
@@ -631,6 +641,9 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     array_slot = 0
     for variable in variables:
         integer = getattr(variable, "var_type", None) == ParamType.INTEGER
+        is_string = getattr(variable, "var_type", None) == ParamType.STRING
+        if is_string:
+            continue
         if getattr(variable, "is_array", False):
             raw_lo = getattr(variable, "array_lo", None)
             raw_hi = getattr(variable, "array_hi", None)

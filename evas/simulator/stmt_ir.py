@@ -82,6 +82,8 @@ class StatementLoweringContext:
             "$fclose",
             "$fdisplay",
             "$fwrite",
+            "$sformat",
+            "$swrite",
             "$strobe",
             "$display",
         }
@@ -1195,16 +1197,27 @@ def _append_file_write_stmt(
             return False
         fmt = resolved_fmt
         numeric_args = (stmt_ir.args[0], *stmt_ir.args[2:])
+    expr_start = len(expr_ops)
+    fmt_for_effect = fmt
+    for arg_index, arg in enumerate(numeric_args):
+        encoded = encode_body_expr_ops(arg, bindings, node_slots)
+        if encoded is None:
+            if (
+                arg_index > 0
+                and _format_has_string_placeholder(fmt_for_effect)
+                and _is_side_effect_string_arg(side_effects, bindings, arg)
+            ):
+                fmt_for_effect = _replace_first_string_placeholder(
+                    fmt_for_effect,
+                    "<string>",
+                )
+                continue
+            return False
+        expr_ops.extend(encoded)
     add = getattr(side_effects, "add_file_write", None)
     if add is None:
         return False
-    spec_id = int(add(fmt))
-    expr_start = len(expr_ops)
-    for arg in numeric_args:
-        encoded = encode_body_expr_ops(arg, bindings, node_slots)
-        if encoded is None:
-            return False
-        expr_ops.extend(encoded)
+    spec_id = int(add(fmt_for_effect, append_newline=stmt_ir.name != "$fwrite"))
     stmt_ops.append(
         BodyStmtOp(
             target_kind=BODY_STMT_FILE_WRITE,
@@ -1215,6 +1228,28 @@ def _append_file_write_stmt(
         )
     )
     return True
+
+
+def _format_has_string_placeholder(fmt: str) -> bool:
+    return "%s" in fmt
+
+
+def _replace_first_string_placeholder(fmt: str, value: str) -> str:
+    return fmt.replace("%s", value, 1)
+
+
+def _is_side_effect_string_arg(
+    side_effects: object,
+    bindings: BindingTableIR,
+    expr_ir: ExprIR,
+) -> bool:
+    if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
+        return True
+    if _resolve_side_effect_string(side_effects, expr_ir) is not None:
+        return True
+    if isinstance(expr_ir, IdentifierIR) and bindings.resolve(expr_ir.name) is None:
+        return True
+    return False
 
 
 def _append_file_close_stmt(
@@ -1549,7 +1584,7 @@ def _collect_body_write_specs(
 
 
 def _is_noop_body_system_task(stmt_ir: SystemTaskIR) -> bool:
-    return stmt_ir.name in {"$display", "$strobe"}
+    return stmt_ir.name in {"$display", "$strobe", "$sformat", "$swrite"}
 
 
 def _contribution_expr_with_reference(
