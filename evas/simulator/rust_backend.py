@@ -63,6 +63,18 @@ class RustLinearOp(ctypes.Structure):
     ]
 
 
+class RustZiNdOp(ctypes.Structure):
+    _fields_ = [
+        ("target_node_id", ctypes.c_size_t),
+        ("input_node_id", ctypes.c_size_t),
+        ("num_start", ctypes.c_size_t),
+        ("num_count", ctypes.c_size_t),
+        ("den_start", ctypes.c_size_t),
+        ("den_count", ctypes.c_size_t),
+        ("interval", ctypes.c_double),
+    ]
+
+
 class RustTransitionTargetOp(ctypes.Structure):
     _fields_ = [
         ("target_id", ctypes.c_size_t),
@@ -400,6 +412,21 @@ class RustSimSourceRecordProgram:
         self._c_events = event_array_type(*event_specs)
         self._c_transitions = transition_array_type(*transition_specs)
         self._c_slews = slew_array_type(*slew_specs)
+        zi_nd_specs = []
+        for op in tuple(getattr(program, "zi_nd_ops", ()) or ()):
+            zi_nd_specs.append(
+                RustZiNdOp(
+                    int(getattr(op, "target_node_id", 0)),
+                    int(getattr(op, "input_node_id", 0)),
+                    int(getattr(op, "num_start", 0)),
+                    int(getattr(op, "num_count", 0)),
+                    int(getattr(op, "den_start", 0)),
+                    int(getattr(op, "den_count", 0)),
+                    float(getattr(op, "interval", 0.0)),
+                )
+            )
+        zi_nd_array_type = RustZiNdOp * len(zi_nd_specs)
+        self._c_zi_nd_ops = zi_nd_array_type(*zi_nd_specs)
         linear_ops = []
         for op in tuple(getattr(program, "continuous_linear_ops", ()) or ()):
             condition = getattr(op, "condition", None)
@@ -567,6 +594,10 @@ class RustSimSourceRecordProgram:
         return len(self._linear_batch)
 
     @property
+    def zi_nd_count(self) -> int:
+        return len(self._c_zi_nd_ops)
+
+    @property
     def event_count(self) -> int:
         return len(self._c_events)
 
@@ -597,6 +628,10 @@ class RustSimSourceRecordProgram:
     @property
     def slew_ptr(self):
         return self._c_slews
+
+    @property
+    def zi_nd_ptr(self):
+        return self._c_zi_nd_ops
 
     @property
     def param_ptr(self):
@@ -1763,6 +1798,8 @@ class RustBackend:
                 ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_double),
                 ctypes.c_size_t,
+                ctypes.POINTER(RustZiNdOp),
+                ctypes.c_size_t,
                 ctypes.POINTER(RustLinearOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustLinearTerm),
@@ -2638,7 +2675,12 @@ class RustBackend:
         use_linear_abi = (
             program.continuous_linear_count > 0
             or program.state_count > 0
+            or program.zi_nd_count > 0
         )
+        if use_event_transition_abi and program.zi_nd_count > 0:
+            raise RustBackendError(
+                "RustSim zi_nd sampled-data ops are not supported with event+transition ABI"
+            )
         if (
             use_event_transition_abi
             and self._run_event_transition_record_program is None
@@ -2763,6 +2805,8 @@ class RustBackend:
                 int(program.source_count),
                 program.source_data_ptr,
                 len(program.source_data),
+                program.zi_nd_ptr,
+                int(program.zi_nd_count),
                 batch.op_ptr,
                 len(batch),
                 batch.term_ptr,

@@ -177,6 +177,134 @@ pub(crate) fn rust_sim_write_sources(
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct RustSimZiNdState {
+    last_sample_t: f64,
+    last_eval_t: f64,
+    has_last_eval: bool,
+    x_hist: Vec<f64>,
+    y_hist: Vec<f64>,
+    y: f64,
+}
+
+impl RustSimZiNdState {
+    fn new(num_count: usize, den_count: usize) -> Self {
+        Self {
+            last_sample_t: f64::NEG_INFINITY,
+            last_eval_t: 0.0,
+            has_last_eval: false,
+            x_hist: vec![0.0; num_count],
+            y_hist: vec![0.0; den_count.saturating_sub(1)],
+            y: 0.0,
+        }
+    }
+
+    fn reset(&mut self, num_count: usize, den_count: usize) {
+        *self = Self::new(num_count, den_count);
+    }
+}
+
+fn rust_sim_init_zi_nd_states(zi_nd_ops: &[EvasRustZiNdOp]) -> Result<Vec<RustSimZiNdState>, i32> {
+    let mut states = Vec::with_capacity(zi_nd_ops.len());
+    for op in zi_nd_ops {
+        if op.num_count == 0 || op.den_count == 0 {
+            return Err(-871);
+        }
+        states.push(RustSimZiNdState::new(op.num_count, op.den_count));
+    }
+    Ok(states)
+}
+
+fn rust_sim_coeff_slice<'a>(
+    source_data: &'a [f64],
+    start: usize,
+    count: usize,
+    err_base: i32,
+) -> Result<&'a [f64], i32> {
+    let end = start.checked_add(count).ok_or(err_base)?;
+    if end > source_data.len() {
+        return Err(err_base - 1);
+    }
+    Ok(&source_data[start..end])
+}
+
+fn rust_sim_step_zi_nd_ops(
+    zi_nd_ops: &[EvasRustZiNdOp],
+    source_data: &[f64],
+    node_values: &mut [f64],
+    states: &mut [RustSimZiNdState],
+    time: f64,
+) -> Result<(), i32> {
+    if zi_nd_ops.len() != states.len() {
+        return Err(-872);
+    }
+    for (idx, op) in zi_nd_ops.iter().enumerate() {
+        if op.target_node_id >= node_values.len() || op.input_node_id >= node_values.len() {
+            return Err(-873);
+        }
+        if op.num_count == 0 || op.den_count == 0 {
+            return Err(-874);
+        }
+        let num = rust_sim_coeff_slice(source_data, op.num_start, op.num_count, -875)?;
+        let den = rust_sim_coeff_slice(source_data, op.den_start, op.den_count, -877)?;
+        if den[0] == 0.0 {
+            return Err(-879);
+        }
+
+        let state = &mut states[idx];
+        if state.x_hist.len() != op.num_count
+            || state.y_hist.len() != op.den_count.saturating_sub(1)
+        {
+            state.reset(op.num_count, op.den_count);
+        }
+
+        if state.has_last_eval && time == state.last_eval_t {
+            node_values[op.target_node_id] = state.y;
+            continue;
+        }
+        if time < state.last_sample_t {
+            state.reset(op.num_count, op.den_count);
+        }
+
+        if op.interval > 0.0 && (time - state.last_sample_t) < op.interval * 0.999999 {
+            state.last_eval_t = time;
+            state.has_last_eval = true;
+            node_values[op.target_node_id] = state.y;
+            continue;
+        }
+
+        let x = node_values[op.input_node_id];
+        for hist_idx in (1..state.x_hist.len()).rev() {
+            state.x_hist[hist_idx] = state.x_hist[hist_idx - 1];
+        }
+        if !state.x_hist.is_empty() {
+            state.x_hist[0] = x;
+        }
+
+        let mut y = 0.0_f64;
+        for coeff_idx in 0..num.len() {
+            y += num[coeff_idx] * state.x_hist[coeff_idx];
+        }
+        for coeff_idx in 1..den.len() {
+            y -= den[coeff_idx] * state.y_hist[coeff_idx - 1];
+        }
+        y /= den[0];
+
+        for hist_idx in (1..state.y_hist.len()).rev() {
+            state.y_hist[hist_idx] = state.y_hist[hist_idx - 1];
+        }
+        if !state.y_hist.is_empty() {
+            state.y_hist[0] = y;
+        }
+        state.y = y;
+        state.last_sample_t = time;
+        state.last_eval_t = time;
+        state.has_last_eval = true;
+        node_values[op.target_node_id] = y;
+    }
+    Ok(())
+}
+
 pub(crate) fn rust_sim_next_source_breakpoint_after(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
@@ -392,6 +520,7 @@ pub fn rust_sim_source_record_trace(
 pub fn rust_sim_source_linear_record_trace(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
+    zi_nd_ops: &[EvasRustZiNdOp],
     linear_ops: &[EvasRustLinearOp],
     linear_terms: &[EvasRustLinearTerm],
     linear_conditions: &[EvasRustLinearCondition],
@@ -438,8 +567,10 @@ pub fn rust_sim_source_linear_record_trace(
     } else {
         f64::INFINITY
     };
+    let mut zi_nd_states = rust_sim_init_zi_nd_states(zi_nd_ops)?;
 
     rust_sim_write_sources(sources, source_data, node_values, 0.0)?;
+    rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, 0.0)?;
     evaluate_static_linear_ops(
         linear_ops,
         linear_terms,
@@ -497,6 +628,7 @@ pub fn rust_sim_source_linear_record_trace(
             time = tstop;
         }
         rust_sim_write_sources(sources, source_data, node_values, time)?;
+        rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, time)?;
         evaluate_static_linear_ops(
             linear_ops,
             linear_terms,

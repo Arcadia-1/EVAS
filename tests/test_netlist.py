@@ -2887,6 +2887,60 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(120e-9) == pytest.approx(0.0130177, rel=1e-5)
         assert sample_at(140e-9) == pytest.approx(0.0008136, rel=1e-4)
 
+    def test_evas_rust_zi_nd_sampled_data_filter_matches_spectre_samples(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+        va_file = tmp_path / "continuous_zi_nd_filter.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module continuous_zi_nd_filter(in, out);
+                input in;
+                output out;
+                electrical in, out;
+                analog begin
+                    V(out) <+ zi_nd(V(in), {0.5, 0.5}, {1.0, -0.25}, 10n);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_continuous_zi_nd_filter.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "continuous_zi_nd_filter.va"
+            Vin (inp 0) vsource type=pwl wave=[0 0.0 20n 0.0 21n 1.0 80n 1.0 81n 0.0 160n 0.0]
+            XDUT (inp out) continuous_zi_nd_filter
+            simulatorOptions options evas_engine=evas-rust evas_skip_source_error_control=true
+            tran tran stop=160n maxstep=1n
+            save inp out
+        """))
+
+        out_dir = tmp_path / "out_continuous_zi_nd_filter"
+        log_path = tmp_path / "evas.log"
+        assert evas_simulate(str(scs_file), log_path=str(log_path), output_dir=str(out_dir))
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas-rust" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "rust_full_model_required_failures = 0" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["out"])
+
+        assert sample_at(30e-9) == pytest.approx(0.5, abs=1e-9)
+        assert sample_at(40e-9) == pytest.approx(1.125, abs=1e-9)
+        assert sample_at(50e-9) == pytest.approx(1.28125, abs=1e-9)
+        assert sample_at(70e-9) == pytest.approx(1.33008, rel=1e-5)
+        assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
+        assert sample_at(120e-9) == pytest.approx(0.0130177, rel=1e-5)
+        assert sample_at(140e-9) == pytest.approx(0.0008136, rel=1e-4)
+
     def test_ordinary_current_contribution_is_visible_to_branch_probe(self, tmp_path, monkeypatch):
         monkeypatch.setenv("EVAS_ENGINE", "python")
         dut_file = tmp_path / "current_conductance.va"

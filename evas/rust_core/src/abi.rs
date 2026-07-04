@@ -58,6 +58,18 @@ pub struct EvasRustLinearOp {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustZiNdOp {
+    pub target_node_id: usize,
+    pub input_node_id: usize,
+    pub num_start: usize,
+    pub num_count: usize,
+    pub den_start: usize,
+    pub den_count: usize,
+    pub interval: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvasRustTransitionTargetOp {
     pub target_id: usize,
     pub term_start: usize,

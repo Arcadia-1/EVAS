@@ -8,6 +8,7 @@ of silently falling back when strict EVAS2 is requested.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
@@ -197,6 +198,19 @@ class RustSimLinearOp:
 
 
 @dataclass(frozen=True)
+class RustSimZiNdOp:
+    """A continuous sampled-data zi_nd voltage write executed by Rust."""
+
+    target_node_id: int
+    input_node_id: int
+    num_start: int
+    num_count: int
+    den_start: int
+    den_count: int
+    interval: float
+
+
+@dataclass(frozen=True)
 class RustSimTransition:
     """A transition() state slot and its output target."""
 
@@ -271,6 +285,7 @@ class RustSimProgram:
     records: Tuple[RustSimRecord, ...]
     side_effects: Tuple[RustSimSideEffect, ...] = ()
     continuous_linear_ops: Tuple[RustSimLinearOp, ...] = ()
+    zi_nd_ops: Tuple[RustSimZiNdOp, ...] = ()
     body_stmt_ops: Tuple[BodyStmtOp, ...] = ()
     body_expr_ops: Tuple[BodyExprOp, ...] = ()
     source_data: Tuple[float, ...] = ()
@@ -1531,6 +1546,84 @@ def _convert_continuous_linear_ops(
     return tuple(converted), tuple(reasons)
 
 
+def _convert_sampled_zi_nd_ops(
+    *,
+    model: Any,
+    model_index: int,
+    node_ids: dict[str, int],
+    nodes: list[RustSimNode],
+    source_data: list[float],
+) -> tuple[Tuple[RustSimZiNdOp, ...], Tuple[str, ...]]:
+    model_cls = getattr(model, "__class__", type(model))
+    raw_ops = tuple(getattr(model_cls, "_evaluate_ir_sampled_zi_nd_ops", ()) or ())
+    if not raw_ops:
+        return (), ()
+
+    converted: list[RustSimZiNdOp] = []
+    reasons: list[str] = []
+    prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
+    for op_index, raw_op in enumerate(raw_ops):
+        if len(raw_op) != 5:
+            reasons.append(f"{prefix}:zi_nd:{op_index}:malformed_ir")
+            continue
+        target_name, input_name, raw_num, raw_den, raw_interval = raw_op
+        target_id = _add_node(_external_node(model, str(target_name)), node_ids, nodes)
+        input_id = _add_node(_external_node(model, str(input_name)), node_ids, nodes)
+
+        num_values: list[float] = []
+        for coeff_index, value in enumerate(tuple(raw_num)):
+            coeff, reason = _scalar(model, value)
+            if reason is not None or coeff is None:
+                reasons.append(
+                    f"{prefix}:zi_nd:{op_index}:num:{coeff_index}:{reason}"
+                )
+                continue
+            num_values.append(float(coeff))
+        den_values: list[float] = []
+        for coeff_index, value in enumerate(tuple(raw_den)):
+            coeff, reason = _scalar(model, value)
+            if reason is not None or coeff is None:
+                reasons.append(
+                    f"{prefix}:zi_nd:{op_index}:den:{coeff_index}:{reason}"
+                )
+                continue
+            den_values.append(float(coeff))
+        interval, reason = _scalar(model, raw_interval)
+        if reason is not None or interval is None:
+            reasons.append(f"{prefix}:zi_nd:{op_index}:interval:{reason}")
+            continue
+        if not num_values:
+            reasons.append(f"{prefix}:zi_nd:{op_index}:empty_num")
+            continue
+        if not den_values:
+            reasons.append(f"{prefix}:zi_nd:{op_index}:empty_den")
+            continue
+        if float(den_values[0]) == 0.0:
+            reasons.append(f"{prefix}:zi_nd:{op_index}:zero_den0")
+            continue
+        if not math.isfinite(float(interval)):
+            reasons.append(f"{prefix}:zi_nd:{op_index}:nonfinite_interval")
+            continue
+
+        num_start = len(source_data)
+        source_data.extend(num_values)
+        den_start = len(source_data)
+        source_data.extend(den_values)
+        converted.append(
+            RustSimZiNdOp(
+                target_node_id=target_id,
+                input_node_id=input_id,
+                num_start=num_start,
+                num_count=len(num_values),
+                den_start=den_start,
+                den_count=len(den_values),
+                interval=float(interval),
+            )
+        )
+
+    return tuple(converted), tuple(reasons)
+
+
 def _convert_event_transition_ops(
     *,
     model: Any,
@@ -2068,6 +2161,7 @@ def build_source_record_rust_program(
     param_ids: dict[tuple[int, str], int] = {}
     rust_sources: list[RustSimSource] = []
     continuous_linear_ops: list[RustSimLinearOp] = []
+    zi_nd_ops: list[RustSimZiNdOp] = []
     rust_events: list[RustSimEvent] = []
     rust_transitions: list[RustSimTransition] = []
     rust_slews: list[RustSimSlew] = []
@@ -2098,15 +2192,26 @@ def build_source_record_rust_program(
 
     for model_index, model in enumerate(model_list):
         model_cls = getattr(model, "__class__", type(model))
-        has_rustsim_program_ir = bool(
+        sampled_zi_nd_raw_ops = tuple(
+            getattr(model_cls, "_evaluate_ir_sampled_zi_nd_ops", ()) or ()
+        )
+        has_continuous_body_candidate = (
+            _model_has_rustsim_continuous_body_candidate(model_cls)
+            and not sampled_zi_nd_raw_ops
+        )
+        has_event_transition_ir = bool(
             tuple(getattr(model_cls, "_event_static_linear_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_event_timer_static_linear_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_transition_target_ir_ops", ()) or ())
             or tuple(getattr(model_cls, "_whole_segment_candidates", ()) or ())
             or _model_has_rustsim_event_transition_candidate(model_cls)
-            or _model_has_rustsim_continuous_body_candidate(model_cls)
+            or has_continuous_body_candidate
         )
-        if has_rustsim_program_ir:
+        has_rustsim_program_ir = bool(
+            has_event_transition_ir
+            or sampled_zi_nd_raw_ops
+        )
+        if has_event_transition_ir:
             event_reasons = _convert_event_transition_ops(
                 model=model,
                 model_index=model_index,
@@ -2127,11 +2232,26 @@ def build_source_record_rust_program(
             if event_reasons:
                 reasons.extend(event_reasons)
                 continue
-        else:
+            if sampled_zi_nd_raw_ops:
+                reasons.append(
+                    f"model:{model_index}:{model_cls.__name__}:zi_nd_event_transition_mix_not_lowered"
+                )
+                continue
+        elif not has_rustsim_program_ir:
             dynamic_reasons = _reject_model_dynamic_semantics(model, model_index)
             if dynamic_reasons:
                 reasons.extend(dynamic_reasons)
                 continue
+        model_zi_nd_ops, model_zi_reasons = _convert_sampled_zi_nd_ops(
+            model=model,
+            model_index=model_index,
+            node_ids=node_ids,
+            nodes=nodes,
+            source_data=source_data,
+        )
+        if model_zi_reasons:
+            reasons.extend(model_zi_reasons)
+        zi_nd_ops.extend(model_zi_nd_ops)
         model_ops, model_reasons = _convert_continuous_linear_ops(
             model=model,
             model_index=model_index,
@@ -2174,6 +2294,7 @@ def build_source_record_rust_program(
             records=tuple(records),
             side_effects=tuple(side_effects),
             continuous_linear_ops=tuple(continuous_linear_ops),
+            zi_nd_ops=tuple(zi_nd_ops),
             body_stmt_ops=tuple(body_stmt_ops),
             body_expr_ops=tuple(body_expr_ops),
             source_data=tuple(source_data),

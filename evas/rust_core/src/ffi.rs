@@ -127,6 +127,8 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
     source_count: usize,
     source_data: *const f64,
     source_data_len: usize,
+    zi_nd_ops: *const EvasRustZiNdOp,
+    zi_nd_count: usize,
     linear_ops: *const EvasRustLinearOp,
     linear_count: usize,
     linear_terms: *const EvasRustLinearTerm,
@@ -157,42 +159,45 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
     if source_data_len > 0 && source_data.is_null() {
         return -902;
     }
-    if linear_count > 0 && linear_ops.is_null() {
+    if zi_nd_count > 0 && zi_nd_ops.is_null() {
         return -903;
     }
-    if linear_term_count > 0 && linear_terms.is_null() {
+    if linear_count > 0 && linear_ops.is_null() {
         return -904;
     }
-    if linear_condition_count > 0 && linear_conditions.is_null() {
+    if linear_term_count > 0 && linear_terms.is_null() {
         return -905;
     }
-    if node_count > 0 && node_values.is_null() {
+    if linear_condition_count > 0 && linear_conditions.is_null() {
         return -906;
     }
-    if state_count > 0 && state_values.is_null() {
+    if node_count > 0 && node_values.is_null() {
         return -907;
     }
-    if record_count > 0 && record_node_ids.is_null() {
+    if state_count > 0 && state_values.is_null() {
         return -908;
     }
-    if capacity > 0 && time_values.is_null() {
+    if record_count > 0 && record_node_ids.is_null() {
         return -909;
     }
-    if capacity > 0 && step_values.is_null() {
+    if capacity > 0 && time_values.is_null() {
         return -910;
+    }
+    if capacity > 0 && step_values.is_null() {
+        return -911;
     }
     let signal_capacity = match capacity.checked_mul(record_count) {
         Some(value) => value,
-        None => return -911,
+        None => return -912,
     };
     if signal_capacity > 0 && signal_values.is_null() {
-        return -912;
-    }
-    if out_count.is_null() {
         return -913;
     }
-    if out_source_breakpoints.is_null() {
+    if out_count.is_null() {
         return -914;
+    }
+    if out_source_breakpoints.is_null() {
+        return -915;
     }
 
     let source_slice = if source_count == 0 {
@@ -204,6 +209,11 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
         &[]
     } else {
         std::slice::from_raw_parts(source_data, source_data_len)
+    };
+    let zi_nd_op_slice = if zi_nd_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(zi_nd_ops, zi_nd_count)
     };
     let linear_op_slice = if linear_count == 0 {
         &[]
@@ -254,6 +264,7 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
     match rust_sim_source_linear_record_trace(
         source_slice,
         source_data_slice,
+        zi_nd_op_slice,
         linear_op_slice,
         linear_term_slice,
         linear_condition_slice,
