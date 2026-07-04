@@ -56,6 +56,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_FLOOR,
     BODY_EXPR_GE,
     BODY_EXPR_GT,
+    BODY_EXPR_IDIV,
     BODY_EXPR_LAND,
     BODY_EXPR_LE,
     BODY_EXPR_LN,
@@ -822,6 +823,8 @@ def _append_body_expr_ops(
         op_kind = _BODY_BINARY_OPS.get(expr_ir.op)
         if op_kind is None:
             return False
+        if expr_ir.op == "/" and _expr_ir_is_integer(expr_ir, bindings):
+            op_kind = BODY_EXPR_IDIV
         if not _append_body_expr_ops(expr_ir.left, bindings, node_slots, ops):
             return False
         if not _append_body_expr_ops(expr_ir.right, bindings, node_slots, ops):
@@ -864,6 +867,65 @@ def _append_body_expr_ops(
         return True
 
     return False
+
+
+def _expr_ir_is_integer(expr_ir: ExprIR, bindings: BindingTableIR) -> bool:
+    integer_like, has_typed_integer = _expr_ir_integer_kind(expr_ir, bindings)
+    return integer_like and has_typed_integer
+
+
+def _expr_ir_integer_kind(expr_ir: ExprIR, bindings: BindingTableIR) -> tuple[bool, bool]:
+    if isinstance(expr_ir, LiteralIR):
+        raw = expr_ir.raw
+        if raw:
+            token = raw.lstrip("+-")
+            is_plain_integer = (
+                token.isdigit()
+                and "." not in token
+                and "e" not in token.lower()
+            )
+            return is_plain_integer, False
+        if isinstance(expr_ir.value, (int, float)):
+            try:
+                return float(expr_ir.value).is_integer(), False
+            except (TypeError, ValueError):
+                return False, False
+        return False, False
+
+    if isinstance(expr_ir, IdentifierIR):
+        binding = bindings.resolve(expr_ir.name)
+        if binding is None:
+            return False, False
+        if binding.kind in {SYMBOL_PARAMETER, SYMBOL_STATE_SCALAR} and binding.integer:
+            return True, True
+        return False, False
+
+    if isinstance(expr_ir, ArrayAccessIR):
+        binding = resolve_static_array_element_binding(expr_ir, bindings)
+        if binding is None:
+            return False, False
+        return binding.integer, binding.integer
+
+    if isinstance(expr_ir, BinaryExprIR):
+        if expr_ir.op in {"%", "<<", ">>", "&", "|", "^"}:
+            return True, True
+        if expr_ir.op in {"+", "-", "*", "/"}:
+            left_like, left_typed = _expr_ir_integer_kind(expr_ir.left, bindings)
+            right_like, right_typed = _expr_ir_integer_kind(expr_ir.right, bindings)
+            return left_like and right_like, left_typed or right_typed
+        return False, False
+
+    if isinstance(expr_ir, UnaryExprIR):
+        if expr_ir.op in {"&", "|", "^", "~"}:
+            return True, True
+        return _expr_ir_integer_kind(expr_ir.operand, bindings)
+
+    if isinstance(expr_ir, TernaryExprIR):
+        true_like, true_typed = _expr_ir_integer_kind(expr_ir.true_expr, bindings)
+        false_like, false_typed = _expr_ir_integer_kind(expr_ir.false_expr, bindings)
+        return true_like and false_like, true_typed or false_typed
+
+    return False, False
 
 
 def _state_array_slot_name(name: str, idx: int) -> str:

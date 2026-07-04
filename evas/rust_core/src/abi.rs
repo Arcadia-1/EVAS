@@ -84,6 +84,7 @@ pub(crate) const BODY_EXPR_SUB: u8 = 21;
 pub(crate) const BODY_EXPR_MUL: u8 = 22;
 pub(crate) const BODY_EXPR_DIV: u8 = 23;
 pub(crate) const BODY_EXPR_MOD: u8 = 24;
+pub(crate) const BODY_EXPR_IDIV: u8 = 25;
 pub(crate) const BODY_EXPR_GT: u8 = 30;
 pub(crate) const BODY_EXPR_LT: u8 = 31;
 pub(crate) const BODY_EXPR_GE: u8 = 32;
