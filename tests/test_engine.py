@@ -9747,6 +9747,78 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([1.0, 1.0])
 
+    def test_spectre_style_function_argument_type_declarations_use_argument_values(self):
+        src = """\
+`include "disciplines.vams"
+module fn_clamp(out);
+    output voltage out;
+    parameter real x = 1.7;
+
+    function real clamp;
+        input value;
+        input lo, hi;
+        real value;
+        real lo, hi;
+        real tmp;
+        begin
+            tmp = value;
+            if (tmp < lo) clamp = lo;
+            else if (tmp > hi) clamp = hi;
+            else clamp = tmp;
+        end
+    endfunction
+
+    analog begin
+        V(out) <+ clamp(x, 0.0, 1.0);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([1.0, 1.0])
+
+    def test_analog_function_with_spectre_style_argument_types_clamps_contribution(self):
+        src = """\
+`include "disciplines.vams"
+module fn_clamp(out);
+    output voltage out;
+    parameter real x = 1.7;
+
+    analog function real clamp;
+        input value;
+        input lo, hi;
+        real value;
+        real lo, hi;
+        real tmp;
+        begin
+            tmp = value;
+            if (tmp < lo) clamp = lo;
+            else if (tmp > hi) clamp = hi;
+            else clamp = tmp;
+        end
+    endfunction
+
+    analog begin
+        V(out) <+ clamp(x, 0.0, 1.0);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([1.0, 1.0])
+
     def test_recursive_user_defined_function_evaluates_with_depth_guard(self):
         src = """\
 `include "disciplines.vams"

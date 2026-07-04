@@ -635,6 +635,14 @@ class Parser:
         if tok.type == TokenType.TASK:
             module.tasks.append(self._parse_task_decl())
             return
+        if tok.type == TokenType.ANALOG and self.peek_n(1).type == TokenType.FUNCTION:
+            self.advance()
+            module.functions.append(self._parse_function_decl())
+            return
+        if tok.type == TokenType.ANALOG and self.peek_n(1).type == TokenType.TASK:
+            self.advance()
+            module.tasks.append(self._parse_task_decl())
+            return
 
         # Variable declarations: real, integer, genvar, string
         if (
@@ -1151,6 +1159,28 @@ class Parser:
         self.match(TokenType.SEMI)
         return args
 
+    def _apply_subprogram_type_declarations(
+        self,
+        args: List[SubprogramArg],
+        decls: List[VariableDecl],
+    ) -> List[VariableDecl]:
+        """Treat Spectre-style ``input x; real x;`` as argument typing.
+
+        Cadence/Spectre accepts old-style subprogram arguments where the
+        direction declaration names the argument and a following declaration
+        supplies the type. Those type declarations must not create local
+        variables that shadow the argument.
+        """
+        arg_by_name = {arg.name: arg for arg in args}
+        variables: List[VariableDecl] = []
+        for decl in decls:
+            arg = arg_by_name.get(decl.name)
+            if arg is not None and not decl.is_array and decl.init_values is None:
+                arg.var_type = decl.var_type
+                continue
+            variables.append(decl)
+        return variables
+
     def _parse_ansi_subprogram_arg_list(self) -> List[SubprogramArg]:
         args: List[SubprogramArg] = []
         while not self.at(TokenType.RPAREN, TokenType.EOF):
@@ -1192,7 +1222,8 @@ class Parser:
                 self.at(TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
                 or (self.at(TokenType.IDENT) and self.peek().value == "string")
             ):
-                variables.extend(self._parse_variable_decl_list())
+                decls = self._parse_variable_decl_list()
+                variables.extend(self._apply_subprogram_type_declarations(args, decls))
             elif self.match(TokenType.SEMI):
                 continue
             else:
@@ -1226,7 +1257,8 @@ class Parser:
                 self.at(TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
                 or (self.at(TokenType.IDENT) and self.peek().value == "string")
             ):
-                variables.extend(self._parse_variable_decl_list())
+                decls = self._parse_variable_decl_list()
+                variables.extend(self._apply_subprogram_type_declarations(args, decls))
             elif self.match(TokenType.SEMI):
                 continue
             else:

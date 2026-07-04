@@ -653,6 +653,58 @@ class TestParserSubprograms:
         assert all(isinstance(arg, SubprogramArg) for arg in fn.args)
         assert [var.name for var in fn.variables] == ["tmp"]
 
+    def test_spectre_style_function_argument_type_declarations_do_not_shadow_args(self):
+        src = """
+        module m();
+        function real clamp;
+            input x;
+            input lo, hi;
+            real x;
+            real lo, hi;
+            real tmp;
+            begin
+                tmp = x;
+                if (tmp < lo) clamp = lo;
+                else if (tmp > hi) clamp = hi;
+                else clamp = tmp;
+            end
+        endfunction
+        analog begin
+            y = clamp(1.2, 0.0, 1.0);
+        end
+        endmodule
+        """
+        m = _parse(src)
+
+        fn = m.functions[0]
+        assert [arg.name for arg in fn.args] == ["x", "lo", "hi"]
+        assert [arg.var_type for arg in fn.args] == [ParamType.REAL, ParamType.REAL, ParamType.REAL]
+        assert [var.name for var in fn.variables] == ["tmp"]
+
+    def test_analog_function_declaration_parses_like_user_function(self):
+        src = """
+        module m();
+        analog function real clamp;
+            input x;
+            real x;
+            begin
+                if (x < 0.0) clamp = 0.0;
+                else clamp = x;
+            end
+        endfunction
+        analog begin
+            y = clamp(1.2);
+        end
+        endmodule
+        """
+        m = _parse(src)
+
+        assert len(m.functions) == 1
+        fn = m.functions[0]
+        assert fn.name == "clamp"
+        assert [arg.name for arg in fn.args] == ["x"]
+        assert fn.variables == []
+
     def test_ansi_task_declaration_and_call(self):
         src = """
         module m();
