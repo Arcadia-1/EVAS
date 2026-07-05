@@ -81,6 +81,27 @@ pub struct EvasRustBranchIdtOp {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustBranchDdtOp {
+    pub current_node_id: usize,
+    pub pos_node_id: usize,
+    pub neg_node_id: usize,
+    pub state_id: usize,
+    pub gain: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustIndirectBranchOdeOp {
+    pub target_node_id: usize,
+    pub reference_node_id: usize,
+    pub input_node_id: usize,
+    pub state_id: usize,
+    pub tau: f64,
+    pub ic: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvasRustTransitionTargetOp {
     pub target_id: usize,
     pub term_start: usize,
@@ -142,6 +163,7 @@ pub(crate) const BODY_EXPR_RANDOM_INT32: u8 = 81;
 pub(crate) const BODY_EXPR_RDIST_EXPONENTIAL: u8 = 82;
 pub(crate) const BODY_EXPR_RDIST_POISSON: u8 = 83;
 pub(crate) const BODY_EXPR_RDIST_ERLANG: u8 = 84;
+pub(crate) const BODY_EXPR_RDIST_UNIFORM: u8 = 85;
 pub(crate) const BODY_STMT_FILE_SCANF: u8 = 239;
 pub(crate) const BODY_STMT_FILE_GETS: u8 = 240;
 pub(crate) const BODY_STMT_FILE_TELL: u8 = 241;
@@ -158,6 +180,7 @@ pub(crate) const BODY_STMT_ELSE: u8 = 251;
 pub(crate) const BODY_STMT_ENDIF: u8 = 252;
 pub(crate) const BODY_STMT_BOUND_STEP: u8 = 253;
 pub(crate) const BODY_STMT_STROBE: u8 = 254;
+pub(crate) const BODY_STMT_STRING_WRITE: u8 = 255;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]

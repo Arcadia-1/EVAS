@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import sys
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, MutableSequence, Optional, Tuple, Union
+from typing import Any, Iterable, Mapping, MutableSequence, Optional, Tuple, Union
 
 
 class RustBackendError(RuntimeError):
@@ -82,6 +83,27 @@ class RustBranchIdtOp(ctypes.Structure):
         ("input_node_id", ctypes.c_size_t),
         ("state_id", ctypes.c_size_t),
         ("gain", ctypes.c_double),
+        ("ic", ctypes.c_double),
+    ]
+
+
+class RustBranchDdtOp(ctypes.Structure):
+    _fields_ = [
+        ("current_node_id", ctypes.c_size_t),
+        ("pos_node_id", ctypes.c_size_t),
+        ("neg_node_id", ctypes.c_size_t),
+        ("state_id", ctypes.c_size_t),
+        ("gain", ctypes.c_double),
+    ]
+
+
+class RustIndirectBranchOdeOp(ctypes.Structure):
+    _fields_ = [
+        ("target_node_id", ctypes.c_size_t),
+        ("reference_node_id", ctypes.c_size_t),
+        ("input_node_id", ctypes.c_size_t),
+        ("state_id", ctypes.c_size_t),
+        ("tau", ctypes.c_double),
         ("ic", ctypes.c_double),
     ]
 
@@ -254,6 +276,7 @@ BODY_EXPR_RANDOM_INT32 = 81
 BODY_EXPR_RDIST_EXPONENTIAL = 82
 BODY_EXPR_RDIST_POISSON = 83
 BODY_EXPR_RDIST_ERLANG = 84
+BODY_EXPR_RDIST_UNIFORM = 85
 
 BODY_TARGET_NODE = 0
 BODY_TARGET_STATE = 1
@@ -273,6 +296,7 @@ BODY_STMT_ELSE = 251
 BODY_STMT_ENDIF = 252
 BODY_STMT_BOUND_STEP = 253
 BODY_STMT_STROBE = 254
+BODY_STMT_STRING_WRITE = 255
 
 RUST_SIM_SOURCE_DC = 0
 RUST_SIM_SOURCE_PULSE = 1
@@ -498,6 +522,34 @@ class RustSimSourceRecordProgram:
             )
         branch_idt_array_type = RustBranchIdtOp * len(branch_idt_specs)
         self._c_branch_idt_ops = branch_idt_array_type(*branch_idt_specs)
+        branch_ddt_specs = []
+        for op in tuple(getattr(program, "branch_ddt_ops", ()) or ()):
+            branch_ddt_specs.append(
+                RustBranchDdtOp(
+                    int(getattr(op, "current_node_id", 0)),
+                    int(getattr(op, "pos_node_id", 0)),
+                    int(getattr(op, "neg_node_id", 0)),
+                    int(getattr(op, "state_id", 0)),
+                    float(getattr(op, "gain", 1.0)),
+                )
+            )
+        branch_ddt_array_type = RustBranchDdtOp * len(branch_ddt_specs)
+        self._c_branch_ddt_ops = branch_ddt_array_type(*branch_ddt_specs)
+        indirect_ode_specs = []
+        for op in tuple(getattr(program, "indirect_branch_ode_ops", ()) or ()):
+            reference_node_id = getattr(op, "reference_node_id", None)
+            indirect_ode_specs.append(
+                RustIndirectBranchOdeOp(
+                    int(getattr(op, "target_node_id", 0)),
+                    _usize_max() if reference_node_id is None else int(reference_node_id),
+                    int(getattr(op, "input_node_id", 0)),
+                    int(getattr(op, "state_id", 0)),
+                    float(getattr(op, "tau", 0.0)),
+                    float(getattr(op, "ic", 0.0)),
+                )
+            )
+        indirect_ode_array_type = RustIndirectBranchOdeOp * len(indirect_ode_specs)
+        self._c_indirect_branch_ode_ops = indirect_ode_array_type(*indirect_ode_specs)
         linear_ops = []
         for op in tuple(getattr(program, "continuous_linear_ops", ()) or ()):
             condition = getattr(op, "condition", None)
@@ -634,6 +686,7 @@ class RustSimSourceRecordProgram:
         events: Iterable[tuple[int, int, float, tuple[float, ...]]],
     ) -> None:
         handles: dict[int, tuple[object, ...]] = {}
+        string_state: dict[tuple[int, str], str] = {}
         try:
             for kind, spec_id, _time, values in events:
                 if spec_id < 0 or spec_id >= len(self.side_effects):
@@ -661,20 +714,18 @@ class RustSimSourceRecordProgram:
                         continue
                     handle_id = int(round(float(values[0])))
                     fmt = str(getattr(spec, "fmt", ""))
-                    args = tuple(float(value) for value in values[1:])
-                    try:
-                        msg = (fmt % args) if args else fmt
-                    except Exception:
-                        coerced = tuple(
-                            int(round(value))
-                            if abs(value - round(value)) <= 1.0e-9
-                            else value
-                            for value in args
-                        )
-                        msg = (fmt % coerced) if coerced else fmt
+                    append_newline = bool(getattr(spec, "append_newline", True))
+                    args = _side_effect_format_args(
+                        spec,
+                        values[1:],
+                        string_state,
+                    )
+                    msg = _format_side_effect_message(fmt, args)
                     targets = handles.get(handle_id) or ()
                     for target in targets:
-                        target.write(msg + "\n")
+                        target.write(msg)
+                        if append_newline and not msg.endswith("\n"):
+                            target.write("\n")
                     continue
                 if action == "fclose" and kind == BODY_STMT_FILE_CLOSE:
                     if not values:
@@ -684,21 +735,22 @@ class RustSimSourceRecordProgram:
                     for target in targets:
                         target.close()
                     continue
+                if action == "swrite" and kind == BODY_STMT_STRING_WRITE:
+                    target = str(getattr(spec, "target", ""))
+                    if not target:
+                        continue
+                    fmt = str(getattr(spec, "fmt", ""))
+                    args = _side_effect_format_args(spec, values, string_state)
+                    msg = _format_side_effect_message(fmt, args)
+                    owner = getattr(spec, "owner", None)
+                    _set_side_effect_string_state(string_state, owner, target, msg)
+                    continue
                 if action == "strobe" and kind == BODY_STMT_STROBE:
                     if abs(float(_time)) <= 1.0e-30:
                         continue
                     fmt = str(getattr(spec, "fmt", ""))
-                    args = tuple(float(value) for value in values)
-                    try:
-                        msg = (fmt % args) if args else fmt
-                    except Exception:
-                        coerced = tuple(
-                            int(round(value))
-                            if abs(value - round(value)) <= 1.0e-9
-                            else value
-                            for value in args
-                        )
-                        msg = (fmt % coerced) if coerced else fmt
+                    args = _side_effect_format_args(spec, values, string_state)
+                    msg = _format_side_effect_message(fmt, args)
                     owner = getattr(spec, "owner", None)
                     strobe_log = getattr(owner, "_strobe_log", None)
                     if strobe_log is not None:
@@ -749,6 +801,14 @@ class RustSimSourceRecordProgram:
         return len(self._c_branch_idt_ops)
 
     @property
+    def branch_ddt_count(self) -> int:
+        return len(self._c_branch_ddt_ops)
+
+    @property
+    def indirect_branch_ode_count(self) -> int:
+        return len(self._c_indirect_branch_ode_ops)
+
+    @property
     def event_count(self) -> int:
         return len(self._c_events)
 
@@ -787,6 +847,14 @@ class RustSimSourceRecordProgram:
     @property
     def branch_idt_ptr(self):
         return self._c_branch_idt_ops
+
+    @property
+    def branch_ddt_ptr(self):
+        return self._c_branch_ddt_ops
+
+    @property
+    def indirect_branch_ode_ptr(self):
+        return self._c_indirect_branch_ode_ops
 
     @property
     def param_ptr(self):
@@ -1985,6 +2053,10 @@ class RustBackend:
                 ctypes.c_size_t,
                 ctypes.POINTER(RustBranchIdtOp),
                 ctypes.c_size_t,
+                ctypes.POINTER(RustBranchDdtOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustIndirectBranchOdeOp),
+                ctypes.c_size_t,
                 ctypes.POINTER(RustLinearOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustLinearTerm),
@@ -2038,6 +2110,8 @@ class RustBackend:
                 ctypes.POINTER(RustSimTransitionSpec),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustSimSlewSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustBranchDdtOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_uint8),
                 ctypes.POINTER(ctypes.c_size_t),
@@ -2870,6 +2944,8 @@ class RustBackend:
             or program.state_count > 0
             or program.zi_nd_count > 0
             or program.branch_idt_count > 0
+            or program.branch_ddt_count > 0
+            or program.indirect_branch_ode_count > 0
         )
         if use_event_transition_abi and program.zi_nd_count > 0:
             raise RustBackendError(
@@ -2962,6 +3038,8 @@ class RustBackend:
                 int(program.transition_count),
                 program.slew_ptr,
                 int(program.slew_count),
+                program.branch_ddt_ptr,
+                int(program.branch_ddt_count),
                 side_kinds,
                 side_specs,
                 side_arg_starts,
@@ -3015,6 +3093,10 @@ class RustBackend:
                 int(program.zi_nd_count),
                 program.branch_idt_ptr,
                 int(program.branch_idt_count),
+                program.branch_ddt_ptr,
+                int(program.branch_ddt_count),
+                program.indirect_branch_ode_ptr,
+                int(program.indirect_branch_ode_count),
                 batch.op_ptr,
                 len(batch),
                 batch.term_ptr,
@@ -4502,6 +4584,95 @@ class RustBackend:
                 (ctypes.c_size_t * value_count)(*(int(value) for value in values)),
                 True,
             )
+
+
+def _side_effect_format_args(
+    spec: object,
+    numeric_values: Iterable[float],
+    string_state: Mapping[tuple[int, str], str],
+) -> tuple[object, ...]:
+    arg_specs = tuple(getattr(spec, "format_args", ()) or ())
+    values = tuple(float(value) for value in numeric_values)
+    if not arg_specs:
+        return values
+
+    numeric_iter = iter(values)
+    args: list[object] = []
+    for arg_spec in arg_specs:
+        if arg_spec == "numeric":
+            try:
+                args.append(float(next(numeric_iter)))
+            except StopIteration:
+                args.append(0.0)
+            continue
+        args.append(_side_effect_string_value(spec, arg_spec, string_state))
+    return tuple(args)
+
+
+def _side_effect_string_value(
+    spec: object,
+    arg_spec: object,
+    string_state: Mapping[tuple[int, str], str],
+) -> str:
+    kind = str(getattr(arg_spec, "kind", ""))
+    value = str(getattr(arg_spec, "value", ""))
+    if kind == "literal":
+        return value
+    if kind != "state":
+        return ""
+
+    owner = getattr(spec, "owner", None)
+    key = _string_state_key(owner, value)
+    if key in string_state:
+        return string_state[key]
+
+    state_value = (getattr(owner, "state", {}) or {}).get(value)
+    if isinstance(state_value, str):
+        return state_value
+    param_value = (getattr(owner, "params", {}) or {}).get(value)
+    if isinstance(param_value, str):
+        return param_value
+    return ""
+
+
+def _set_side_effect_string_state(
+    string_state: dict[tuple[int, str], str],
+    owner: object,
+    target: str,
+    msg: str,
+) -> None:
+    target = str(target)
+    value = str(msg)
+    string_state[_string_state_key(owner, target)] = value
+    state = getattr(owner, "state", None)
+    if isinstance(state, dict):
+        state[target] = value
+
+
+def _string_state_key(owner: object, name: str) -> tuple[int, str]:
+    return (id(owner), str(name))
+
+
+def _format_side_effect_message(fmt: str, args: tuple[object, ...]) -> str:
+    fmt = str(fmt)
+    if not args:
+        return fmt
+    try:
+        return fmt % args
+    except (TypeError, ValueError):
+        coerced = tuple(_coerce_format_arg(arg) for arg in args)
+        try:
+            return fmt % coerced
+        except (TypeError, ValueError):
+            return fmt
+
+
+def _coerce_format_arg(value: Any) -> Any:
+    if isinstance(value, float) and math.isfinite(value):
+        rounded = round(value)
+        if abs(value - rounded) <= 1.0e-9:
+            return int(rounded)
+    return value
 
 
 def _library_filename() -> str:

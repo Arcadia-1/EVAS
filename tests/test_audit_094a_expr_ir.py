@@ -83,6 +83,7 @@ def test_default_context_rejects_unknown_function():
 
 def test_default_context_allows_pure_math_only():
     assert lower_expr(FunctionCall("sqrt", [NumberLiteral(4.0)])) is not None
+    assert lower_expr(FunctionCall("limexp", [NumberLiteral(0.0)])) is not None
     assert lower_expr(FunctionCall("transition", [NumberLiteral(1.0)])) is None
 
 

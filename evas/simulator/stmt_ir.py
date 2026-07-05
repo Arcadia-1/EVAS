@@ -21,6 +21,7 @@ from evas.compiler.ast_nodes import (
     Identifier,
     IfStatement,
     SystemTask,
+    TaskCall,
     WhileStatement,
 )
 from evas.simulator.expr_ir import (
@@ -62,6 +63,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
     BODY_STMT_LAST_CROSSING,
+    BODY_STMT_STRING_WRITE,
     BODY_STMT_STROBE,
     BODY_STMT_WHILE,
     BODY_TARGET_NODE,
@@ -85,16 +87,27 @@ class StatementLoweringContext:
     expr_context: LoweringContext = LoweringContext.veriloga_body()
     allowed_system_tasks: frozenset[str] = frozenset(
         {
+            "$analog_node_alias",
             "$bound_step",
+            "$cds_set_rf_source_info",
+            "$cds_violation",
+            "$discontinuity",
             "$fclose",
             "$fdisplay",
             "$fgets",
             "$fscanf",
             "$fseek",
             "$fwrite",
+            "$fstrobe",
             "$rewind",
+            "$sformat",
+            "$swrite",
             "$strobe",
             "$display",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
         }
     )
 
@@ -312,10 +325,88 @@ def lower_stmt(
             args.append(arg_ir)
         return SystemTaskIR(str(stmt.name), tuple(args))
 
+    if isinstance(stmt, TaskCall):
+        return _lower_task_call(stmt, ctx)
+
     if stmt is None:
         return BlockIR(())
 
     return None
+
+
+def _lower_task_call(
+    stmt: TaskCall,
+    ctx: StatementLoweringContext,
+) -> Optional[StmtIR]:
+    if stmt.name == "$analog_node_alias" and len(stmt.args) >= 2:
+        args = []
+        for arg in stmt.args[:2]:
+            arg_ir = lower_expr(arg, ctx.expr_context)
+            if arg_ir is None:
+                return None
+            args.append(arg_ir)
+        return SystemTaskIR(str(stmt.name), tuple(args))
+    if stmt.name != "$indirect_branch" or len(stmt.args) < 3:
+        return None
+    target = lower_expr(stmt.args[0], ctx.expr_context)
+    lhs = lower_expr(stmt.args[1], ctx.expr_context)
+    rhs = lower_expr(stmt.args[2], ctx.expr_context)
+    if not isinstance(target, BranchAccessIR) or target.access_type != "V":
+        return None
+    if lhs is None or rhs is None:
+        return None
+    value = _indirect_branch_voltage_solution(target, lhs, rhs)
+    if value is None:
+        return None
+    return ContributionIR(target, value)
+
+
+def _same_indirect_voltage_target(expr: ExprIR, target: BranchAccessIR) -> bool:
+    return (
+        isinstance(expr, BranchAccessIR)
+        and expr.access_type == "V"
+        and expr.node1 == target.node1
+        and expr.node2 == target.node2
+        and expr.node1_index is None
+        and expr.node2_index is None
+        and expr.node1_index2 is None
+        and expr.node2_index2 is None
+        and target.node1_index is None
+        and target.node2_index is None
+        and target.node1_index2 is None
+        and target.node2_index2 is None
+    )
+
+
+def _solve_simple_indirect_form(
+    target: BranchAccessIR,
+    lhs: ExprIR,
+    rhs: ExprIR,
+) -> Optional[ExprIR]:
+    if _same_indirect_voltage_target(lhs, target):
+        return rhs
+    if isinstance(lhs, BinaryExprIR):
+        left_is_target = _same_indirect_voltage_target(lhs.left, target)
+        right_is_target = _same_indirect_voltage_target(lhs.right, target)
+        if lhs.op == "-" and left_is_target:
+            return BinaryExprIR("+", rhs, lhs.right)
+        if lhs.op == "-" and right_is_target:
+            return BinaryExprIR("-", lhs.left, rhs)
+        if lhs.op == "+" and (left_is_target or right_is_target):
+            other = lhs.right if left_is_target else lhs.left
+            return BinaryExprIR("-", rhs, other)
+    return None
+
+
+def _indirect_branch_voltage_solution(
+    target: BranchAccessIR,
+    lhs: ExprIR,
+    rhs: ExprIR,
+) -> Optional[ExprIR]:
+    value = _solve_simple_indirect_form(target, lhs, rhs)
+    if value is not None:
+        return value
+    return _solve_simple_indirect_form(target, rhs, lhs)
 
 
 def emit_python_statement(stmt_ir: StmtIR, indent: str = "    ") -> Tuple[str, ...]:
@@ -505,8 +596,8 @@ def _iter_contribution_target_tags(
     branch: BranchAccessIR,
     node_slots: dict[str, int],
 ):
-    if branch.access_type != "V":
-        yield "current_contribution_target"
+    if branch.access_type not in {"V", "I"}:
+        yield "unsupported_contribution_target"
     if branch.node2 is not None:
         yield "differential_output_target"
     node1_name = static_node_ref_name(
@@ -527,9 +618,12 @@ def _iter_contribution_target_tags(
     )
     if branch.node2 is not None and node2_name is None:
         yield "indexed_output_target"
-    if node1_name is not None and node1_name not in node_slots:
+    target_name = node1_name
+    if branch.access_type == "I" and node1_name is not None and node2_name is not None:
+        target_name = _branch_current_node_name(node1_name, node2_name)
+    if target_name is not None and target_name not in node_slots:
         yield "unresolved_output_node"
-    if node2_name is not None and node2_name not in node_slots:
+    if branch.access_type == "V" and node2_name is not None and node2_name not in node_slots:
         yield "unresolved_output_reference_node"
 
 
@@ -948,6 +1042,15 @@ def _append_body_stmt_ops(
             return file_read_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
+            if side_effects is not None and _append_string_format_assignment_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            ):
+                return True
             lowered_array_assignment = _dynamic_array_assignment_to_if_chain(
                 stmt_ir,
                 bindings,
@@ -1125,8 +1228,24 @@ def _append_body_stmt_ops(
         )
 
     if isinstance(stmt_ir, SystemTaskIR):
-        if side_effects is not None and stmt_ir.name in {"$display", "$strobe"}:
+        if side_effects is not None and stmt_ir.name in {
+            "$display",
+            "$strobe",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
+        }:
             return _append_strobe_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
+        if side_effects is not None and stmt_ir.name in {"$sformat", "$swrite"}:
+            return _append_string_write_stmt(
                 stmt_ir,
                 bindings,
                 node_slots,
@@ -1488,23 +1607,37 @@ def _append_file_write_stmt(
     if not stmt_ir.args:
         return False
     fmt = ""
-    numeric_args = tuple(stmt_ir.args)
+    format_args = ()
     if len(stmt_ir.args) > 1:
         resolved_fmt = _resolve_side_effect_string(side_effects, stmt_ir.args[1])
         if resolved_fmt is None:
             return False
         fmt = resolved_fmt
-        numeric_args = (stmt_ir.args[0], *stmt_ir.args[2:])
+    expr_start = len(expr_ops)
+    handle_ops = encode_body_expr_ops(stmt_ir.args[0], bindings, node_slots)
+    if handle_ops is None:
+        return False
+    expr_ops.extend(handle_ops)
+    if len(stmt_ir.args) > 2:
+        format_args = _append_format_arg_exprs(
+            stmt_ir.args[2:],
+            bindings,
+            node_slots,
+            expr_ops,
+            side_effects,
+        )
+        if format_args is None:
+            return False
     add = getattr(side_effects, "add_file_write", None)
     if add is None:
         return False
-    spec_id = int(add(fmt))
-    expr_start = len(expr_ops)
-    for arg in numeric_args:
-        encoded = encode_body_expr_ops(arg, bindings, node_slots)
-        if encoded is None:
-            return False
-        expr_ops.extend(encoded)
+    spec_id = int(
+        add(
+            fmt,
+            append_newline=stmt_ir.name != "$fwrite",
+            format_args=format_args,
+        )
+    )
     stmt_ops.append(
         BodyStmtOp(
             target_kind=BODY_STMT_FILE_WRITE,
@@ -1515,6 +1648,136 @@ def _append_file_write_stmt(
         )
     )
     return True
+
+
+def _append_string_format_assignment_stmt(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if not (
+        isinstance(stmt_ir.target, IdentifierIR)
+        and isinstance(stmt_ir.value, FunctionCallIR)
+        and str(stmt_ir.value.name) == "$sformat"
+    ):
+        return False
+    return _append_string_write_op(
+        target_expr=stmt_ir.target,
+        fmt_expr=stmt_ir.value.args[0] if stmt_ir.value.args else None,
+        arg_exprs=stmt_ir.value.args[1:],
+        bindings=bindings,
+        node_slots=node_slots,
+        stmt_ops=stmt_ops,
+        expr_ops=expr_ops,
+        side_effects=side_effects,
+    )
+
+
+def _append_string_write_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if len(stmt_ir.args) < 2:
+        return False
+    return _append_string_write_op(
+        target_expr=stmt_ir.args[0],
+        fmt_expr=stmt_ir.args[1],
+        arg_exprs=stmt_ir.args[2:],
+        bindings=bindings,
+        node_slots=node_slots,
+        stmt_ops=stmt_ops,
+        expr_ops=expr_ops,
+        side_effects=side_effects,
+    )
+
+
+def _append_string_write_op(
+    *,
+    target_expr: ExprIR,
+    fmt_expr: ExprIR | None,
+    arg_exprs: Tuple[ExprIR, ...],
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if fmt_expr is None:
+        return False
+    target_name = _resolve_side_effect_string_target(side_effects, target_expr)
+    fmt = _resolve_side_effect_string(side_effects, fmt_expr)
+    if target_name is None or fmt is None:
+        return False
+    expr_start = len(expr_ops)
+    format_args = _append_format_arg_exprs(
+        arg_exprs,
+        bindings,
+        node_slots,
+        expr_ops,
+        side_effects,
+    )
+    if format_args is None:
+        return False
+    add = getattr(side_effects, "add_string_write", None)
+    if add is None:
+        return False
+    spec_id = int(add(target_name, fmt, format_args=format_args))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_STRING_WRITE,
+            target_id=spec_id,
+            expr_start=expr_start,
+            expr_count=len(expr_ops) - expr_start,
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_format_arg_exprs(
+    args: Tuple[ExprIR, ...],
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> Optional[Tuple[object, ...]]:
+    format_args = []
+    for arg in args:
+        encoded = encode_body_expr_ops(arg, bindings, node_slots)
+        if encoded is not None:
+            expr_ops.extend(encoded)
+            format_args.append("numeric")
+            continue
+        string_arg = _resolve_side_effect_string_arg(side_effects, arg)
+        if string_arg is None:
+            return None
+        format_args.append(string_arg)
+    return tuple(format_args)
+
+
+def _resolve_side_effect_string_arg(side_effects: object, expr_ir: ExprIR) -> object | None:
+    string_arg = getattr(side_effects, "string_arg", None)
+    if string_arg is None:
+        return None
+    return string_arg(expr_ir)
+
+
+def _resolve_side_effect_string_target(
+    side_effects: object,
+    expr_ir: ExprIR,
+) -> Optional[str]:
+    target_name = getattr(side_effects, "string_target_name", None)
+    if target_name is None:
+        return None
+    value = target_name(expr_ir)
+    return None if value is None else str(value)
 
 
 def _append_file_close_stmt(
@@ -1567,13 +1830,17 @@ def _append_strobe_stmt(
     add = getattr(side_effects, "add_strobe", None)
     if add is None:
         return False
-    spec_id = int(add(fmt))
     expr_start = len(expr_ops)
-    for arg in numeric_args:
-        encoded = encode_body_expr_ops(arg, bindings, node_slots)
-        if encoded is None:
-            return False
-        expr_ops.extend(encoded)
+    format_args = _append_format_arg_exprs(
+        numeric_args,
+        bindings,
+        node_slots,
+        expr_ops,
+        side_effects,
+    )
+    if format_args is None:
+        return False
+    spec_id = int(add(fmt, format_args=format_args))
     stmt_ops.append(
         BodyStmtOp(
             target_kind=BODY_STMT_STROBE,
@@ -1849,13 +2116,28 @@ def _collect_body_write_specs(
 
 
 def _is_noop_body_system_task(stmt_ir: SystemTaskIR) -> bool:
-    return stmt_ir.name in {"$display", "$strobe"}
+    return stmt_ir.name in {
+        "$analog_node_alias",
+        "$cds_set_rf_source_info",
+        "$cds_violation",
+        "$discontinuity",
+        "$display",
+        "$strobe",
+        "$debug",
+        "$warning",
+        "$info",
+        "$error",
+        "$sformat",
+        "$swrite",
+    }
 
 
 def _contribution_expr_with_reference(
     branch: BranchAccessIR,
     expr: ExprIR,
 ) -> ExprIR:
+    if branch.access_type != "V":
+        return expr
     if branch.node2 is None:
         return expr
     reference = BranchAccessIR(
@@ -2288,8 +2570,6 @@ def _encode_contribution_target(
     branch: BranchAccessIR,
     node_slots: dict[str, int],
 ) -> Optional[int]:
-    if branch.access_type != "V":
-        return None
     node_name = static_node_ref_name(
         branch.node1,
         branch.node1_index,
@@ -2297,7 +2577,24 @@ def _encode_contribution_target(
     )
     if node_name is None:
         return None
+    if branch.access_type == "I":
+        if branch.node2 is None:
+            return None
+        node2_name = static_node_ref_name(
+            branch.node2,
+            branch.node2_index,
+            branch.node2_index2,
+        )
+        if node2_name is None:
+            return None
+        return node_slots.get(_branch_current_node_name(node_name, node2_name))
+    if branch.access_type != "V":
+        return None
     return node_slots.get(node_name)
+
+
+def _branch_current_node_name(node1: str, node2: str) -> str:
+    return f"@I:{node1}:{node2}"
 
 
 def _emit_stmt_lines(stmt_ir: StmtIR, lines: list[str], indent: str, level: int) -> None:

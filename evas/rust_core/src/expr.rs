@@ -280,7 +280,11 @@ impl<'a> RustFileIoRuntime<'a> {
             Err(_) => true,
         };
         let _ = handle.seek(SeekFrom::Start(pos));
-        if at_eof { 1.0 } else { 0.0 }
+        if at_eof {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     pub(crate) fn fseek(&mut self, fd: f64, offset: f64, whence: f64) -> f64 {
@@ -312,10 +316,7 @@ impl<'a> RustFileIoRuntime<'a> {
         }
     }
 
-    fn next_scan_value(
-        chars: &[char],
-        mut pos: usize,
-    ) -> (usize, Option<String>) {
+    fn next_scan_value(chars: &[char], mut pos: usize) -> (usize, Option<String>) {
         while pos < chars.len() && chars[pos].is_whitespace() {
             pos += 1;
         }
@@ -338,7 +339,10 @@ impl<'a> RustFileIoRuntime<'a> {
     ) -> Result<f64, i32> {
         let spec = *self.spec(spec_id, RUST_FILE_SPEC_FSCANF)?;
         let fmt = self.primary_string(&spec)?;
-        let target_end = spec.target_start.checked_add(spec.target_count).ok_or(-2350)?;
+        let target_end = spec
+            .target_start
+            .checked_add(spec.target_count)
+            .ok_or(-2350)?;
         if target_end > self.target_ids.len() || target_end > self.target_integers.len() {
             return Err(-2351);
         }
@@ -401,7 +405,10 @@ impl<'a> RustFileIoRuntime<'a> {
                 break;
             }
             let value = match spec_ch.to_ascii_lowercase() {
-                'd' => token.parse::<f64>().map(to_veriloga_integer).map(|v| v as f64),
+                'd' => token
+                    .parse::<f64>()
+                    .map(to_veriloga_integer)
+                    .map(|v| v as f64),
                 'e' | 'f' | 'g' => token.parse::<f64>(),
                 _ => break,
             };
@@ -780,8 +787,11 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                 let Some(runtime) = file_io.as_deref_mut() else {
                     return Err(-2360);
                 };
-                let count =
-                    runtime.fscanf(to_veriloga_integer_trunc(spec_id) as usize, fd, state_values)?;
+                let count = runtime.fscanf(
+                    to_veriloga_integer_trunc(spec_id) as usize,
+                    fd,
+                    state_values,
+                )?;
                 if stmt.target_id < state_values.len() {
                     state_values[stmt.target_id] = if stmt.target_integer != 0 {
                         to_veriloga_integer(count) as f64
@@ -931,7 +941,7 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                 }
                 stack.clear();
             }
-            BODY_STMT_FILE_WRITE | BODY_STMT_STROBE => {
+            BODY_STMT_FILE_WRITE | BODY_STMT_STROBE | BODY_STMT_STRING_WRITE => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;
                     continue;

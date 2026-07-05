@@ -12062,7 +12062,7 @@ class _ModuleCompiler:
             lines.append(f"{prefix}self._analog_node_alias({local_node}, {target_path})")
             return lines
 
-        if stmt.name in ('$strobe', '$display'):
+        if stmt.name in ('$strobe', '$display', '$debug', '$warning', '$info', '$error'):
             if suppress_display_strobe:
                 return lines
             if stmt.args:

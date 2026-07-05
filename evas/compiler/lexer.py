@@ -231,7 +231,14 @@ def tokenize(source: str) -> List[Token]:
             s = ''
             while i < n and source[i] != '"':
                 if source[i] == '\\' and i + 1 < n:
-                    s += source[i + 1]
+                    escaped = source[i + 1]
+                    s += {
+                        'n': '\n',
+                        'r': '\r',
+                        't': '\t',
+                        '\\': '\\',
+                        '"': '"',
+                    }.get(escaped, escaped)
                     i += 2
                     col += 2
                 else:

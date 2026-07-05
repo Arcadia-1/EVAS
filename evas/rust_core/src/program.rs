@@ -240,6 +240,18 @@ fn rust_sim_init_branch_idt_states(
     vec![RustSimBranchIdtState::new(); branch_idt_ops.len()]
 }
 
+fn rust_sim_init_branch_ddt_states(
+    branch_ddt_ops: &[EvasRustBranchDdtOp],
+) -> Vec<RustSimBranchIdtState> {
+    vec![RustSimBranchIdtState::new(); branch_ddt_ops.len()]
+}
+
+fn rust_sim_init_indirect_branch_ode_states(
+    indirect_branch_ode_ops: &[EvasRustIndirectBranchOdeOp],
+) -> Vec<RustSimBranchIdtState> {
+    vec![RustSimBranchIdtState::new(); indirect_branch_ode_ops.len()]
+}
+
 fn rust_sim_coeff_slice<'a>(
     source_data: &'a [f64],
     start: usize,
@@ -382,6 +394,113 @@ fn rust_sim_step_branch_idt_ops(
             node_values[op.reference_node_id]
         };
         node_values[op.target_node_id] = reference + op.gain * state_values[op.state_id];
+    }
+    Ok(())
+}
+
+fn rust_sim_step_branch_ddt_ops(
+    branch_ddt_ops: &[EvasRustBranchDdtOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    states: &mut [RustSimBranchIdtState],
+    time: f64,
+) -> Result<(), i32> {
+    if branch_ddt_ops.len() != states.len() {
+        return Err(-2310);
+    }
+    for (idx, op) in branch_ddt_ops.iter().enumerate() {
+        if op.current_node_id >= node_values.len()
+            || op.pos_node_id >= node_values.len()
+            || op.neg_node_id >= node_values.len()
+        {
+            return Err(-2311);
+        }
+        if op.state_id >= state_values.len() {
+            return Err(-2312);
+        }
+        if !op.gain.is_finite() {
+            return Err(-2313);
+        }
+
+        let x = node_values[op.pos_node_id] - node_values[op.neg_node_id];
+        let state = &mut states[idx];
+        if !state.has_last_eval {
+            state.last_t = time;
+            state.last_x = x;
+            state.last_eval_t = time;
+            state.has_last_eval = true;
+            state_values[op.state_id] = 0.0;
+        } else if time != state.last_eval_t {
+            let dt = time - state.last_t;
+            if dt > 0.0 {
+                state_values[op.state_id] = op.gain * (x - state.last_x) / dt;
+                state.last_t = time;
+                state.last_x = x;
+            } else if dt < 0.0 {
+                state_values[op.state_id] = 0.0;
+                state.last_t = time;
+                state.last_x = x;
+            }
+            state.last_eval_t = time;
+        }
+        node_values[op.current_node_id] = state_values[op.state_id];
+    }
+    Ok(())
+}
+
+fn rust_sim_step_indirect_branch_ode_ops(
+    indirect_branch_ode_ops: &[EvasRustIndirectBranchOdeOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    states: &mut [RustSimBranchIdtState],
+    time: f64,
+) -> Result<(), i32> {
+    if indirect_branch_ode_ops.len() != states.len() {
+        return Err(-2320);
+    }
+    for (idx, op) in indirect_branch_ode_ops.iter().enumerate() {
+        if op.target_node_id >= node_values.len() || op.input_node_id >= node_values.len() {
+            return Err(-2321);
+        }
+        if op.reference_node_id != usize::MAX && op.reference_node_id >= node_values.len() {
+            return Err(-2322);
+        }
+        if op.state_id >= state_values.len() {
+            return Err(-2323);
+        }
+        if !op.tau.is_finite() || op.tau <= 0.0 || !op.ic.is_finite() {
+            return Err(-2324);
+        }
+
+        let input = node_values[op.input_node_id];
+        let state = &mut states[idx];
+        if !state.has_last_eval {
+            state.last_t = time;
+            state.last_x = input;
+            state.last_eval_t = time;
+            state.has_last_eval = true;
+            state_values[op.state_id] = op.ic;
+        } else if time != state.last_eval_t {
+            let dt = time - state.last_t;
+            if dt > 0.0 {
+                let alpha = 1.0 - (-dt / op.tau).exp();
+                state_values[op.state_id] += (input - state_values[op.state_id]) * alpha;
+                state.last_t = time;
+                state.last_x = input;
+            } else if dt < 0.0 {
+                state_values[op.state_id] = op.ic;
+                state.last_t = time;
+                state.last_x = input;
+            }
+            state.last_eval_t = time;
+        }
+
+        let reference = if op.reference_node_id == usize::MAX {
+            0.0
+        } else {
+            node_values[op.reference_node_id]
+        };
+        node_values[op.target_node_id] = reference + state_values[op.state_id];
     }
     Ok(())
 }
@@ -632,6 +751,8 @@ pub fn rust_sim_source_linear_record_trace(
     source_data: &[f64],
     zi_nd_ops: &[EvasRustZiNdOp],
     branch_idt_ops: &[EvasRustBranchIdtOp],
+    branch_ddt_ops: &[EvasRustBranchDdtOp],
+    indirect_branch_ode_ops: &[EvasRustIndirectBranchOdeOp],
     linear_ops: &[EvasRustLinearOp],
     linear_terms: &[EvasRustLinearTerm],
     linear_conditions: &[EvasRustLinearCondition],
@@ -680,6 +801,9 @@ pub fn rust_sim_source_linear_record_trace(
     };
     let mut zi_nd_states = rust_sim_init_zi_nd_states(zi_nd_ops)?;
     let mut branch_idt_states = rust_sim_init_branch_idt_states(branch_idt_ops);
+    let mut branch_ddt_states = rust_sim_init_branch_ddt_states(branch_ddt_ops);
+    let mut indirect_branch_ode_states =
+        rust_sim_init_indirect_branch_ode_states(indirect_branch_ode_ops);
 
     rust_sim_write_sources(sources, source_data, node_values, 0.0)?;
     rust_sim_step_branch_idt_ops(
@@ -687,6 +811,20 @@ pub fn rust_sim_source_linear_record_trace(
         node_values,
         state_values,
         &mut branch_idt_states,
+        0.0,
+    )?;
+    rust_sim_step_branch_ddt_ops(
+        branch_ddt_ops,
+        node_values,
+        state_values,
+        &mut branch_ddt_states,
+        0.0,
+    )?;
+    rust_sim_step_indirect_branch_ode_ops(
+        indirect_branch_ode_ops,
+        node_values,
+        state_values,
+        &mut indirect_branch_ode_states,
         0.0,
     )?;
     rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, 0.0)?;
@@ -762,6 +900,20 @@ pub fn rust_sim_source_linear_record_trace(
             node_values,
             state_values,
             &mut branch_idt_states,
+            time,
+        )?;
+        rust_sim_step_branch_ddt_ops(
+            branch_ddt_ops,
+            node_values,
+            state_values,
+            &mut branch_ddt_states,
+            time,
+        )?;
+        rust_sim_step_indirect_branch_ode_ops(
+            indirect_branch_ode_ops,
+            node_values,
+            state_values,
+            &mut indirect_branch_ode_states,
             time,
         )?;
         rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, time)?;
@@ -1639,6 +1791,7 @@ fn rust_sim_op_is_stochastic(op_kind: u8) -> bool {
             | BODY_EXPR_RDIST_EXPONENTIAL
             | BODY_EXPR_RDIST_POISSON
             | BODY_EXPR_RDIST_ERLANG
+            | BODY_EXPR_RDIST_UNIFORM
     )
 }
 
@@ -2769,6 +2922,7 @@ pub fn rust_sim_event_transition_record_trace(
     events: &[EvasRustSimEventSpec],
     transitions: &[EvasRustSimTransitionSpec],
     slews: &[EvasRustSimSlewSpec],
+    branch_ddt_ops: &[EvasRustBranchDdtOp],
     side_effect_kinds: &mut [u8],
     side_effect_spec_ids: &mut [usize],
     side_effect_arg_starts: &mut [usize],
@@ -2903,6 +3057,7 @@ pub fn rust_sim_event_transition_record_trace(
     let mut slew_last_times = vec![0.0_f64; slew_count];
     let mut slew_initialized_flags = vec![0_u8; slew_count];
     let mut slew_output_values = vec![0.0_f64; slew_count];
+    let mut branch_ddt_states = rust_sim_init_branch_ddt_states(branch_ddt_ops);
     let mut bound_step_limit = f64::INFINITY;
     let mut side_effect_log = RustSideEffectLog {
         kinds: side_effect_kinds,
@@ -2979,6 +3134,13 @@ pub fn rust_sim_event_transition_record_trace(
         linear_conditions,
         node_values,
         state_values,
+    )?;
+    rust_sim_step_branch_ddt_ops(
+        branch_ddt_ops,
+        node_values,
+        state_values,
+        &mut branch_ddt_states,
+        0.0,
     )?;
     rust_sim_apply_transitions(
         transitions,
@@ -3074,6 +3236,13 @@ pub fn rust_sim_event_transition_record_trace(
             linear_conditions,
             node_values,
             state_values,
+        )?;
+        rust_sim_step_branch_ddt_ops(
+            branch_ddt_ops,
+            node_values,
+            state_values,
+            &mut branch_ddt_states,
+            0.0,
         )?;
         rust_sim_apply_transitions(
             transitions,
@@ -3367,6 +3536,13 @@ pub fn rust_sim_event_transition_record_trace(
             node_values,
             state_values,
         )?;
+        rust_sim_step_branch_ddt_ops(
+            branch_ddt_ops,
+            node_values,
+            state_values,
+            &mut branch_ddt_states,
+            time,
+        )?;
         rust_sim_apply_transitions(
             transitions,
             body_expr_ops,
@@ -3482,6 +3658,13 @@ pub fn rust_sim_event_transition_record_trace(
                     node_values,
                     state_values,
                 )?;
+                rust_sim_step_branch_ddt_ops(
+                    branch_ddt_ops,
+                    node_values,
+                    state_values,
+                    &mut branch_ddt_states,
+                    time,
+                )?;
                 rust_sim_apply_transitions(
                     transitions,
                     body_expr_ops,
@@ -3559,6 +3742,13 @@ pub fn rust_sim_event_transition_record_trace(
                 linear_conditions,
                 node_values,
                 state_values,
+            )?;
+            rust_sim_step_branch_ddt_ops(
+                branch_ddt_ops,
+                node_values,
+                state_values,
+                &mut branch_ddt_states,
+                time,
             )?;
             rust_sim_apply_transitions(
                 transitions,

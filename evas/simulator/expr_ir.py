@@ -12,6 +12,7 @@ older static-linear sublanguage in :mod:`evas.simulator.evaluate_ir`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Mapping, Optional, Tuple, Union
 
@@ -76,6 +77,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_RDIST_EXPONENTIAL,
     BODY_EXPR_RDIST_NORMAL,
     BODY_EXPR_RDIST_POISSON,
+    BODY_EXPR_RDIST_UNIFORM,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
@@ -98,6 +100,7 @@ PURE_MATH_FUNCTIONS = frozenset(
         "cos",
         "exp",
         "floor",
+        "limexp",
         "ln",
         "log",
         "max",
@@ -113,6 +116,8 @@ PURE_MATH_FUNCTIONS = frozenset(
 STATEFUL_ANALOG_FUNCTIONS = frozenset(
     {
         "cross",
+        "ddt",
+        "idt",
         "idtmod",
         "last_crossing",
         "slew",
@@ -130,8 +135,13 @@ TRANSIENT_ANALYSIS_FUNCTIONS = frozenset(
     }
 )
 
+GENERIC_ACCESS_FUNCTIONS = frozenset({"potential", "flow"})
+
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
+        "$analog_node_alias",
+        "$attribute",
+        "$cds_get_mc_trial_number",
         "$dist_uniform",
         "$feof",
         "$fgets",
@@ -139,12 +149,22 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$fscanf",
         "$fseek",
         "$ftell",
+        "$mfactor",
+        "$param_given",
+        "$port_connected",
         "$random",
         "$rdist_erlang",
         "$rdist_exponential",
         "$rdist_normal",
         "$rdist_poisson",
+        "$rdist_uniform",
         "$rewind",
+        "$rtoi",
+        "$sformat",
+        "$simparam",
+        "$table_model",
+        "$temperature",
+        "$vt",
     }
 )
 
@@ -198,6 +218,7 @@ _BODY_FUNCTION_OPS = {
     "abs": (BODY_EXPR_ABS, 1),
     "sqrt": (BODY_EXPR_SQRT, 1),
     "exp": (BODY_EXPR_EXP, 1),
+    "limexp": (BODY_EXPR_EXP, 1),
     "ln": (BODY_EXPR_LN, 1),
     "log": (BODY_EXPR_LOG10, 1),
     "sin": (BODY_EXPR_SIN, 1),
@@ -214,7 +235,13 @@ _BODY_FUNCTION_OPS = {
     "$rdist_poisson": (BODY_EXPR_RDIST_POISSON, 2),
     "$rdist_normal": (BODY_EXPR_RDIST_NORMAL, 3),
     "$rdist_erlang": (BODY_EXPR_RDIST_ERLANG, 3),
+    "$dist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
+    "$rdist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
 }
+
+_DEFAULT_TEMPERATURE_C = 27.0
+_DEFAULT_TEMPERATURE_K = _DEFAULT_TEMPERATURE_C + 273.15
+_BOLTZMANN_OVER_Q = 1.380649e-23 / 1.602176634e-19
 
 
 @dataclass(frozen=True)
@@ -242,6 +269,7 @@ class LoweringContext:
                 PURE_MATH_FUNCTIONS
                 | STATEFUL_ANALOG_FUNCTIONS
                 | TRANSIENT_ANALYSIS_FUNCTIONS
+                | GENERIC_ACCESS_FUNCTIONS
             ),
             allowed_system_functions=SUPPORTED_SYSTEM_FUNCTIONS,
             allowed_methods=SUPPORTED_METHODS,
@@ -606,6 +634,9 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
 
     for slot, param in enumerate(getattr(module, "parameters", ()) or ()):
         integer = getattr(param, "param_type", None) == ParamType.INTEGER
+        is_string = getattr(param, "param_type", None) == ParamType.STRING
+        if is_string:
+            continue
         bindings.append(
             StateBindingIR(
                 name=str(param.name),
@@ -622,7 +653,10 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     scalar_slot = 0
     for variable in variables:
         integer = getattr(variable, "var_type", None) == ParamType.INTEGER
+        is_string = getattr(variable, "var_type", None) == ParamType.STRING
         if getattr(variable, "is_array", False):
+            continue
+        if is_string:
             continue
         bindings.append(
             StateBindingIR(
@@ -637,6 +671,9 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     array_slot = 0
     for variable in variables:
         integer = getattr(variable, "var_type", None) == ParamType.INTEGER
+        is_string = getattr(variable, "var_type", None) == ParamType.STRING
+        if is_string:
+            continue
         if getattr(variable, "is_array", False):
             raw_lo = getattr(variable, "array_lo", None)
             raw_hi = getattr(variable, "array_hi", None)
@@ -809,6 +846,17 @@ def _append_body_expr_ops(
         if expr_ir.name in {"$abstime", "$realtime"}:
             ops.append(BodyExprOp(BODY_EXPR_READ_TIME))
             return True
+        if expr_ir.name == "$temperature":
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_DEFAULT_TEMPERATURE_K))
+            return True
+        if expr_ir.name == "$vt":
+            ops.append(
+                BodyExprOp(
+                    BODY_EXPR_CONST,
+                    value=_BOLTZMANN_OVER_Q * _DEFAULT_TEMPERATURE_K,
+                )
+            )
+            return True
         if expr_ir.name == "inf":
             ops.append(BodyExprOp(BODY_EXPR_CONST, value=float("inf")))
             return True
@@ -871,6 +919,59 @@ def _append_body_expr_ops(
         return True
 
     if isinstance(expr_ir, FunctionCallIR):
+        if expr_ir.name in {"potential", "flow"}:
+            branch = _generic_access_function_to_branch(expr_ir)
+            if branch is None:
+                return False
+            return _append_branch_body_expr_ops(branch, bindings, node_slots, ops)
+        if expr_ir.name == "$attribute":
+            return _append_attribute_body_expr_ops(expr_ir, ops)
+        if expr_ir.name == "$temperature":
+            if expr_ir.args:
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_DEFAULT_TEMPERATURE_K))
+            return True
+        if expr_ir.name == "$vt":
+            if len(expr_ir.args) > 1:
+                return False
+            if not expr_ir.args:
+                ops.append(
+                    BodyExprOp(
+                        BODY_EXPR_CONST,
+                        value=_BOLTZMANN_OVER_Q * _DEFAULT_TEMPERATURE_K,
+                    )
+                )
+                return True
+            if not _append_body_expr_ops(expr_ir.args[0], bindings, node_slots, ops):
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_BOLTZMANN_OVER_Q))
+            ops.append(BodyExprOp(BODY_EXPR_MUL))
+            return True
+        if expr_ir.name == "$simparam":
+            encoded = _append_simparam_body_expr_ops(
+                expr_ir,
+                bindings,
+                node_slots,
+                ops,
+            )
+            if encoded is not None:
+                return encoded
+        if expr_ir.name == "$cds_get_mc_trial_number":
+            if expr_ir.args:
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+            return True
+        if expr_ir.name == "$rtoi":
+            if len(expr_ir.args) != 1:
+                return False
+            if not _append_rtoi_body_expr_ops(
+                expr_ir.args[0],
+                bindings,
+                node_slots,
+                ops,
+            ):
+                return False
+            return True
         op_info = _BODY_FUNCTION_OPS.get(expr_ir.name)
         if op_info is None:
             return False
@@ -884,6 +985,129 @@ def _append_body_expr_ops(
         return True
 
     return False
+
+
+def _append_rtoi_body_expr_ops(
+    arg: ExprIR,
+    bindings: BindingTableIR,
+    node_slots: Mapping[str, int],
+    ops: list[BodyExprOp],
+) -> bool:
+    if isinstance(arg, LiteralIR) and isinstance(arg.value, (int, float)):
+        value = float(arg.value)
+        rounded = math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
+        ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(rounded)))
+        return True
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+    ops.append(BodyExprOp(BODY_EXPR_GE))
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
+    ops.append(BodyExprOp(BODY_EXPR_ADD))
+    ops.append(BodyExprOp(BODY_EXPR_FLOOR))
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
+    ops.append(BodyExprOp(BODY_EXPR_SUB))
+    ops.append(BodyExprOp(BODY_EXPR_CEIL))
+
+    ops.append(BodyExprOp(BODY_EXPR_SELECT))
+    return True
+
+
+def _generic_access_function_to_branch(expr_ir: FunctionCallIR) -> Optional[BranchAccessIR]:
+    if expr_ir.name not in {"potential", "flow"} or not expr_ir.args:
+        return None
+
+    first = _node_ref_from_expr_ir(expr_ir.args[0])
+    if first is None:
+        return None
+    node1, node1_index, node1_index2 = first
+
+    node2 = node2_index = node2_index2 = None
+    if len(expr_ir.args) > 1:
+        second = _node_ref_from_expr_ir(expr_ir.args[1])
+        if second is None:
+            return None
+        node2, node2_index, node2_index2 = second
+
+    return BranchAccessIR(
+        access_type="V" if expr_ir.name == "potential" else "I",
+        node1=node1,
+        node2=node2,
+        node1_index=node1_index,
+        node2_index=node2_index,
+        node1_index2=node1_index2,
+        node2_index2=node2_index2,
+    )
+
+
+def _node_ref_from_expr_ir(
+    expr_ir: ExprIR,
+) -> Optional[tuple[str, Optional[ExprIR], Optional[ExprIR]]]:
+    if isinstance(expr_ir, IdentifierIR):
+        return expr_ir.name, None, None
+    if isinstance(expr_ir, ArrayAccessIR):
+        return expr_ir.name, expr_ir.index, None
+    return None
+
+
+def _append_attribute_body_expr_ops(
+    expr_ir: FunctionCallIR,
+    ops: list[BodyExprOp],
+) -> bool:
+    if len(expr_ir.args) != 1:
+        return False
+    key_expr = expr_ir.args[0]
+    if not isinstance(key_expr, LiteralIR) or not isinstance(key_expr.value, str):
+        return False
+    key = str(key_expr.value).strip().lower()
+    if key.endswith(".potential.abstol"):
+        value = 1.0e-6
+    elif key.endswith(".flow.abstol"):
+        value = 1.0e-12
+    elif key.endswith(".abstol"):
+        value = 1.0e-12
+    else:
+        value = 0.0
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=value))
+    return True
+
+
+def _append_simparam_body_expr_ops(
+    expr_ir: FunctionCallIR,
+    bindings: BindingTableIR,
+    node_slots: Mapping[str, int],
+    ops: list[BodyExprOp],
+) -> Optional[bool]:
+    if not expr_ir.args or len(expr_ir.args) > 2:
+        return False
+    key_expr = expr_ir.args[0]
+    if not isinstance(key_expr, LiteralIR) or not isinstance(key_expr.value, str):
+        return False
+    key = str(key_expr.value).strip().lower()
+    values = {
+        "temp": _DEFAULT_TEMPERATURE_C,
+        "temperature": _DEFAULT_TEMPERATURE_C,
+        "tnom": _DEFAULT_TEMPERATURE_C,
+        "gmin": 1e-12,
+        "reltol": 1e-3,
+        "abstol": 1e-12,
+        "iabstol": 1e-12,
+        "vabstol": 1e-6,
+    }
+    if key in values:
+        ops.append(BodyExprOp(BODY_EXPR_CONST, value=values[key]))
+        return True
+    if len(expr_ir.args) == 2:
+        return _append_body_expr_ops(expr_ir.args[1], bindings, node_slots, ops)
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+    return True
 
 
 def _expr_ir_is_integer(expr_ir: ExprIR, bindings: BindingTableIR) -> bool:
@@ -1039,14 +1263,29 @@ def _append_branch_body_expr_ops(
     node_slots: Mapping[str, int],
     ops: list[BodyExprOp],
 ) -> bool:
-    if expr_ir.access_type != "V":
-        return False
     node1_name = static_node_ref_name(
         expr_ir.node1,
         expr_ir.node1_index,
         expr_ir.node1_index2,
     )
     if node1_name is None:
+        return False
+    if expr_ir.access_type == "I":
+        if expr_ir.node2 is None:
+            return False
+        node2_name = static_node_ref_name(
+            expr_ir.node2,
+            expr_ir.node2_index,
+            expr_ir.node2_index2,
+        )
+        if node2_name is None:
+            return False
+        current_slot = node_slots.get(_branch_current_node_name(node1_name, node2_name))
+        if current_slot is None:
+            return False
+        ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=current_slot))
+        return True
+    if expr_ir.access_type != "V":
         return False
     node1_slot = node_slots.get(node1_name)
     if node1_slot is None:
@@ -1067,6 +1306,10 @@ def _append_branch_body_expr_ops(
     ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=node2_slot))
     ops.append(BodyExprOp(BODY_EXPR_SUB))
     return True
+
+
+def _branch_current_node_name(node1: str, node2: str) -> str:
+    return f"@I:{node1}:{node2}"
 
 
 def _lower_expr_tuple(

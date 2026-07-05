@@ -148,6 +148,12 @@ fn deterministic_poisson(seed: f64, mean: f64) -> f64 {
     normal.max(0.0)
 }
 
+fn deterministic_uniform(seed: f64, lo: f64, hi: f64) -> f64 {
+    let stream = rdist_stream(seed, 0xa24b_aed4_963e_e407_u64);
+    let u = uniform01_from_u64(splitmix64(stream));
+    lo + (hi - lo) * u
+}
+
 fn deterministic_erlang(seed: f64, stages: f64, mean: f64) -> f64 {
     let stage_count = to_veriloga_integer(stages).max(1) as u64;
     let mean = mean.max(0.0);
@@ -373,6 +379,10 @@ pub(crate) fn evaluate_body_expr_segment(
             BODY_EXPR_RDIST_ERLANG => {
                 let (seed, stages, mean) = pop3(stack)?;
                 stack.push(deterministic_erlang(seed, stages, mean));
+            }
+            BODY_EXPR_RDIST_UNIFORM => {
+                let (seed, lo, hi) = pop3(stack)?;
+                stack.push(deterministic_uniform(seed, lo, hi));
             }
             BODY_EXPR_FLOOR => {
                 let value = pop1(stack)?;
