@@ -87,6 +87,27 @@ class RustBranchIdtOp(ctypes.Structure):
     ]
 
 
+class RustBranchDdtOp(ctypes.Structure):
+    _fields_ = [
+        ("current_node_id", ctypes.c_size_t),
+        ("pos_node_id", ctypes.c_size_t),
+        ("neg_node_id", ctypes.c_size_t),
+        ("state_id", ctypes.c_size_t),
+        ("gain", ctypes.c_double),
+    ]
+
+
+class RustIndirectBranchOdeOp(ctypes.Structure):
+    _fields_ = [
+        ("target_node_id", ctypes.c_size_t),
+        ("reference_node_id", ctypes.c_size_t),
+        ("input_node_id", ctypes.c_size_t),
+        ("state_id", ctypes.c_size_t),
+        ("tau", ctypes.c_double),
+        ("ic", ctypes.c_double),
+    ]
+
+
 class RustTransitionTargetOp(ctypes.Structure):
     _fields_ = [
         ("target_id", ctypes.c_size_t),
@@ -459,6 +480,34 @@ class RustSimSourceRecordProgram:
             )
         branch_idt_array_type = RustBranchIdtOp * len(branch_idt_specs)
         self._c_branch_idt_ops = branch_idt_array_type(*branch_idt_specs)
+        branch_ddt_specs = []
+        for op in tuple(getattr(program, "branch_ddt_ops", ()) or ()):
+            branch_ddt_specs.append(
+                RustBranchDdtOp(
+                    int(getattr(op, "current_node_id", 0)),
+                    int(getattr(op, "pos_node_id", 0)),
+                    int(getattr(op, "neg_node_id", 0)),
+                    int(getattr(op, "state_id", 0)),
+                    float(getattr(op, "gain", 1.0)),
+                )
+            )
+        branch_ddt_array_type = RustBranchDdtOp * len(branch_ddt_specs)
+        self._c_branch_ddt_ops = branch_ddt_array_type(*branch_ddt_specs)
+        indirect_ode_specs = []
+        for op in tuple(getattr(program, "indirect_branch_ode_ops", ()) or ()):
+            reference_node_id = getattr(op, "reference_node_id", None)
+            indirect_ode_specs.append(
+                RustIndirectBranchOdeOp(
+                    int(getattr(op, "target_node_id", 0)),
+                    _usize_max() if reference_node_id is None else int(reference_node_id),
+                    int(getattr(op, "input_node_id", 0)),
+                    int(getattr(op, "state_id", 0)),
+                    float(getattr(op, "tau", 0.0)),
+                    float(getattr(op, "ic", 0.0)),
+                )
+            )
+        indirect_ode_array_type = RustIndirectBranchOdeOp * len(indirect_ode_specs)
+        self._c_indirect_branch_ode_ops = indirect_ode_array_type(*indirect_ode_specs)
         linear_ops = []
         for op in tuple(getattr(program, "continuous_linear_ops", ()) or ()):
             condition = getattr(op, "condition", None)
@@ -634,6 +683,14 @@ class RustSimSourceRecordProgram:
         return len(self._c_branch_idt_ops)
 
     @property
+    def branch_ddt_count(self) -> int:
+        return len(self._c_branch_ddt_ops)
+
+    @property
+    def indirect_branch_ode_count(self) -> int:
+        return len(self._c_indirect_branch_ode_ops)
+
+    @property
     def event_count(self) -> int:
         return len(self._c_events)
 
@@ -672,6 +729,14 @@ class RustSimSourceRecordProgram:
     @property
     def branch_idt_ptr(self):
         return self._c_branch_idt_ops
+
+    @property
+    def branch_ddt_ptr(self):
+        return self._c_branch_ddt_ops
+
+    @property
+    def indirect_branch_ode_ptr(self):
+        return self._c_indirect_branch_ode_ops
 
     @property
     def param_ptr(self):
@@ -1842,6 +1907,10 @@ class RustBackend:
                 ctypes.c_size_t,
                 ctypes.POINTER(RustBranchIdtOp),
                 ctypes.c_size_t,
+                ctypes.POINTER(RustBranchDdtOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustIndirectBranchOdeOp),
+                ctypes.c_size_t,
                 ctypes.POINTER(RustLinearOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustLinearTerm),
@@ -1895,6 +1964,8 @@ class RustBackend:
                 ctypes.POINTER(RustSimTransitionSpec),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustSimSlewSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustBranchDdtOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_uint8),
                 ctypes.POINTER(ctypes.c_size_t),
@@ -2719,6 +2790,8 @@ class RustBackend:
             or program.state_count > 0
             or program.zi_nd_count > 0
             or program.branch_idt_count > 0
+            or program.branch_ddt_count > 0
+            or program.indirect_branch_ode_count > 0
         )
         if use_event_transition_abi and program.zi_nd_count > 0:
             raise RustBackendError(
@@ -2811,6 +2884,8 @@ class RustBackend:
                 int(program.transition_count),
                 program.slew_ptr,
                 int(program.slew_count),
+                program.branch_ddt_ptr,
+                int(program.branch_ddt_count),
                 side_kinds,
                 side_specs,
                 side_arg_starts,
@@ -2856,6 +2931,10 @@ class RustBackend:
                 int(program.zi_nd_count),
                 program.branch_idt_ptr,
                 int(program.branch_idt_count),
+                program.branch_ddt_ptr,
+                int(program.branch_ddt_count),
+                program.indirect_branch_ode_ptr,
+                int(program.indirect_branch_ode_count),
                 batch.op_ptr,
                 len(batch),
                 batch.term_ptr,

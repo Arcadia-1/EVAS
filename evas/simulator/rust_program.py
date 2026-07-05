@@ -294,6 +294,29 @@ class RustSimBranchIdtOp:
 
 
 @dataclass(frozen=True)
+class RustSimBranchDdtOp:
+    """A branch-voltage ddt() current contribution executed by Rust."""
+
+    current_node_id: int
+    pos_node_id: int
+    neg_node_id: int
+    state_id: int
+    gain: float
+
+
+@dataclass(frozen=True)
+class RustSimIndirectBranchOdeOp:
+    """A first-order indirect-branch ddt() balance executed by Rust."""
+
+    target_node_id: int
+    reference_node_id: Optional[int]
+    input_node_id: int
+    state_id: int
+    tau: float
+    ic: float
+
+
+@dataclass(frozen=True)
 class RustSimTransition:
     """A transition() state slot and its output target."""
 
@@ -381,6 +404,8 @@ class RustSimProgram:
     continuous_linear_ops: Tuple[RustSimLinearOp, ...] = ()
     zi_nd_ops: Tuple[RustSimZiNdOp, ...] = ()
     branch_idt_ops: Tuple[RustSimBranchIdtOp, ...] = ()
+    branch_ddt_ops: Tuple[RustSimBranchDdtOp, ...] = ()
+    indirect_branch_ode_ops: Tuple[RustSimIndirectBranchOdeOp, ...] = ()
     body_stmt_ops: Tuple[BodyStmtOp, ...] = ()
     body_expr_ops: Tuple[BodyExprOp, ...] = ()
     source_data: Tuple[float, ...] = ()
@@ -1015,6 +1040,13 @@ class _RustSimSideEffectBuilder:
 
 
 def _external_node(model: Any, local_name: str) -> str:
+    if str(local_name).startswith("@I:"):
+        parts = str(local_name).split(":", 2)
+        if len(parts) == 3:
+            return _branch_current_node_name(
+                _external_node(model, parts[1]),
+                _external_node(model, parts[2]),
+            )
     node_map = getattr(model, "node_map", {}) or {}
     if local_name in node_map:
         ext = str(node_map[local_name])
@@ -1168,14 +1200,19 @@ def _iter_static_branch_node_names(expr_ir: ExprIR):
             expr_ir.node1_index,
             expr_ir.node1_index2,
         )
-        if node1_name is not None:
-            yield node1_name
         if expr_ir.node2 is not None:
             node2_name = static_node_ref_name(
                 expr_ir.node2,
                 expr_ir.node2_index,
                 expr_ir.node2_index2,
             )
+        else:
+            node2_name = None
+        if expr_ir.access_type == "I" and node1_name is not None and node2_name is not None:
+            yield _branch_current_node_name(node1_name, node2_name)
+        else:
+            if node1_name is not None:
+                yield node1_name
             if node2_name is not None:
                 yield node2_name
         for child in (
@@ -1421,6 +1458,29 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     return False
 
 
+def _is_branch_ddt_contribution_stmt(stmt_ir: object) -> bool:
+    if not isinstance(stmt_ir, ContributionIR):
+        return False
+    if stmt_ir.branch.access_type != "I":
+        return False
+    expr = stmt_ir.expr
+    if isinstance(expr, FunctionCallIR) and str(expr.name) == "ddt":
+        return True
+    if isinstance(expr, UnaryExprIR):
+        return _is_branch_ddt_contribution_stmt(
+            ContributionIR(stmt_ir.branch, expr.operand)
+        )
+    if isinstance(expr, BinaryExprIR) and expr.op == "*":
+        return (
+            isinstance(expr.left, FunctionCallIR)
+            and str(expr.left.name) == "ddt"
+        ) or (
+            isinstance(expr.right, FunctionCallIR)
+            and str(expr.right.name) == "ddt"
+        )
+    return False
+
+
 def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
     nodes: set[str] = set()
 
@@ -1444,6 +1504,23 @@ def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
                 stmt_ir.branch.node1_index2,
             )
             nodes.add(str(node1_name or stmt_ir.branch.node1))
+        elif stmt_ir.branch.access_type == "I":
+            node1_name = static_node_ref_name(
+                stmt_ir.branch.node1,
+                stmt_ir.branch.node1_index,
+                stmt_ir.branch.node1_index2,
+            )
+            node2_name = (
+                None
+                if stmt_ir.branch.node2 is None
+                else static_node_ref_name(
+                    stmt_ir.branch.node2,
+                    stmt_ir.branch.node2_index,
+                    stmt_ir.branch.node2_index2,
+                )
+            )
+            if node1_name is not None and node2_name is not None:
+                nodes.add(_branch_current_node_name(node1_name, node2_name))
         return frozenset(nodes)
 
     if isinstance(stmt_ir, EventStatementIR):
@@ -2073,6 +2150,31 @@ def _match_scaled_idt_call(expr: Any) -> Optional[tuple[Any, AstFunctionCall]]:
     return None
 
 
+def _match_scaled_ddt_call(expr: Any) -> Optional[tuple[Any, AstFunctionCall]]:
+    if isinstance(expr, AstFunctionCall) and str(expr.name).lower() == "ddt":
+        return _ast_number(1.0), expr
+    if isinstance(expr, AstUnaryExpr):
+        matched = _match_scaled_ddt_call(expr.operand)
+        if matched is None:
+            return None
+        gain_expr, call = matched
+        if expr.op == "+":
+            return gain_expr, call
+        if expr.op == "-":
+            return _scale_ast_scalar(_ast_number(-1.0), gain_expr), call
+        return None
+    if isinstance(expr, AstBinaryExpr) and expr.op == "*":
+        left = _match_scaled_ddt_call(expr.left)
+        if left is not None:
+            gain_expr, call = left
+            return _scale_ast_scalar(expr.right, gain_expr), call
+        right = _match_scaled_ddt_call(expr.right)
+        if right is not None:
+            gain_expr, call = right
+            return _scale_ast_scalar(expr.left, gain_expr), call
+    return None
+
+
 def _flatten_ast_block_statements(stmt: Any) -> tuple[Any, ...]:
     if isinstance(stmt, AstBlock):
         flattened: list[Any] = []
@@ -2375,11 +2477,35 @@ def _replace_model_query_assignment_target(target: object, model: Any) -> object
     return target
 
 
+def _declared_branch_map(model: Any) -> dict[str, tuple[str, str]]:
+    module = getattr(getattr(model, "__class__", type(model)), "_module_ast", None)
+    result: dict[str, tuple[str, str]] = {}
+    for branch in getattr(module, "branches", ()) or ():
+        name = str(getattr(branch, "name", ""))
+        node1 = str(getattr(branch, "node1", ""))
+        node2 = str(getattr(branch, "node2", ""))
+        if name and node1 and node2:
+            result[name] = (node1, node2)
+    return result
+
+
 def _replace_model_query_branch(branch: BranchAccessIR, model: Any) -> BranchAccessIR:
+    node1 = branch.node1
+    node2 = branch.node2
+    if (
+        branch.node2 is None
+        and branch.node1_index is None
+        and branch.node1_index2 is None
+        and branch.node2_index is None
+        and branch.node2_index2 is None
+    ):
+        declared = _declared_branch_map(model).get(str(branch.node1))
+        if declared is not None:
+            node1, node2 = declared
     return BranchAccessIR(
         access_type=branch.access_type,
-        node1=branch.node1,
-        node2=branch.node2,
+        node1=node1,
+        node2=node2,
         node1_index=(
             None
             if branch.node1_index is None
@@ -2548,6 +2674,152 @@ def _model_has_branch_current_idt_ops(model_cls: Any) -> bool:
     return bool(_collect_branch_current_idt_raw_ops(model_cls))
 
 
+def _same_ast_voltage_target(expr: Any, target: Any) -> bool:
+    return (
+        _is_plain_branch_access(expr, "V")
+        and _is_plain_branch_access(target, "V")
+        and expr.node1 == target.node1
+        and expr.node2 == target.node2
+    )
+
+
+def _same_ast_ddt_target(expr: Any, target: Any) -> bool:
+    return (
+        isinstance(expr, AstFunctionCall)
+        and str(expr.name).lower() == "ddt"
+        and len(getattr(expr, "args", ()) or ()) == 1
+        and _same_ast_voltage_target(expr.args[0], target)
+    )
+
+
+def _solve_simple_ast_indirect_form(
+    target: Any,
+    lhs: Any,
+    rhs: Any,
+    *,
+    target_match,
+) -> Optional[Any]:
+    if target_match(lhs, target):
+        return rhs
+    if isinstance(lhs, AstBinaryExpr):
+        left_is_target = target_match(lhs.left, target)
+        right_is_target = target_match(lhs.right, target)
+        if lhs.op == "-" and left_is_target:
+            return AstBinaryExpr("+", rhs, lhs.right)
+        if lhs.op == "-" and right_is_target:
+            return AstBinaryExpr("-", lhs.left, rhs)
+        if lhs.op == "+" and (left_is_target or right_is_target):
+            other = lhs.right if left_is_target else lhs.left
+            return AstBinaryExpr("-", rhs, other)
+    return None
+
+
+def _indirect_branch_ddt_rhs_ast(target: Any, lhs: Any, rhs: Any) -> Optional[Any]:
+    value = _solve_simple_ast_indirect_form(
+        target,
+        lhs,
+        rhs,
+        target_match=_same_ast_ddt_target,
+    )
+    if value is not None:
+        return value
+    return _solve_simple_ast_indirect_form(
+        target,
+        rhs,
+        lhs,
+        target_match=_same_ast_ddt_target,
+    )
+
+
+def _match_first_order_balance_rhs(
+    expr: Any,
+    target: Any,
+) -> Optional[tuple[AstBranchAccess, Any]]:
+    if not isinstance(expr, AstBinaryExpr) or expr.op != "/":
+        return None
+    numerator = expr.left
+    tau_expr = expr.right
+    if (
+        isinstance(numerator, AstBinaryExpr)
+        and numerator.op == "-"
+        and _is_plain_branch_access(numerator.left, "V")
+        and _same_ast_voltage_target(numerator.right, target)
+    ):
+        return numerator.left, tau_expr
+    return None
+
+
+def _iter_ast_block_task_calls(stmt: Any):
+    if isinstance(stmt, AstBlock):
+        for child in stmt.statements:
+            yield from _iter_ast_block_task_calls(child)
+        return
+    if isinstance(stmt, AstTaskCall):
+        yield stmt
+
+
+def _collect_indirect_branch_ode_raw_ops(model_cls: Any) -> tuple[tuple[Any, ...], ...]:
+    module = getattr(model_cls, "_module_ast", None)
+    analog_block = getattr(module, "analog_block", None)
+    body = getattr(analog_block, "body", None)
+    if body is None:
+        return ()
+    ops: list[tuple[Any, ...]] = []
+    for stmt in _iter_ast_block_task_calls(body):
+        if str(getattr(stmt, "name", "")) != "$indirect_branch":
+            continue
+        args = list(getattr(stmt, "args", ()) or ())
+        if len(args) < 3:
+            continue
+        target, lhs, rhs = args[:3]
+        if not _is_plain_branch_access(target, "V"):
+            continue
+        derivative_rhs = _indirect_branch_ddt_rhs_ast(target, lhs, rhs)
+        if derivative_rhs is None:
+            continue
+        matched = _match_first_order_balance_rhs(derivative_rhs, target)
+        if matched is None:
+            continue
+        input_branch, tau_expr = matched
+        if not _is_plain_branch_access(input_branch, "V") or input_branch.node2 is not None:
+            continue
+        ops.append((target.node1, target.node2, input_branch.node1, tau_expr))
+    return tuple(ops)
+
+
+def _model_has_indirect_branch_ode_ops(model_cls: Any) -> bool:
+    return bool(_collect_indirect_branch_ode_raw_ops(model_cls))
+
+
+def _collect_branch_current_ddt_raw_ops(model_cls: Any) -> tuple[tuple[Any, ...], ...]:
+    module = getattr(model_cls, "_module_ast", None)
+    analog_block = getattr(module, "analog_block", None)
+    body = getattr(analog_block, "body", None)
+    if body is None:
+        return ()
+    ops: list[tuple[Any, ...]] = []
+    for stmt in _iter_ast_block_contributions(body):
+        branch = stmt.branch
+        if not _is_plain_branch_access(branch, "I") or branch.node2 is None:
+            continue
+        matched = _match_scaled_ddt_call(stmt.expr)
+        if matched is None:
+            continue
+        gain_expr, ddt_call = matched
+        args = list(getattr(ddt_call, "args", ()) or ())
+        if len(args) != 1:
+            continue
+        voltage = args[0]
+        if not _is_plain_branch_access(voltage, "V") or voltage.node2 is None:
+            continue
+        ops.append((branch.node1, branch.node2, voltage.node1, voltage.node2, gain_expr))
+    return tuple(ops)
+
+
+def _model_has_branch_current_ddt_ops(model_cls: Any) -> bool:
+    return bool(_collect_branch_current_ddt_raw_ops(model_cls))
+
+
 def _convert_branch_current_idt_ops(
     *,
     model: Any,
@@ -2610,6 +2882,125 @@ def _convert_branch_current_idt_ops(
                 state_id=state_ids[state_key],
                 gain=float(gain),
                 ic=float(ic),
+            )
+        )
+
+    return tuple(converted), tuple(reasons)
+
+
+def _convert_branch_current_ddt_ops(
+    *,
+    model: Any,
+    model_index: int,
+    node_ids: dict[str, int],
+    nodes: list[RustSimNode],
+    state_ids: dict[tuple[int, str], int],
+    states: list[RustSimState],
+) -> tuple[Tuple[RustSimBranchDdtOp, ...], Tuple[str, ...]]:
+    model_cls = getattr(model, "__class__", type(model))
+    raw_ops = _collect_branch_current_ddt_raw_ops(model_cls)
+    if not raw_ops:
+        return (), ()
+
+    converted: list[RustSimBranchDdtOp] = []
+    reasons: list[str] = []
+    prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
+    for op_index, (current_p, current_n, voltage_p, voltage_n, gain_expr) in enumerate(raw_ops):
+        gain, gain_reason = _scalar(model, _ast_static_scalar_expr(gain_expr))
+        if gain_reason is not None or gain is None:
+            reasons.append(f"{prefix}:branch_ddt:{op_index}:gain:{gain_reason}")
+            continue
+        if not math.isfinite(float(gain)):
+            reasons.append(f"{prefix}:branch_ddt:{op_index}:nonfinite_gain")
+            continue
+
+        current_node = _branch_current_node_name(
+            _external_node(model, str(current_p)),
+            _external_node(model, str(current_n)),
+        )
+        current_id = _add_node(current_node, node_ids, nodes)
+        pos_id = _add_node(_external_node(model, str(voltage_p)), node_ids, nodes)
+        neg_id = _add_node(_external_node(model, str(voltage_n)), node_ids, nodes)
+        state_name = f"$branch_ddt_{op_index}"
+        state_key = (model_index, state_name)
+        if state_key not in state_ids:
+            state_id = len(state_ids)
+            state_ids[state_key] = state_id
+            states.append(
+                RustSimState(
+                    name=f"{model_index}:{state_name}",
+                    state_id=state_id,
+                    initial_value=0.0,
+                    is_integer=False,
+                )
+            )
+        converted.append(
+            RustSimBranchDdtOp(
+                current_node_id=current_id,
+                pos_node_id=pos_id,
+                neg_node_id=neg_id,
+                state_id=state_ids[state_key],
+                gain=float(gain),
+            )
+        )
+
+    return tuple(converted), tuple(reasons)
+
+
+def _convert_indirect_branch_ode_ops(
+    *,
+    model: Any,
+    model_index: int,
+    node_ids: dict[str, int],
+    nodes: list[RustSimNode],
+    state_ids: dict[tuple[int, str], int],
+    states: list[RustSimState],
+) -> tuple[Tuple[RustSimIndirectBranchOdeOp, ...], Tuple[str, ...]]:
+    model_cls = getattr(model, "__class__", type(model))
+    raw_ops = _collect_indirect_branch_ode_raw_ops(model_cls)
+    if not raw_ops:
+        return (), ()
+
+    converted: list[RustSimIndirectBranchOdeOp] = []
+    reasons: list[str] = []
+    prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
+    for op_index, (target, reference, input_node, tau_expr) in enumerate(raw_ops):
+        tau, tau_reason = _scalar(model, _ast_static_scalar_expr(tau_expr))
+        if tau_reason is not None or tau is None:
+            reasons.append(f"{prefix}:indirect_ode:{op_index}:tau:{tau_reason}")
+            continue
+        if not math.isfinite(float(tau)) or float(tau) <= 0.0:
+            reasons.append(f"{prefix}:indirect_ode:{op_index}:invalid_tau")
+            continue
+
+        target_id = _add_node(_external_node(model, str(target)), node_ids, nodes)
+        reference_id = (
+            None
+            if reference is None
+            else _add_node(_external_node(model, str(reference)), node_ids, nodes)
+        )
+        input_id = _add_node(_external_node(model, str(input_node)), node_ids, nodes)
+        state_name = f"$indirect_branch_ode_{op_index}"
+        state_key = (model_index, state_name)
+        if state_key not in state_ids:
+            state_id = len(state_ids)
+            state_ids[state_key] = state_id
+            states.append(
+                RustSimState(
+                    name=f"{model_index}:{state_name}",
+                    state_id=state_id,
+                    initial_value=0.0,
+                    is_integer=False,
+                )
+            )
+        converted.append(
+            RustSimIndirectBranchOdeOp(
+                target_node_id=target_id,
+                reference_node_id=reference_id,
+                input_node_id=input_id,
+                state_id=state_ids[state_key],
+                tau=float(tau),
+                ic=0.0,
             )
         )
 
@@ -2734,6 +3125,8 @@ def _convert_event_transition_ops(
         converted_always_bodies += 1
 
     for stmt in body_ir.statements:
+        if _is_branch_ddt_contribution_stmt(stmt):
+            continue
         if _is_continuous_body_stmt(stmt):
             if seen_transition:
                 pending_continuous.append(stmt)
@@ -3156,6 +3549,8 @@ def build_source_record_rust_program(
     continuous_linear_ops: list[RustSimLinearOp] = []
     zi_nd_ops: list[RustSimZiNdOp] = []
     branch_idt_ops: list[RustSimBranchIdtOp] = []
+    branch_ddt_ops: list[RustSimBranchDdtOp] = []
+    indirect_branch_ode_ops: list[RustSimIndirectBranchOdeOp] = []
     rust_events: list[RustSimEvent] = []
     rust_transitions: list[RustSimTransition] = []
     rust_slews: list[RustSimSlew] = []
@@ -3219,8 +3614,12 @@ def build_source_record_rust_program(
             getattr(model_cls, "_evaluate_ir_sampled_zi_nd_ops", ()) or ()
         )
         has_branch_current_idt_ops = _model_has_branch_current_idt_ops(model_cls)
+        has_branch_current_ddt_ops = _model_has_branch_current_ddt_ops(model_cls)
+        has_indirect_branch_ode_ops = _model_has_indirect_branch_ode_ops(model_cls)
         has_continuous_body_candidate = (
             not has_branch_current_idt_ops
+            and not has_branch_current_ddt_ops
+            and not has_indirect_branch_ode_ops
             and not sampled_zi_nd_raw_ops
             and _model_has_rustsim_continuous_body_candidate(model_cls)
         )
@@ -3231,6 +3630,7 @@ def build_source_record_rust_program(
             or tuple(getattr(model_cls, "_whole_segment_candidates", ()) or ())
             or (
                 not has_branch_current_idt_ops
+                and not has_indirect_branch_ode_ops
                 and _model_has_rustsim_event_transition_candidate(model_cls)
             )
             or has_continuous_body_candidate
@@ -3239,6 +3639,8 @@ def build_source_record_rust_program(
             has_event_transition_ir
             or sampled_zi_nd_raw_ops
             or has_branch_current_idt_ops
+            or has_branch_current_ddt_ops
+            or has_indirect_branch_ode_ops
         )
         if has_event_transition_ir:
             event_reasons = _convert_event_transition_ops(
@@ -3292,6 +3694,28 @@ def build_source_record_rust_program(
         if model_branch_idt_reasons:
             reasons.extend(model_branch_idt_reasons)
         branch_idt_ops.extend(model_branch_idt_ops)
+        model_branch_ddt_ops, model_branch_ddt_reasons = _convert_branch_current_ddt_ops(
+            model=model,
+            model_index=model_index,
+            node_ids=node_ids,
+            nodes=nodes,
+            state_ids=state_ids,
+            states=states,
+        )
+        if model_branch_ddt_reasons:
+            reasons.extend(model_branch_ddt_reasons)
+        branch_ddt_ops.extend(model_branch_ddt_ops)
+        model_indirect_ode_ops, model_indirect_ode_reasons = _convert_indirect_branch_ode_ops(
+            model=model,
+            model_index=model_index,
+            node_ids=node_ids,
+            nodes=nodes,
+            state_ids=state_ids,
+            states=states,
+        )
+        if model_indirect_ode_reasons:
+            reasons.extend(model_indirect_ode_reasons)
+        indirect_branch_ode_ops.extend(model_indirect_ode_ops)
         model_ops, model_reasons = _convert_continuous_linear_ops(
             model=model,
             model_index=model_index,
@@ -3303,6 +3727,14 @@ def build_source_record_rust_program(
         if has_rustsim_program_ir and all(
             str(reason).endswith(":no_continuous_linear_ir")
             for reason in model_reasons
+        ):
+            model_reasons = ()
+        if (
+            getattr(model, "_analog_primitives", None)
+            and all(
+                str(reason).endswith(":no_continuous_linear_ir")
+                for reason in model_reasons
+            )
         ):
             model_reasons = ()
         if (
@@ -3345,6 +3777,8 @@ def build_source_record_rust_program(
             continuous_linear_ops=tuple(continuous_linear_ops),
             zi_nd_ops=tuple(zi_nd_ops),
             branch_idt_ops=tuple(branch_idt_ops),
+            branch_ddt_ops=tuple(branch_ddt_ops),
+            indirect_branch_ode_ops=tuple(indirect_branch_ode_ops),
             body_stmt_ops=tuple(body_stmt_ops),
             body_expr_ops=tuple(body_expr_ops),
             source_data=tuple(source_data),

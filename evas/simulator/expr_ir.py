@@ -116,6 +116,8 @@ PURE_MATH_FUNCTIONS = frozenset(
 STATEFUL_ANALOG_FUNCTIONS = frozenset(
     {
         "cross",
+        "ddt",
+        "idt",
         "idtmod",
         "last_crossing",
         "slew",
@@ -133,8 +135,11 @@ TRANSIENT_ANALYSIS_FUNCTIONS = frozenset(
     }
 )
 
+GENERIC_ACCESS_FUNCTIONS = frozenset({"potential", "flow"})
+
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
+        "$attribute",
         "$cds_get_mc_trial_number",
         "$dist_uniform",
         "$fopen",
@@ -256,6 +261,7 @@ class LoweringContext:
                 PURE_MATH_FUNCTIONS
                 | STATEFUL_ANALOG_FUNCTIONS
                 | TRANSIENT_ANALYSIS_FUNCTIONS
+                | GENERIC_ACCESS_FUNCTIONS
             ),
             allowed_system_functions=SUPPORTED_SYSTEM_FUNCTIONS,
             allowed_methods=SUPPORTED_METHODS,
@@ -905,6 +911,13 @@ def _append_body_expr_ops(
         return True
 
     if isinstance(expr_ir, FunctionCallIR):
+        if expr_ir.name in {"potential", "flow"}:
+            branch = _generic_access_function_to_branch(expr_ir)
+            if branch is None:
+                return False
+            return _append_branch_body_expr_ops(branch, bindings, node_slots, ops)
+        if expr_ir.name == "$attribute":
+            return _append_attribute_body_expr_ops(expr_ir, ops)
         if expr_ir.name == "$temperature":
             if expr_ir.args:
                 return False
@@ -963,6 +976,65 @@ def _append_body_expr_ops(
         return True
 
     return False
+
+
+def _generic_access_function_to_branch(expr_ir: FunctionCallIR) -> Optional[BranchAccessIR]:
+    if expr_ir.name not in {"potential", "flow"} or not expr_ir.args:
+        return None
+
+    first = _node_ref_from_expr_ir(expr_ir.args[0])
+    if first is None:
+        return None
+    node1, node1_index, node1_index2 = first
+
+    node2 = node2_index = node2_index2 = None
+    if len(expr_ir.args) > 1:
+        second = _node_ref_from_expr_ir(expr_ir.args[1])
+        if second is None:
+            return None
+        node2, node2_index, node2_index2 = second
+
+    return BranchAccessIR(
+        access_type="V" if expr_ir.name == "potential" else "I",
+        node1=node1,
+        node2=node2,
+        node1_index=node1_index,
+        node2_index=node2_index,
+        node1_index2=node1_index2,
+        node2_index2=node2_index2,
+    )
+
+
+def _node_ref_from_expr_ir(
+    expr_ir: ExprIR,
+) -> Optional[tuple[str, Optional[ExprIR], Optional[ExprIR]]]:
+    if isinstance(expr_ir, IdentifierIR):
+        return expr_ir.name, None, None
+    if isinstance(expr_ir, ArrayAccessIR):
+        return expr_ir.name, expr_ir.index, None
+    return None
+
+
+def _append_attribute_body_expr_ops(
+    expr_ir: FunctionCallIR,
+    ops: list[BodyExprOp],
+) -> bool:
+    if len(expr_ir.args) != 1:
+        return False
+    key_expr = expr_ir.args[0]
+    if not isinstance(key_expr, LiteralIR) or not isinstance(key_expr.value, str):
+        return False
+    key = str(key_expr.value).strip().lower()
+    if key.endswith(".potential.abstol"):
+        value = 1.0e-6
+    elif key.endswith(".flow.abstol"):
+        value = 1.0e-12
+    elif key.endswith(".abstol"):
+        value = 1.0e-12
+    else:
+        value = 0.0
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=value))
+    return True
 
 
 def _append_simparam_body_expr_ops(
@@ -1149,14 +1221,29 @@ def _append_branch_body_expr_ops(
     node_slots: Mapping[str, int],
     ops: list[BodyExprOp],
 ) -> bool:
-    if expr_ir.access_type != "V":
-        return False
     node1_name = static_node_ref_name(
         expr_ir.node1,
         expr_ir.node1_index,
         expr_ir.node1_index2,
     )
     if node1_name is None:
+        return False
+    if expr_ir.access_type == "I":
+        if expr_ir.node2 is None:
+            return False
+        node2_name = static_node_ref_name(
+            expr_ir.node2,
+            expr_ir.node2_index,
+            expr_ir.node2_index2,
+        )
+        if node2_name is None:
+            return False
+        current_slot = node_slots.get(_branch_current_node_name(node1_name, node2_name))
+        if current_slot is None:
+            return False
+        ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=current_slot))
+        return True
+    if expr_ir.access_type != "V":
         return False
     node1_slot = node_slots.get(node1_name)
     if node1_slot is None:
@@ -1177,6 +1264,10 @@ def _append_branch_body_expr_ops(
     ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=node2_slot))
     ops.append(BodyExprOp(BODY_EXPR_SUB))
     return True
+
+
+def _branch_current_node_name(node1: str, node2: str) -> str:
+    return f"@I:{node1}:{node2}"
 
 
 def _lower_expr_tuple(

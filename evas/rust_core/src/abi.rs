@@ -81,6 +81,27 @@ pub struct EvasRustBranchIdtOp {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustBranchDdtOp {
+    pub current_node_id: usize,
+    pub pos_node_id: usize,
+    pub neg_node_id: usize,
+    pub state_id: usize,
+    pub gain: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustIndirectBranchOdeOp {
+    pub target_node_id: usize,
+    pub reference_node_id: usize,
+    pub input_node_id: usize,
+    pub state_id: usize,
+    pub tau: f64,
+    pub ic: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvasRustTransitionTargetOp {
     pub target_id: usize,
     pub term_start: usize,

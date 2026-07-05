@@ -21,6 +21,7 @@ from evas.compiler.ast_nodes import (
     Identifier,
     IfStatement,
     SystemTask,
+    TaskCall,
     WhileStatement,
 )
 from evas.simulator.expr_ir import (
@@ -312,10 +313,80 @@ def lower_stmt(
             args.append(arg_ir)
         return SystemTaskIR(str(stmt.name), tuple(args))
 
+    if isinstance(stmt, TaskCall):
+        return _lower_task_call(stmt, ctx)
+
     if stmt is None:
         return BlockIR(())
 
     return None
+
+
+def _lower_task_call(
+    stmt: TaskCall,
+    ctx: StatementLoweringContext,
+) -> Optional[StmtIR]:
+    if stmt.name != "$indirect_branch" or len(stmt.args) < 3:
+        return None
+    target = lower_expr(stmt.args[0], ctx.expr_context)
+    lhs = lower_expr(stmt.args[1], ctx.expr_context)
+    rhs = lower_expr(stmt.args[2], ctx.expr_context)
+    if not isinstance(target, BranchAccessIR) or target.access_type != "V":
+        return None
+    if lhs is None or rhs is None:
+        return None
+    value = _indirect_branch_voltage_solution(target, lhs, rhs)
+    if value is None:
+        return None
+    return ContributionIR(target, value)
+
+
+def _same_indirect_voltage_target(expr: ExprIR, target: BranchAccessIR) -> bool:
+    return (
+        isinstance(expr, BranchAccessIR)
+        and expr.access_type == "V"
+        and expr.node1 == target.node1
+        and expr.node2 == target.node2
+        and expr.node1_index is None
+        and expr.node2_index is None
+        and expr.node1_index2 is None
+        and expr.node2_index2 is None
+        and target.node1_index is None
+        and target.node2_index is None
+        and target.node1_index2 is None
+        and target.node2_index2 is None
+    )
+
+
+def _solve_simple_indirect_form(
+    target: BranchAccessIR,
+    lhs: ExprIR,
+    rhs: ExprIR,
+) -> Optional[ExprIR]:
+    if _same_indirect_voltage_target(lhs, target):
+        return rhs
+    if isinstance(lhs, BinaryExprIR):
+        left_is_target = _same_indirect_voltage_target(lhs.left, target)
+        right_is_target = _same_indirect_voltage_target(lhs.right, target)
+        if lhs.op == "-" and left_is_target:
+            return BinaryExprIR("+", rhs, lhs.right)
+        if lhs.op == "-" and right_is_target:
+            return BinaryExprIR("-", lhs.left, rhs)
+        if lhs.op == "+" and (left_is_target or right_is_target):
+            other = lhs.right if left_is_target else lhs.left
+            return BinaryExprIR("-", rhs, other)
+    return None
+
+
+def _indirect_branch_voltage_solution(
+    target: BranchAccessIR,
+    lhs: ExprIR,
+    rhs: ExprIR,
+) -> Optional[ExprIR]:
+    value = _solve_simple_indirect_form(target, lhs, rhs)
+    if value is not None:
+        return value
+    return _solve_simple_indirect_form(target, rhs, lhs)
 
 
 def emit_python_statement(stmt_ir: StmtIR, indent: str = "    ") -> Tuple[str, ...]:
@@ -505,8 +576,8 @@ def _iter_contribution_target_tags(
     branch: BranchAccessIR,
     node_slots: dict[str, int],
 ):
-    if branch.access_type != "V":
-        yield "current_contribution_target"
+    if branch.access_type not in {"V", "I"}:
+        yield "unsupported_contribution_target"
     if branch.node2 is not None:
         yield "differential_output_target"
     node1_name = static_node_ref_name(
@@ -527,9 +598,12 @@ def _iter_contribution_target_tags(
     )
     if branch.node2 is not None and node2_name is None:
         yield "indexed_output_target"
-    if node1_name is not None and node1_name not in node_slots:
+    target_name = node1_name
+    if branch.access_type == "I" and node1_name is not None and node2_name is not None:
+        target_name = _branch_current_node_name(node1_name, node2_name)
+    if target_name is not None and target_name not in node_slots:
         yield "unresolved_output_node"
-    if node2_name is not None and node2_name not in node_slots:
+    if branch.access_type == "V" and node2_name is not None and node2_name not in node_slots:
         yield "unresolved_output_reference_node"
 
 
@@ -1752,6 +1826,8 @@ def _contribution_expr_with_reference(
     branch: BranchAccessIR,
     expr: ExprIR,
 ) -> ExprIR:
+    if branch.access_type != "V":
+        return expr
     if branch.node2 is None:
         return expr
     reference = BranchAccessIR(
@@ -2184,8 +2260,6 @@ def _encode_contribution_target(
     branch: BranchAccessIR,
     node_slots: dict[str, int],
 ) -> Optional[int]:
-    if branch.access_type != "V":
-        return None
     node_name = static_node_ref_name(
         branch.node1,
         branch.node1_index,
@@ -2193,7 +2267,24 @@ def _encode_contribution_target(
     )
     if node_name is None:
         return None
+    if branch.access_type == "I":
+        if branch.node2 is None:
+            return None
+        node2_name = static_node_ref_name(
+            branch.node2,
+            branch.node2_index,
+            branch.node2_index2,
+        )
+        if node2_name is None:
+            return None
+        return node_slots.get(_branch_current_node_name(node_name, node2_name))
+    if branch.access_type != "V":
+        return None
     return node_slots.get(node_name)
+
+
+def _branch_current_node_name(node1: str, node2: str) -> str:
+    return f"@I:{node1}:{node2}"
 
 
 def _emit_stmt_lines(stmt_ir: StmtIR, lines: list[str], indent: str, level: int) -> None:

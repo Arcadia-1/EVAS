@@ -10034,6 +10034,104 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(3.0)
 
+    def test_rust_full_model_indirect_branch_first_order_balance(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_indirect_branch_first_order(out, inp);
+    output voltage out;
+    input voltage inp;
+    parameter real tau = 20n;
+    analog begin
+        V(out) : ddt(V(out)) == (V(inp) - V(out)) / tau;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.add_source("inp", dc(1.0))
+            sim.record("out")
+            result = sim.run(
+                tstop=60e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        _default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.signals["out"][-1] == pytest.approx(
+            1.0 - math.exp(-3.0), rel=1e-3, abs=1e-5
+        )
+        assert all(
+            earlier <= later + 1e-12
+            for earlier, later in zip(
+                rust_result.signals["out"][:-1], rust_result.signals["out"][1:]
+            )
+        )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
+    def test_rust_full_model_branch_ddt_current_feeds_transition_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_branch_ddt_current(p, n, imon);
+    inout electrical p;
+    inout electrical n;
+    output electrical imon;
+    parameter real c = 1p;
+    analog begin
+        I(p, n) <+ c * ddt(V(p, n));
+        V(imon) <+ transition(I(p, n), 0.0, 200p, 200p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.add_source("p", pwl([0.0, 1e-9, 3e-9, 5e-9], [0.0, 0.0, 0.4, 0.4]))
+            sim.add_source("n", dc(0.0))
+            sim.record("imon")
+            result = sim.run(
+                tstop=5e-9,
+                tstep=100e-12,
+                record_step=100e-12,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["imon"].tolist() == pytest.approx(
+            default_result.signals["imon"].tolist(), rel=0.12, abs=1.0e-5
+        )
+        sample_idx = min(
+            range(len(rust_result.time)),
+            key=lambda idx: abs(float(rust_result.time[idx]) - 2.0e-9),
+        )
+        assert rust_result.signals["imon"][sample_idx] == pytest.approx(2.0e-4, rel=0.12)
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_cadence_generic_potential_and_extended_table_model_compile(self):
         src = """\
 `include "disciplines.vams"

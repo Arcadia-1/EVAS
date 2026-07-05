@@ -131,6 +131,10 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
     zi_nd_count: usize,
     branch_idt_ops: *const EvasRustBranchIdtOp,
     branch_idt_count: usize,
+    branch_ddt_ops: *const EvasRustBranchDdtOp,
+    branch_ddt_count: usize,
+    indirect_branch_ode_ops: *const EvasRustIndirectBranchOdeOp,
+    indirect_branch_ode_count: usize,
     linear_ops: *const EvasRustLinearOp,
     linear_count: usize,
     linear_terms: *const EvasRustLinearTerm,
@@ -167,42 +171,48 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
     if branch_idt_count > 0 && branch_idt_ops.is_null() {
         return -904;
     }
-    if linear_count > 0 && linear_ops.is_null() {
+    if branch_ddt_count > 0 && branch_ddt_ops.is_null() {
         return -905;
     }
-    if linear_term_count > 0 && linear_terms.is_null() {
+    if indirect_branch_ode_count > 0 && indirect_branch_ode_ops.is_null() {
         return -906;
     }
-    if linear_condition_count > 0 && linear_conditions.is_null() {
+    if linear_count > 0 && linear_ops.is_null() {
         return -907;
     }
-    if node_count > 0 && node_values.is_null() {
+    if linear_term_count > 0 && linear_terms.is_null() {
         return -908;
     }
-    if state_count > 0 && state_values.is_null() {
+    if linear_condition_count > 0 && linear_conditions.is_null() {
         return -909;
     }
-    if record_count > 0 && record_node_ids.is_null() {
+    if node_count > 0 && node_values.is_null() {
         return -910;
     }
-    if capacity > 0 && time_values.is_null() {
+    if state_count > 0 && state_values.is_null() {
         return -911;
     }
-    if capacity > 0 && step_values.is_null() {
+    if record_count > 0 && record_node_ids.is_null() {
         return -912;
+    }
+    if capacity > 0 && time_values.is_null() {
+        return -913;
+    }
+    if capacity > 0 && step_values.is_null() {
+        return -914;
     }
     let signal_capacity = match capacity.checked_mul(record_count) {
         Some(value) => value,
-        None => return -913,
+        None => return -915,
     };
     if signal_capacity > 0 && signal_values.is_null() {
-        return -914;
+        return -916;
     }
     if out_count.is_null() {
-        return -915;
+        return -917;
     }
     if out_source_breakpoints.is_null() {
-        return -916;
+        return -918;
     }
 
     let source_slice = if source_count == 0 {
@@ -224,6 +234,16 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
         &[]
     } else {
         std::slice::from_raw_parts(branch_idt_ops, branch_idt_count)
+    };
+    let branch_ddt_op_slice = if branch_ddt_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(branch_ddt_ops, branch_ddt_count)
+    };
+    let indirect_branch_ode_op_slice = if indirect_branch_ode_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(indirect_branch_ode_ops, indirect_branch_ode_count)
     };
     let linear_op_slice = if linear_count == 0 {
         &[]
@@ -276,6 +296,8 @@ pub unsafe extern "C" fn evas_rust_run_source_linear_record_program(
         source_data_slice,
         zi_nd_op_slice,
         branch_idt_op_slice,
+        branch_ddt_op_slice,
+        indirect_branch_ode_op_slice,
         linear_op_slice,
         linear_term_slice,
         linear_condition_slice,
@@ -322,6 +344,8 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     transition_count: usize,
     slews: *const EvasRustSimSlewSpec,
     slew_count: usize,
+    branch_ddt_ops: *const EvasRustBranchDdtOp,
+    branch_ddt_count: usize,
     side_effect_kinds: *mut u8,
     side_effect_spec_ids: *mut usize,
     side_effect_arg_starts: *mut usize,
@@ -385,6 +409,9 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     }
     if slew_count > 0 && slews.is_null() {
         return -1019;
+    }
+    if branch_ddt_count > 0 && branch_ddt_ops.is_null() {
+        return -1024;
     }
     if side_effect_capacity > 0
         && (side_effect_kinds.is_null()
@@ -484,6 +511,11 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     } else {
         std::slice::from_raw_parts(slews, slew_count)
     };
+    let branch_ddt_op_slice = if branch_ddt_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(branch_ddt_ops, branch_ddt_count)
+    };
     let side_effect_kind_slice = if side_effect_capacity == 0 {
         &mut []
     } else {
@@ -561,6 +593,7 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
         event_slice,
         transition_slice,
         slew_slice,
+        branch_ddt_op_slice,
         side_effect_kind_slice,
         side_effect_spec_slice,
         side_effect_arg_start_slice,
