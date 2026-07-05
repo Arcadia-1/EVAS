@@ -9805,6 +9805,160 @@ endmodule
         expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
         assert result.signals["out"][-1] == pytest.approx(expected_vt + 31.0)
 
+    def test_rust_full_model_cadence_environment_helpers_match_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_cadence_env_helpers(clk, inp, out);
+    input voltage clk;
+    input voltage inp;
+    output voltage out;
+    real value;
+    analog begin
+        @(initial_step) value = 0.0;
+        @(cross(V(clk) - 0.5, +1)) begin
+            $discontinuity(0);
+            $cds_violation(V(inp) > 2.0, "inp limit", "warning");
+            $cds_set_rf_source_info("rf0", 1.0e9);
+            value = $vt + $vt(600.0) + $temperature()
+                  + $simparam("tnom", 27.0) + $simparam("missing", 4.25)
+                  + $cds_get_mc_trial_number() + $rtoi(2.7);
+        end
+        V(out) <+ value;
+    end
+endmodule
+"""
+        results = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("inp", dc(0.4))
+            sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                         rise=0.1e-9, fall=0.1e-9, duty=0.5))
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=25e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            results.append(result.signals["out"][-1])
+
+        expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
+        expected_vt_600 = 1.380649e-23 * 600.0 / 1.602176634e-19
+        expected = expected_vt + expected_vt_600 + 300.15 + 27.0 + 4.25 + 3.0
+        assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
+        assert results[1] == pytest.approx(expected, rel=1e-8, abs=1e-8)
+
+    def test_rust_full_model_instance_query_helpers_are_model_specific(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_instance_query_helpers(inp, out, metric);
+    input voltage inp;
+    output voltage out;
+    output voltage metric;
+    parameter real gain = 0.8;
+    analog begin
+        V(out) <+ ($param_given(gain) ? gain : 1.0) * V(inp) * $mfactor();
+        V(metric) <+ $port_connected(out) + $param_given(gain) + $mfactor();
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        default_model = ModelCls()
+        default_model.node_map = {
+            "inp": "inp",
+            "out": "out_def",
+            "metric": "metric_def",
+        }
+        default_model._mfactor_value = 1.0
+
+        override_model = ModelCls()
+        override_model.node_map = {
+            "inp": "inp",
+            "out": "out_ovr",
+            "metric": "metric_ovr",
+        }
+        override_model.params["gain"] = 0.5
+        override_model._given_params = {"gain"}
+        override_model._mfactor_value = 3.0
+
+        sim = Simulator()
+        sim.add_source("inp", dc(0.4))
+        sim.add_model(default_model)
+        sim.add_model(override_model)
+        for signal in ("out_def", "metric_def", "out_ovr", "metric_ovr"):
+            sim.record(signal)
+        result = sim.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert result.signals["out_def"][-1] == pytest.approx(0.4)
+        assert result.signals["metric_def"][-1] == pytest.approx(2.0)
+        assert result.signals["out_ovr"][-1] == pytest.approx(0.6)
+        assert result.signals["metric_ovr"][-1] == pytest.approx(5.0)
+
+    def test_rust_full_model_continuous_cds_violation_keeps_if_state_write(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_cds_violation_continuous(inp, out);
+    input voltage inp;
+    output voltage out;
+    real out_v;
+    analog begin
+        if (V(inp) > 1.0) begin
+            $cds_violation("va_threshold", "threshold_exceeded", V(inp));
+            out_v = 1.0;
+        end else begin
+            out_v = V(inp);
+        end
+        V(out) <+ out_v;
+    end
+endmodule
+"""
+        results = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("inp", dc(0.2))
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=1e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            results.append(result.signals["out"][-1])
+
+        assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
+        assert results[1] == pytest.approx(0.2)
+
     def test_cadence_indirect_branch_attributes_and_alias_compile(self):
         src = """\
 `include "disciplines.vams"

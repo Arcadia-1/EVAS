@@ -99,6 +99,7 @@ from evas.simulator.expr_ir import (
     FunctionCallIR,
     IdentifierIR,
     LiteralIR,
+    MethodCallIR,
     StateBindingIR,
     TernaryExprIR,
     UnaryExprIR,
@@ -132,6 +133,7 @@ from evas.simulator.slew_runtime import encode_slew_contribution_program
 from evas.simulator.stmt_ir import (
     AssignmentIR,
     BlockIR,
+    CaseItemIR,
     CaseStatementIR,
     ContributionIR,
     EventStatementIR,
@@ -1404,6 +1406,9 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, SystemTaskIR):
         return stmt_ir.name in {
             "$bound_step",
+            "$cds_set_rf_source_info",
+            "$cds_violation",
+            "$discontinuity",
             "$display",
             "$strobe",
             "$debug",
@@ -2289,6 +2294,212 @@ def _lower_module_body_with_user_function_inlining(module: Any) -> Optional[Bloc
     return body_ir if isinstance(body_ir, BlockIR) else None
 
 
+def _lower_module_body_for_model(module: Any, model: Any) -> Optional[BlockIR]:
+    body_ir = _lower_module_body_with_user_function_inlining(module)
+    if not isinstance(body_ir, BlockIR):
+        return body_ir
+    rewritten = _replace_model_query_stmt(body_ir, model)
+    return rewritten if isinstance(rewritten, BlockIR) else None
+
+
+def _replace_model_query_stmt(stmt_ir: object, model: Any) -> object:
+    if isinstance(stmt_ir, AssignmentIR):
+        return AssignmentIR(
+            _replace_model_query_assignment_target(stmt_ir.target, model),
+            _replace_model_query_expr(stmt_ir.value, model),
+        )
+    if isinstance(stmt_ir, ContributionIR):
+        return ContributionIR(
+            _replace_model_query_branch(stmt_ir.branch, model),
+            _replace_model_query_expr(stmt_ir.expr, model),
+        )
+    if isinstance(stmt_ir, EventStatementIR):
+        return EventStatementIR(
+            _replace_model_query_event(stmt_ir.event, model),
+            _replace_model_query_stmt(stmt_ir.body, model),
+        )
+    if isinstance(stmt_ir, BlockIR):
+        return BlockIR(
+            tuple(_replace_model_query_stmt(child, model) for child in stmt_ir.statements)
+        )
+    if isinstance(stmt_ir, IfStatementIR):
+        return IfStatementIR(
+            _replace_model_query_expr(stmt_ir.cond, model),
+            _replace_model_query_stmt(stmt_ir.then_body, model),
+            (
+                None
+                if stmt_ir.else_body is None
+                else _replace_model_query_stmt(stmt_ir.else_body, model)
+            ),
+        )
+    if isinstance(stmt_ir, ForStatementIR):
+        return ForStatementIR(
+            _replace_model_query_stmt(stmt_ir.init, model),
+            _replace_model_query_expr(stmt_ir.cond, model),
+            _replace_model_query_stmt(stmt_ir.update, model),
+            _replace_model_query_stmt(stmt_ir.body, model),
+        )
+    if isinstance(stmt_ir, WhileStatementIR):
+        return WhileStatementIR(
+            _replace_model_query_expr(stmt_ir.cond, model),
+            _replace_model_query_stmt(stmt_ir.body, model),
+        )
+    if isinstance(stmt_ir, CaseStatementIR):
+        return CaseStatementIR(
+            _replace_model_query_expr(stmt_ir.expr, model),
+            tuple(
+                CaseItemIR(
+                    tuple(
+                        _replace_model_query_expr(value, model)
+                        for value in item.values
+                    ),
+                    _replace_model_query_stmt(item.body, model),
+                )
+                for item in stmt_ir.items
+            ),
+        )
+    if isinstance(stmt_ir, SystemTaskIR):
+        return SystemTaskIR(
+            stmt_ir.name,
+            tuple(_replace_model_query_expr(arg, model) for arg in stmt_ir.args),
+        )
+    return stmt_ir
+
+
+def _replace_model_query_assignment_target(target: object, model: Any) -> object:
+    if isinstance(target, ArrayAccessIR):
+        return ArrayAccessIR(
+            target.name,
+            _replace_model_query_expr(target.index, model),
+        )
+    return target
+
+
+def _replace_model_query_branch(branch: BranchAccessIR, model: Any) -> BranchAccessIR:
+    return BranchAccessIR(
+        access_type=branch.access_type,
+        node1=branch.node1,
+        node2=branch.node2,
+        node1_index=(
+            None
+            if branch.node1_index is None
+            else _replace_model_query_expr(branch.node1_index, model)
+        ),
+        node2_index=(
+            None
+            if branch.node2_index is None
+            else _replace_model_query_expr(branch.node2_index, model)
+        ),
+        node1_index2=(
+            None
+            if branch.node1_index2 is None
+            else _replace_model_query_expr(branch.node1_index2, model)
+        ),
+        node2_index2=(
+            None
+            if branch.node2_index2 is None
+            else _replace_model_query_expr(branch.node2_index2, model)
+        ),
+    )
+
+
+def _replace_model_query_event(event_ir: object, model: Any) -> object:
+    if isinstance(event_ir, EventTriggerIR):
+        return EventTriggerIR(
+            event_type=event_ir.event_type,
+            args=tuple(_replace_model_query_expr(arg, model) for arg in event_ir.args),
+            direction=event_ir.direction,
+            time_tol=(
+                None
+                if event_ir.time_tol is None
+                else _replace_model_query_expr(event_ir.time_tol, model)
+            ),
+            expr_tol=(
+                None
+                if event_ir.expr_tol is None
+                else _replace_model_query_expr(event_ir.expr_tol, model)
+            ),
+        )
+    if isinstance(event_ir, CombinedEventIR):
+        return CombinedEventIR(
+            tuple(_replace_model_query_event(child, model) for child in event_ir.events)
+        )
+    return event_ir
+
+
+def _replace_model_query_expr(expr_ir: ExprIR, model: Any) -> ExprIR:
+    if isinstance(expr_ir, FunctionCallIR):
+        name = str(expr_ir.name)
+        if name == "$param_given":
+            query_name = _query_arg_name(expr_ir.args[0]) if expr_ir.args else None
+            if query_name is not None:
+                given = getattr(model, "_given_params", set()) or set()
+                return LiteralIR(
+                    1.0 if str(query_name).strip().lower() in given else 0.0
+                )
+        if name == "$port_connected":
+            query_name = _query_arg_name(expr_ir.args[0]) if expr_ir.args else None
+            if query_name is not None:
+                return LiteralIR(1.0 if _model_port_connected(model, query_name) else 0.0)
+        if name == "$mfactor" and not expr_ir.args:
+            return LiteralIR(float(getattr(model, "_mfactor_value", 1.0)))
+        return FunctionCallIR(
+            expr_ir.name,
+            tuple(_replace_model_query_expr(arg, model) for arg in expr_ir.args),
+        )
+    if isinstance(expr_ir, ArrayAccessIR):
+        return ArrayAccessIR(
+            expr_ir.name,
+            _replace_model_query_expr(expr_ir.index, model),
+        )
+    if isinstance(expr_ir, BinaryExprIR):
+        return BinaryExprIR(
+            expr_ir.op,
+            _replace_model_query_expr(expr_ir.left, model),
+            _replace_model_query_expr(expr_ir.right, model),
+        )
+    if isinstance(expr_ir, UnaryExprIR):
+        return UnaryExprIR(
+            expr_ir.op,
+            _replace_model_query_expr(expr_ir.operand, model),
+        )
+    if isinstance(expr_ir, TernaryExprIR):
+        return TernaryExprIR(
+            _replace_model_query_expr(expr_ir.cond, model),
+            _replace_model_query_expr(expr_ir.true_expr, model),
+            _replace_model_query_expr(expr_ir.false_expr, model),
+        )
+    if isinstance(expr_ir, BranchAccessIR):
+        return _replace_model_query_branch(expr_ir, model)
+    if isinstance(expr_ir, MethodCallIR):
+        return MethodCallIR(
+            expr_ir.obj,
+            expr_ir.method,
+            tuple(_replace_model_query_expr(arg, model) for arg in expr_ir.args),
+        )
+    return expr_ir
+
+
+def _query_arg_name(expr_ir: ExprIR) -> Optional[str]:
+    if isinstance(expr_ir, IdentifierIR):
+        return expr_ir.name
+    if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
+        return str(expr_ir.value)
+    return None
+
+
+def _model_port_connected(model: Any, name: str) -> bool:
+    port = str(name)
+    node_map = getattr(model, "node_map", {}) or {}
+    if port in node_map:
+        return True
+    folded = port.casefold()
+    if any(str(key).casefold() == folded for key in node_map):
+        return True
+    module_ports = getattr(getattr(model, "__class__", type(model)), "_module_ports", ())
+    return any(str(candidate).casefold() == folded for candidate in module_ports)
+
+
 def _iter_ast_block_contributions(stmt: Any):
     if isinstance(stmt, AstBlock):
         for child in stmt.statements:
@@ -2428,7 +2639,7 @@ def _convert_event_transition_ops(
     module = getattr(model_cls, "_module_ast", None)
     if module is None:
         return (f"{prefix}:module_ast_unavailable",)
-    body_ir = _lower_module_body_with_user_function_inlining(module)
+    body_ir = _lower_module_body_for_model(module, model)
     if not isinstance(body_ir, BlockIR):
         return (f"{prefix}:stmt_lower_failed",)
     if _prefer_existing_timer_static_linear_path(

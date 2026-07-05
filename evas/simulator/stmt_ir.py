@@ -80,6 +80,9 @@ class StatementLoweringContext:
     allowed_system_tasks: frozenset[str] = frozenset(
         {
             "$bound_step",
+            "$cds_set_rf_source_info",
+            "$cds_violation",
+            "$discontinuity",
             "$fclose",
             "$fdisplay",
             "$fwrite",
@@ -1731,6 +1734,9 @@ def _collect_body_write_specs(
 
 def _is_noop_body_system_task(stmt_ir: SystemTaskIR) -> bool:
     return stmt_ir.name in {
+        "$cds_set_rf_source_info",
+        "$cds_violation",
+        "$discontinuity",
         "$display",
         "$strobe",
         "$debug",

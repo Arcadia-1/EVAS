@@ -12,6 +12,7 @@ older static-linear sublanguage in :mod:`evas.simulator.evaluate_ir`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Mapping, Optional, Tuple, Union
 
@@ -134,15 +135,23 @@ TRANSIENT_ANALYSIS_FUNCTIONS = frozenset(
 
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
+        "$cds_get_mc_trial_number",
         "$dist_uniform",
         "$fopen",
+        "$mfactor",
+        "$param_given",
+        "$port_connected",
         "$random",
         "$rdist_erlang",
         "$rdist_exponential",
         "$rdist_normal",
         "$rdist_poisson",
         "$rdist_uniform",
+        "$rtoi",
         "$sformat",
+        "$simparam",
+        "$temperature",
+        "$vt",
     }
 )
 
@@ -216,6 +225,10 @@ _BODY_FUNCTION_OPS = {
     "$dist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
     "$rdist_uniform": (BODY_EXPR_RDIST_UNIFORM, 3),
 }
+
+_DEFAULT_TEMPERATURE_C = 27.0
+_DEFAULT_TEMPERATURE_K = _DEFAULT_TEMPERATURE_C + 273.15
+_BOLTZMANN_OVER_Q = 1.380649e-23 / 1.602176634e-19
 
 
 @dataclass(frozen=True)
@@ -819,6 +832,17 @@ def _append_body_expr_ops(
         if expr_ir.name in {"$abstime", "$realtime"}:
             ops.append(BodyExprOp(BODY_EXPR_READ_TIME))
             return True
+        if expr_ir.name == "$temperature":
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_DEFAULT_TEMPERATURE_K))
+            return True
+        if expr_ir.name == "$vt":
+            ops.append(
+                BodyExprOp(
+                    BODY_EXPR_CONST,
+                    value=_BOLTZMANN_OVER_Q * _DEFAULT_TEMPERATURE_K,
+                )
+            )
+            return True
         if expr_ir.name == "inf":
             ops.append(BodyExprOp(BODY_EXPR_CONST, value=float("inf")))
             return True
@@ -881,6 +905,51 @@ def _append_body_expr_ops(
         return True
 
     if isinstance(expr_ir, FunctionCallIR):
+        if expr_ir.name == "$temperature":
+            if expr_ir.args:
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_DEFAULT_TEMPERATURE_K))
+            return True
+        if expr_ir.name == "$vt":
+            if len(expr_ir.args) > 1:
+                return False
+            if not expr_ir.args:
+                ops.append(
+                    BodyExprOp(
+                        BODY_EXPR_CONST,
+                        value=_BOLTZMANN_OVER_Q * _DEFAULT_TEMPERATURE_K,
+                    )
+                )
+                return True
+            if not _append_body_expr_ops(expr_ir.args[0], bindings, node_slots, ops):
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=_BOLTZMANN_OVER_Q))
+            ops.append(BodyExprOp(BODY_EXPR_MUL))
+            return True
+        if expr_ir.name == "$simparam":
+            encoded = _append_simparam_body_expr_ops(
+                expr_ir,
+                bindings,
+                node_slots,
+                ops,
+            )
+            if encoded is not None:
+                return encoded
+        if expr_ir.name == "$cds_get_mc_trial_number":
+            if expr_ir.args:
+                return False
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+            return True
+        if expr_ir.name == "$rtoi":
+            if len(expr_ir.args) != 1:
+                return False
+            arg = expr_ir.args[0]
+            if not isinstance(arg, LiteralIR) or not isinstance(arg.value, (int, float)):
+                return False
+            value = float(arg.value)
+            rounded = math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
+            ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(rounded)))
+            return True
         op_info = _BODY_FUNCTION_OPS.get(expr_ir.name)
         if op_info is None:
             return False
@@ -894,6 +963,37 @@ def _append_body_expr_ops(
         return True
 
     return False
+
+
+def _append_simparam_body_expr_ops(
+    expr_ir: FunctionCallIR,
+    bindings: BindingTableIR,
+    node_slots: Mapping[str, int],
+    ops: list[BodyExprOp],
+) -> Optional[bool]:
+    if not expr_ir.args or len(expr_ir.args) > 2:
+        return False
+    key_expr = expr_ir.args[0]
+    if not isinstance(key_expr, LiteralIR) or not isinstance(key_expr.value, str):
+        return False
+    key = str(key_expr.value).strip().lower()
+    values = {
+        "temp": _DEFAULT_TEMPERATURE_C,
+        "temperature": _DEFAULT_TEMPERATURE_C,
+        "tnom": _DEFAULT_TEMPERATURE_C,
+        "gmin": 1e-12,
+        "reltol": 1e-3,
+        "abstol": 1e-12,
+        "iabstol": 1e-12,
+        "vabstol": 1e-6,
+    }
+    if key in values:
+        ops.append(BodyExprOp(BODY_EXPR_CONST, value=values[key]))
+        return True
+    if len(expr_ir.args) == 2:
+        return _append_body_expr_ops(expr_ir.args[1], bindings, node_slots, ops)
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+    return True
 
 
 def _expr_ir_is_integer(expr_ir: ExprIR, bindings: BindingTableIR) -> bool:
