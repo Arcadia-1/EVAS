@@ -57,6 +57,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
     BODY_STMT_LAST_CROSSING,
+    BODY_STMT_STRING_WRITE,
     BODY_STMT_STROBE,
     BODY_STMT_WHILE,
     BODY_TARGET_NODE,
@@ -929,6 +930,15 @@ def _append_body_stmt_ops(
             return last_crossing_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
+            if side_effects is not None and _append_string_format_assignment_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            ):
+                return True
             lowered_array_assignment = _dynamic_array_assignment_to_if_chain(
                 stmt_ir,
                 bindings,
@@ -1115,6 +1125,15 @@ def _append_body_stmt_ops(
                 expr_ops,
                 side_effects,
             )
+        if side_effects is not None and stmt_ir.name in {"$sformat", "$swrite"}:
+            return _append_string_write_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
         if _is_noop_body_system_task(stmt_ir):
             return True
         if side_effects is not None and stmt_ir.name in {
@@ -1190,34 +1209,37 @@ def _append_file_write_stmt(
     if not stmt_ir.args:
         return False
     fmt = ""
-    numeric_args = tuple(stmt_ir.args)
+    format_args = ()
     if len(stmt_ir.args) > 1:
         resolved_fmt = _resolve_side_effect_string(side_effects, stmt_ir.args[1])
         if resolved_fmt is None:
             return False
         fmt = resolved_fmt
-        numeric_args = (stmt_ir.args[0], *stmt_ir.args[2:])
     expr_start = len(expr_ops)
-    fmt_for_effect = fmt
-    for arg_index, arg in enumerate(numeric_args):
-        encoded = encode_body_expr_ops(arg, bindings, node_slots)
-        if encoded is None:
-            if (
-                arg_index > 0
-                and _format_has_string_placeholder(fmt_for_effect)
-                and _is_side_effect_string_arg(side_effects, bindings, arg)
-            ):
-                fmt_for_effect = _replace_first_string_placeholder(
-                    fmt_for_effect,
-                    "<string>",
-                )
-                continue
+    handle_ops = encode_body_expr_ops(stmt_ir.args[0], bindings, node_slots)
+    if handle_ops is None:
+        return False
+    expr_ops.extend(handle_ops)
+    if len(stmt_ir.args) > 2:
+        format_args = _append_format_arg_exprs(
+            stmt_ir.args[2:],
+            bindings,
+            node_slots,
+            expr_ops,
+            side_effects,
+        )
+        if format_args is None:
             return False
-        expr_ops.extend(encoded)
     add = getattr(side_effects, "add_file_write", None)
     if add is None:
         return False
-    spec_id = int(add(fmt_for_effect, append_newline=stmt_ir.name != "$fwrite"))
+    spec_id = int(
+        add(
+            fmt,
+            append_newline=stmt_ir.name != "$fwrite",
+            format_args=format_args,
+        )
+    )
     stmt_ops.append(
         BodyStmtOp(
             target_kind=BODY_STMT_FILE_WRITE,
@@ -1230,26 +1252,134 @@ def _append_file_write_stmt(
     return True
 
 
-def _format_has_string_placeholder(fmt: str) -> bool:
-    return "%s" in fmt
-
-
-def _replace_first_string_placeholder(fmt: str, value: str) -> str:
-    return fmt.replace("%s", value, 1)
-
-
-def _is_side_effect_string_arg(
-    side_effects: object,
+def _append_string_format_assignment_stmt(
+    stmt_ir: AssignmentIR,
     bindings: BindingTableIR,
-    expr_ir: ExprIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
 ) -> bool:
-    if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
-        return True
-    if _resolve_side_effect_string(side_effects, expr_ir) is not None:
-        return True
-    if isinstance(expr_ir, IdentifierIR) and bindings.resolve(expr_ir.name) is None:
-        return True
-    return False
+    if not (
+        isinstance(stmt_ir.target, IdentifierIR)
+        and isinstance(stmt_ir.value, FunctionCallIR)
+        and str(stmt_ir.value.name) == "$sformat"
+    ):
+        return False
+    return _append_string_write_op(
+        target_expr=stmt_ir.target,
+        fmt_expr=stmt_ir.value.args[0] if stmt_ir.value.args else None,
+        arg_exprs=stmt_ir.value.args[1:],
+        bindings=bindings,
+        node_slots=node_slots,
+        stmt_ops=stmt_ops,
+        expr_ops=expr_ops,
+        side_effects=side_effects,
+    )
+
+
+def _append_string_write_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if len(stmt_ir.args) < 2:
+        return False
+    return _append_string_write_op(
+        target_expr=stmt_ir.args[0],
+        fmt_expr=stmt_ir.args[1],
+        arg_exprs=stmt_ir.args[2:],
+        bindings=bindings,
+        node_slots=node_slots,
+        stmt_ops=stmt_ops,
+        expr_ops=expr_ops,
+        side_effects=side_effects,
+    )
+
+
+def _append_string_write_op(
+    *,
+    target_expr: ExprIR,
+    fmt_expr: ExprIR | None,
+    arg_exprs: Tuple[ExprIR, ...],
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if fmt_expr is None:
+        return False
+    target_name = _resolve_side_effect_string_target(side_effects, target_expr)
+    fmt = _resolve_side_effect_string(side_effects, fmt_expr)
+    if target_name is None or fmt is None:
+        return False
+    expr_start = len(expr_ops)
+    format_args = _append_format_arg_exprs(
+        arg_exprs,
+        bindings,
+        node_slots,
+        expr_ops,
+        side_effects,
+    )
+    if format_args is None:
+        return False
+    add = getattr(side_effects, "add_string_write", None)
+    if add is None:
+        return False
+    spec_id = int(add(target_name, fmt, format_args=format_args))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_STRING_WRITE,
+            target_id=spec_id,
+            expr_start=expr_start,
+            expr_count=len(expr_ops) - expr_start,
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_format_arg_exprs(
+    args: Tuple[ExprIR, ...],
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> Optional[Tuple[object, ...]]:
+    format_args = []
+    for arg in args:
+        encoded = encode_body_expr_ops(arg, bindings, node_slots)
+        if encoded is not None:
+            expr_ops.extend(encoded)
+            format_args.append("numeric")
+            continue
+        string_arg = _resolve_side_effect_string_arg(side_effects, arg)
+        if string_arg is None:
+            return None
+        format_args.append(string_arg)
+    return tuple(format_args)
+
+
+def _resolve_side_effect_string_arg(side_effects: object, expr_ir: ExprIR) -> object | None:
+    string_arg = getattr(side_effects, "string_arg", None)
+    if string_arg is None:
+        return None
+    return string_arg(expr_ir)
+
+
+def _resolve_side_effect_string_target(
+    side_effects: object,
+    expr_ir: ExprIR,
+) -> Optional[str]:
+    target_name = getattr(side_effects, "string_target_name", None)
+    if target_name is None:
+        return None
+    value = target_name(expr_ir)
+    return None if value is None else str(value)
 
 
 def _append_file_close_stmt(
@@ -1302,13 +1432,17 @@ def _append_strobe_stmt(
     add = getattr(side_effects, "add_strobe", None)
     if add is None:
         return False
-    spec_id = int(add(fmt))
     expr_start = len(expr_ops)
-    for arg in numeric_args:
-        encoded = encode_body_expr_ops(arg, bindings, node_slots)
-        if encoded is None:
-            return False
-        expr_ops.extend(encoded)
+    format_args = _append_format_arg_exprs(
+        numeric_args,
+        bindings,
+        node_slots,
+        expr_ops,
+        side_effects,
+    )
+    if format_args is None:
+        return False
+    spec_id = int(add(fmt, format_args=format_args))
     stmt_ops.append(
         BodyStmtOp(
             target_kind=BODY_STMT_STROBE,

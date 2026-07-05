@@ -141,6 +141,7 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$rdist_normal",
         "$rdist_poisson",
         "$rdist_uniform",
+        "$sformat",
     }
 )
 

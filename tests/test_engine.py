@@ -9180,7 +9180,7 @@ endmodule
         assert lines[0].startswith("edge 1 at")
         assert lines[4].startswith("edge 5 at")
 
-    def test_rust_sim_program_swrite_internal_label_noop(self):
+    def test_rust_sim_program_swrite_internal_label_state(self):
         _build_rust_core_or_skip()
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module
@@ -9225,6 +9225,7 @@ endmodule
         assert sim._perf_stats["rust_sim_program_enabled"] == 1
         assert sim._perf_stats["rust_full_model_required_failures"] == 0
         assert result.signals["out"][-1] >= 3.0
+        assert model.state["label_q"] == "edge=3"
 
     def test_rust_sim_program_swrite_file_metric_line(self, tmp_path):
         _build_rust_core_or_skip()
@@ -9280,7 +9281,69 @@ endmodule
         assert result.signals["out"][-1] >= 3.0
         assert outfile.exists()
         lines = outfile.read_text().strip().splitlines()
-        assert lines == ["<string>", "<string>", "<string>"]
+        assert [line.split()[0] for line in lines] == ["count=1", "count=2", "count=3"]
+        assert all(
+            re.fullmatch(r"count=\d+ metric=-?\d+\.\d{3}", line) for line in lines
+        )
+
+    def test_rust_sim_program_sformat_assignment_file_label(self, tmp_path):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "assignment_lines.log"
+        outfile_s = str(outfile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_sformat_assignment_file(clk, out);
+    input voltage clk;
+    output voltage out;
+    parameter string filename = "{outfile_s}";
+    parameter real tr = 100p;
+    string label_q;
+    integer fd;
+    integer count_q;
+    analog begin
+        @(initial_step) count_q = 0;
+        @(cross(V(clk) - 0.5, 1)) begin
+            count_q = count_q + 1;
+            label_q = $sformat("assign=%0d", count_q);
+            fd = $fopen(filename, "a");
+            $fwrite(fd, "%s\\n", label_q);
+            $fclose(fd);
+        end
+        V(out) <+ transition(count_q, 0.0, tr, tr);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(
+            tstop=55e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert result.signals["out"][-1] >= 3.0
+        assert model.state["label_q"] == "assign=3"
+        assert outfile.read_text().strip().splitlines() == [
+            "assign=1",
+            "assign=2",
+            "assign=3",
+        ]
 
     def test_direct_filename_fstrobe_does_not_crash_evas(self, tmp_path):
         from evas.compiler.parser import parse

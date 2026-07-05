@@ -33,6 +33,7 @@ from evas.compiler.ast_nodes import (
 from evas.compiler.ast_nodes import (
     NumberLiteral as AstNumberLiteral,
 )
+from evas.compiler.ast_nodes import ParamType
 from evas.compiler.ast_nodes import (
     UnaryExpr as AstUnaryExpr,
 )
@@ -69,6 +70,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_CLOSE,
     BODY_STMT_FILE_OPEN,
     BODY_STMT_FILE_WRITE,
+    BODY_STMT_STRING_WRITE,
     BODY_STMT_STROBE,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
@@ -296,6 +298,14 @@ class RustSimRecord:
 
 
 @dataclass(frozen=True)
+class RustSimStringArg:
+    """A string-valued format argument replayed on the Python side."""
+
+    kind: str
+    value: str
+
+
+@dataclass(frozen=True)
 class RustSimSideEffect:
     """Python-owned metadata for Rust-triggered file side effects."""
 
@@ -304,6 +314,8 @@ class RustSimSideEffect:
     mode: str = "w"
     fmt: str = ""
     append_newline: bool = True
+    target: str = ""
+    format_args: Tuple[Any, ...] = ()
     owner: Any = None
 
 
@@ -734,6 +746,7 @@ class _RustSimSideEffectBuilder:
     def __init__(self, model: Any):
         self._model = model
         self.effects: list[RustSimSideEffect] = []
+        self._string_state_names = self._collect_string_state_names(model)
 
     def resolve_string(self, expr_ir: ExprIR) -> Optional[str]:
         if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
@@ -744,27 +757,95 @@ class _RustSimSideEffectBuilder:
                 return value
         return None
 
+    def string_target_name(self, expr_ir: ExprIR) -> Optional[str]:
+        if not isinstance(expr_ir, IdentifierIR):
+            return None
+        name = str(expr_ir.name)
+        if name in self._string_state_names:
+            return name
+        value = (getattr(self._model, "state", {}) or {}).get(name)
+        return name if isinstance(value, str) else None
+
+    def string_arg(self, expr_ir: ExprIR) -> Optional[RustSimStringArg]:
+        if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
+            return RustSimStringArg(kind="literal", value=str(expr_ir.value))
+        if isinstance(expr_ir, IdentifierIR):
+            name = str(expr_ir.name)
+            value = (getattr(self._model, "params", {}) or {}).get(name)
+            if isinstance(value, str):
+                return RustSimStringArg(kind="literal", value=value)
+            if name in self._string_state_names:
+                return RustSimStringArg(kind="state", value=name)
+            state_value = (getattr(self._model, "state", {}) or {}).get(name)
+            if isinstance(state_value, str):
+                return RustSimStringArg(kind="state", value=name)
+        return None
+
     def add_file_open(self, filename: str, mode: str) -> int:
         return self._append(RustSimSideEffect(kind="fopen", filename=filename, mode=mode))
 
-    def add_file_write(self, fmt: str, *, append_newline: bool = True) -> int:
+    def add_file_write(
+        self,
+        fmt: str,
+        *,
+        append_newline: bool = True,
+        format_args: Tuple[Any, ...] = (),
+    ) -> int:
         return self._append(
             RustSimSideEffect(
                 kind="fwrite",
                 fmt=fmt,
                 append_newline=bool(append_newline),
+                format_args=tuple(format_args),
+                owner=self._model,
             )
         )
 
     def add_file_close(self) -> int:
         return self._append(RustSimSideEffect(kind="fclose"))
 
-    def add_strobe(self, fmt: str) -> int:
-        return self._append(RustSimSideEffect(kind="strobe", fmt=fmt, owner=self._model))
+    def add_strobe(self, fmt: str, *, format_args: Tuple[Any, ...] = ()) -> int:
+        return self._append(
+            RustSimSideEffect(
+                kind="strobe",
+                fmt=fmt,
+                format_args=tuple(format_args),
+                owner=self._model,
+            )
+        )
+
+    def add_string_write(
+        self,
+        target: str,
+        fmt: str,
+        *,
+        format_args: Tuple[Any, ...] = (),
+    ) -> int:
+        return self._append(
+            RustSimSideEffect(
+                kind="swrite",
+                target=str(target),
+                fmt=fmt,
+                format_args=tuple(format_args),
+                owner=self._model,
+            )
+        )
 
     def _append(self, effect: RustSimSideEffect) -> int:
         self.effects.append(effect)
         return len(self.effects) - 1
+
+    @staticmethod
+    def _collect_string_state_names(model: Any) -> frozenset[str]:
+        module = getattr(getattr(model, "__class__", type(model)), "_module_ast", None)
+        names = set()
+        for variable in getattr(module, "variables", ()) or ():
+            if getattr(variable, "var_type", None) == ParamType.STRING:
+                names.add(str(getattr(variable, "name", "")))
+        for name, value in (getattr(model, "state", {}) or {}).items():
+            if isinstance(value, str):
+                names.add(str(name))
+        return frozenset(name for name in names if name)
 
 
 def _external_node(model: Any, local_name: str) -> str:
@@ -1112,6 +1193,7 @@ def _append_body_program(
         elif int(stmt.target_kind) in {
             BODY_STMT_FILE_WRITE,
             BODY_STMT_FILE_CLOSE,
+            BODY_STMT_STRING_WRITE,
             BODY_STMT_STROBE,
         }:
             target_id += int(side_effect_slot_offset)

@@ -155,6 +155,7 @@ pub(crate) const BODY_STMT_ELSE: u8 = 251;
 pub(crate) const BODY_STMT_ENDIF: u8 = 252;
 pub(crate) const BODY_STMT_BOUND_STEP: u8 = 253;
 pub(crate) const BODY_STMT_STROBE: u8 = 254;
+pub(crate) const BODY_STMT_STRING_WRITE: u8 = 255;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
