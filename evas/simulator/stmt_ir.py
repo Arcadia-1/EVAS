@@ -436,6 +436,7 @@ def encode_body_stmt_ops(
 
     stmt_ops: list[BodyStmtOp] = []
     expr_ops: list[BodyExprOp] = []
+    stmt_ir = _rewrite_fgets_sscanf_pairs(stmt_ir)
     if not _append_body_stmt_ops(
         stmt_ir,
         bindings,
@@ -446,6 +447,116 @@ def encode_body_stmt_ops(
     ):
         return None
     return BodyStmtProgram(tuple(stmt_ops), tuple(expr_ops))
+
+
+def _rewrite_fgets_sscanf_pairs(stmt_ir: StmtIR) -> StmtIR:
+    """Fuse simple ``$fgets`` + later ``$sscanf`` string parses into ``$fscanf``.
+
+    Rust owns numeric state only.  This keeps common line-oriented file reads
+    lowerable when the string buffer is only an intermediate parse carrier.
+    """
+
+    if isinstance(stmt_ir, BlockIR):
+        children = tuple(_rewrite_fgets_sscanf_pairs(child) for child in stmt_ir.statements)
+        sscanf_by_line: dict[str, AssignmentIR] = {}
+        for child in children:
+            pair = _sscanf_assignment_for_line(child)
+            if pair is None:
+                continue
+            line_name, assignment = pair
+            if line_name not in sscanf_by_line:
+                sscanf_by_line[line_name] = assignment
+
+        used_assignment_ids: set[int] = set()
+        rewritten_children: list[StmtIR] = []
+        for child in children:
+            replacement = _fgets_stmt_to_fscanf_assignment(child, sscanf_by_line)
+            if replacement is not None:
+                used_assignment_ids.add(id(sscanf_by_line[replacement[0]]))
+                rewritten_children.append(replacement[1])
+                continue
+            if id(child) in used_assignment_ids:
+                continue
+            rewritten_children.append(child)
+        return BlockIR(tuple(rewritten_children))
+
+    if isinstance(stmt_ir, EventStatementIR):
+        return EventStatementIR(
+            stmt_ir.event,
+            _rewrite_fgets_sscanf_pairs(stmt_ir.body),
+        )
+    if isinstance(stmt_ir, IfStatementIR):
+        return IfStatementIR(
+            stmt_ir.cond,
+            _rewrite_fgets_sscanf_pairs(stmt_ir.then_body),
+            (
+                None
+                if stmt_ir.else_body is None
+                else _rewrite_fgets_sscanf_pairs(stmt_ir.else_body)
+            ),
+        )
+    if isinstance(stmt_ir, ForStatementIR):
+        return ForStatementIR(
+            stmt_ir.init,
+            stmt_ir.cond,
+            stmt_ir.update,
+            _rewrite_fgets_sscanf_pairs(stmt_ir.body),
+        )
+    if isinstance(stmt_ir, WhileStatementIR):
+        return WhileStatementIR(stmt_ir.cond, _rewrite_fgets_sscanf_pairs(stmt_ir.body))
+    if isinstance(stmt_ir, CaseStatementIR):
+        return CaseStatementIR(
+            stmt_ir.expr,
+            tuple(
+                CaseItemIR(item.values, _rewrite_fgets_sscanf_pairs(item.body))
+                for item in stmt_ir.items
+            ),
+        )
+    return stmt_ir
+
+
+def _sscanf_assignment_for_line(stmt_ir: StmtIR) -> Optional[tuple[str, AssignmentIR]]:
+    if (
+        not isinstance(stmt_ir, AssignmentIR)
+        or not isinstance(stmt_ir.value, FunctionCallIR)
+        or str(stmt_ir.value.name) != "$sscanf"
+        or len(stmt_ir.value.args) < 2
+    ):
+        return None
+    source = stmt_ir.value.args[0]
+    if not isinstance(source, IdentifierIR):
+        return None
+    return source.name, stmt_ir
+
+
+def _fgets_stmt_to_fscanf_assignment(
+    stmt_ir: StmtIR,
+    sscanf_by_line: dict[str, AssignmentIR],
+) -> Optional[tuple[str, AssignmentIR]]:
+    if (
+        not isinstance(stmt_ir, SystemTaskIR)
+        or stmt_ir.name != "$fgets"
+        or len(stmt_ir.args) < 2
+        or not isinstance(stmt_ir.args[0], IdentifierIR)
+    ):
+        return None
+    line_name = stmt_ir.args[0].name
+    sscanf_assignment = sscanf_by_line.get(line_name)
+    if sscanf_assignment is None:
+        return None
+    sscanf_call = sscanf_assignment.value
+    if not isinstance(sscanf_call, FunctionCallIR) or len(sscanf_call.args) < 2:
+        return None
+    return (
+        line_name,
+        AssignmentIR(
+            sscanf_assignment.target,
+            FunctionCallIR(
+                "$fscanf",
+                (stmt_ir.args[1], *sscanf_call.args[1:]),
+            ),
+        ),
+    )
 
 
 def unroll_static_for_statement(stmt_ir: ForStatementIR) -> Optional[BlockIR]:
