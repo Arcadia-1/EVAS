@@ -8,7 +8,7 @@ production simulation still uses the existing compiled Python evaluator.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple, Union
 
 from evas.compiler.ast_nodes import (
     ArrayAccess,
@@ -112,8 +112,12 @@ class StatementLoweringContext:
     )
 
     @classmethod
-    def veriloga_body(cls) -> "StatementLoweringContext":
-        return cls()
+    def veriloga_body(
+        cls,
+        *,
+        user_functions: Iterable[object] = (),
+    ) -> "StatementLoweringContext":
+        return cls(expr_context=LoweringContext.veriloga_body(user_functions=user_functions))
 
 
 @dataclass(frozen=True)

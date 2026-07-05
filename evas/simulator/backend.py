@@ -40,6 +40,7 @@ from evas.simulator.event_transition_plan import (
 from evas.simulator.expr_ir import build_state_binding_ir
 from evas.simulator.rust_backend import BODY_TARGET_NODE, BODY_TARGET_STATE
 from evas.simulator.stmt_ir import (
+    StatementLoweringContext,
     classify_body_stmt_ops_rejection,
     encode_body_stmt_ops,
     lower_stmt,
@@ -7230,7 +7231,12 @@ class _ModuleCompiler:
         if body is None:
             return {**empty, "rejection_reason": "no_analog_block"}
 
-        stmt_ir = lower_stmt(body)
+        stmt_ir = lower_stmt(
+            body,
+            StatementLoweringContext.veriloga_body(
+                user_functions=tuple(getattr(mod, "functions", ()) or ())
+            ),
+        )
         if stmt_ir is None:
             return {
                 **empty,

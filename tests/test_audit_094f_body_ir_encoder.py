@@ -31,6 +31,7 @@ from evas.simulator.stmt_ir import (
     BodyStmtProgram,
     EventBodyProgram,
     EventStatementIR,
+    StatementLoweringContext,
     encode_body_stmt_ops,
     encode_event_body_program,
     lower_stmt,
@@ -175,6 +176,105 @@ def test_stmt_ir_encodes_ordered_state_and_output_writes_to_rust_batch():
 
     assert state_values.tolist() == pytest.approx([0.5])
     assert node_values.tolist() == pytest.approx([0.25, 0.6])
+
+
+def test_stmt_ir_inlines_piecewise_user_function_to_rust_batch():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module user_fn_clamp(vin, out);
+    input voltage vin;
+    output voltage out;
+    real y;
+    analog function real clamp_window;
+        input x;
+        real x;
+        begin
+            if (x < 0.1) clamp_window = 0.1;
+            else if (x > 0.8) clamp_window = 0.8;
+            else clamp_window = x;
+        end
+    endfunction
+    analog begin
+        y = clamp_window(V(vin));
+        V(out) <+ y;
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(
+        module.analog_block.body,
+        StatementLoweringContext.veriloga_body(user_functions=module.functions),
+    )
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    program = encode_body_stmt_ops(stmt_ir, bindings, {"vin": 0, "out": 1})
+    assert isinstance(program, BodyStmtProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    batch = backend.make_body_ir_batch(
+        stmt_ops=program.stmt_ops,
+        expr_ops=program.expr_ops,
+    )
+    node_values = array("d", [0.9, 0.0])
+    state_values = array("d", [0.0])
+    param_values = array("d", [])
+
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+
+    assert state_values.tolist() == pytest.approx([0.8])
+    assert node_values.tolist() == pytest.approx([0.9, 0.8])
+
+
+def test_stmt_ir_inlines_user_function_with_local_branch_state():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module user_fn_normalize(vin, out);
+    input voltage vin;
+    output voltage out;
+    real y;
+    analog function real normalize4;
+        input x;
+        real x;
+        integer code;
+        begin
+            code = x < 0.0 ? 0 : (x > 0.9 ? 15 : floor(16.0 * x / 0.9));
+            if (code > 15) code = 15;
+            normalize4 = code / 15.0 * 0.9;
+        end
+    endfunction
+    analog begin
+        y = normalize4(V(vin));
+        V(out) <+ y;
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(
+        module.analog_block.body,
+        StatementLoweringContext.veriloga_body(user_functions=module.functions),
+    )
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    program = encode_body_stmt_ops(stmt_ir, bindings, {"vin": 0, "out": 1})
+    assert isinstance(program, BodyStmtProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    batch = backend.make_body_ir_batch(
+        stmt_ops=program.stmt_ops,
+        expr_ops=program.expr_ops,
+    )
+    node_values = array("d", [0.91, 0.0])
+    state_values = array("d", [0.0])
+    param_values = array("d", [])
+
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+
+    assert state_values.tolist() == pytest.approx([0.9])
+    assert node_values.tolist() == pytest.approx([0.91, 0.9])
 
 
 def test_stmt_ir_encoder_rejects_event_body_until_scheduler_owns_ordering():

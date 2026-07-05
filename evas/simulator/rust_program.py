@@ -147,6 +147,7 @@ from evas.simulator.stmt_ir import (
     EventStatementIR,
     ForStatementIR,
     IfStatementIR,
+    StatementLoweringContext,
     SystemTaskIR,
     WhileStatementIR,
     classify_body_stmt_ops_rejection,
@@ -2608,7 +2609,10 @@ def _lower_module_body_with_user_function_inlining(module: Any) -> Optional[Bloc
     if body_ast is None:
         return None
     body_ir = lower_stmt(
-        _inline_user_function_stmt(body_ast, _simple_user_function_map(module))
+        body_ast,
+        StatementLoweringContext.veriloga_body(
+            user_functions=tuple(getattr(module, "functions", ()) or ())
+        ),
     )
     return body_ir if isinstance(body_ir, BlockIR) else None
 
