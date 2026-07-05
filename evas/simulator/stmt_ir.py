@@ -80,6 +80,7 @@ class StatementLoweringContext:
     expr_context: LoweringContext = LoweringContext.veriloga_body()
     allowed_system_tasks: frozenset[str] = frozenset(
         {
+            "$analog_node_alias",
             "$bound_step",
             "$cds_set_rf_source_info",
             "$cds_violation",
@@ -326,6 +327,14 @@ def _lower_task_call(
     stmt: TaskCall,
     ctx: StatementLoweringContext,
 ) -> Optional[StmtIR]:
+    if stmt.name == "$analog_node_alias" and len(stmt.args) >= 2:
+        args = []
+        for arg in stmt.args[:2]:
+            arg_ir = lower_expr(arg, ctx.expr_context)
+            if arg_ir is None:
+                return None
+            args.append(arg_ir)
+        return SystemTaskIR(str(stmt.name), tuple(args))
     if stmt.name != "$indirect_branch" or len(stmt.args) < 3:
         return None
     target = lower_expr(stmt.args[0], ctx.expr_context)
@@ -1808,6 +1817,7 @@ def _collect_body_write_specs(
 
 def _is_noop_body_system_task(stmt_ir: SystemTaskIR) -> bool:
     return stmt_ir.name in {
+        "$analog_node_alias",
         "$cds_set_rf_source_info",
         "$cds_violation",
         "$discontinuity",

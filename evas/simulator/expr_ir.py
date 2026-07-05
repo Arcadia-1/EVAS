@@ -139,6 +139,7 @@ GENERIC_ACCESS_FUNCTIONS = frozenset({"potential", "flow"})
 
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
+        "$analog_node_alias",
         "$attribute",
         "$cds_get_mc_trial_number",
         "$dist_uniform",
@@ -155,6 +156,7 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$rtoi",
         "$sformat",
         "$simparam",
+        "$table_model",
         "$temperature",
         "$vt",
     }
@@ -956,12 +958,13 @@ def _append_body_expr_ops(
         if expr_ir.name == "$rtoi":
             if len(expr_ir.args) != 1:
                 return False
-            arg = expr_ir.args[0]
-            if not isinstance(arg, LiteralIR) or not isinstance(arg.value, (int, float)):
+            if not _append_rtoi_body_expr_ops(
+                expr_ir.args[0],
+                bindings,
+                node_slots,
+                ops,
+            ):
                 return False
-            value = float(arg.value)
-            rounded = math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
-            ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(rounded)))
             return True
         op_info = _BODY_FUNCTION_OPS.get(expr_ir.name)
         if op_info is None:
@@ -976,6 +979,39 @@ def _append_body_expr_ops(
         return True
 
     return False
+
+
+def _append_rtoi_body_expr_ops(
+    arg: ExprIR,
+    bindings: BindingTableIR,
+    node_slots: Mapping[str, int],
+    ops: list[BodyExprOp],
+) -> bool:
+    if isinstance(arg, LiteralIR) and isinstance(arg.value, (int, float)):
+        value = float(arg.value)
+        rounded = math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
+        ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(rounded)))
+        return True
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
+    ops.append(BodyExprOp(BODY_EXPR_GE))
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
+    ops.append(BodyExprOp(BODY_EXPR_ADD))
+    ops.append(BodyExprOp(BODY_EXPR_FLOOR))
+
+    if not _append_body_expr_ops(arg, bindings, node_slots, ops):
+        return False
+    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
+    ops.append(BodyExprOp(BODY_EXPR_SUB))
+    ops.append(BodyExprOp(BODY_EXPR_CEIL))
+
+    ops.append(BodyExprOp(BODY_EXPR_SELECT))
+    return True
 
 
 def _generic_access_function_to_branch(expr_ir: FunctionCallIR) -> Optional[BranchAccessIR]:

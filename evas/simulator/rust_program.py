@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
 from evas.compiler.ast_nodes import (
@@ -65,6 +66,9 @@ from evas.compiler.ast_nodes import (
     NumberLiteral as AstNumberLiteral,
 )
 from evas.compiler.ast_nodes import ParamType
+from evas.compiler.ast_nodes import (
+    StringLiteral as AstStringLiteral,
+)
 from evas.compiler.ast_nodes import (
     SystemTask as AstSystemTask,
 )
@@ -2489,9 +2493,107 @@ def _declared_branch_map(model: Any) -> dict[str, tuple[str, str]]:
     return result
 
 
+def _resolve_oomr_node_path(path: Any) -> str:
+    target = str(path).strip()
+    for prefix in ("$root.", "$root/"):
+        if target.startswith(prefix):
+            target = target[len(prefix) :]
+            break
+    if target == "$root":
+        return target
+    if target.startswith("$root"):
+        target = target[len("$root") :].lstrip("./")
+    return target.replace("/", ".").split(".")[-1]
+
+
+def _resolve_model_string_expr(model: Any, expr_ir: ExprIR) -> Optional[str]:
+    if isinstance(expr_ir, LiteralIR) and isinstance(expr_ir.value, str):
+        return str(expr_ir.value)
+    if isinstance(expr_ir, IdentifierIR):
+        name = str(expr_ir.name)
+        value = (getattr(model, "params", {}) or {}).get(name)
+        if isinstance(value, str):
+            return value
+        value = (getattr(model, "state", {}) or {}).get(name)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _resolve_model_string_ast(model: Any, expr: object) -> Optional[str]:
+    if isinstance(expr, AstStringLiteral):
+        return str(expr.value)
+    if isinstance(expr, AstIdentifier):
+        name = str(expr.name)
+        value = (getattr(model, "params", {}) or {}).get(name)
+        if isinstance(value, str):
+            return value
+        value = (getattr(model, "state", {}) or {}).get(name)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _resolve_branch_node_name(model: Any, node: str) -> str:
+    aliases = _analog_node_alias_map(model)
+    if node in aliases:
+        return aliases[node]
+    value = (getattr(model, "params", {}) or {}).get(str(node))
+    if isinstance(value, str):
+        return _resolve_oomr_node_path(value)
+    value = (getattr(model, "state", {}) or {}).get(str(node))
+    if isinstance(value, str):
+        return _resolve_oomr_node_path(value)
+    return str(node)
+
+
+def _analog_node_alias_map(model: Any) -> dict[str, str]:
+    module = getattr(getattr(model, "__class__", type(model)), "_module_ast", None)
+    result: dict[str, str] = {}
+    body = getattr(getattr(module, "analog_block", None), "body", None)
+    for call in _iter_ast_analog_node_alias_calls(body):
+        args = tuple(getattr(call, "args", ()) or ())
+        if len(args) < 2:
+            continue
+        local = _resolve_alias_local_node(args[0])
+        target = _resolve_model_string_ast(model, args[1])
+        if local is None:
+            continue
+        if target is None:
+            target = _resolve_alias_local_node(args[1])
+        if target is None:
+            continue
+        resolved_target = _resolve_oomr_node_path(target)
+        if local and resolved_target and resolved_target != "$root":
+            result[local] = resolved_target
+    return result
+
+
+def _iter_ast_analog_node_alias_calls(stmt: object):
+    for child in _iter_ast_statement_tree(stmt):
+        if isinstance(child, (AstSystemTask, AstTaskCall)):
+            if str(getattr(child, "name", "")) == "$analog_node_alias":
+                yield child
+        for expr in _iter_ast_exprs_from_stmt(child):
+            if isinstance(expr, AstFunctionCall) and str(expr.name) == "$analog_node_alias":
+                yield expr
+
+
+def _resolve_alias_local_node(expr: object) -> Optional[str]:
+    if isinstance(expr, AstIdentifier):
+        return _resolve_oomr_node_path(expr.name)
+    if isinstance(expr, AstStringLiteral):
+        return _resolve_oomr_node_path(expr.value)
+    return None
+
+
 def _replace_model_query_branch(branch: BranchAccessIR, model: Any) -> BranchAccessIR:
-    node1 = branch.node1
-    node2 = branch.node2
+    node1 = _resolve_branch_node_name(model, branch.node1)
+    node2 = (
+        None
+        if branch.node2 is None
+        else _resolve_branch_node_name(model, branch.node2)
+    )
     if (
         branch.node2 is None
         and branch.node1_index is None
@@ -2554,6 +2656,8 @@ def _replace_model_query_event(event_ir: object, model: Any) -> object:
 
 
 def _replace_model_query_expr(expr_ir: ExprIR, model: Any) -> ExprIR:
+    if isinstance(expr_ir, IdentifierIR) and expr_ir.name == "$mfactor":
+        return LiteralIR(float(getattr(model, "_mfactor_value", 1.0)))
     if isinstance(expr_ir, FunctionCallIR):
         name = str(expr_ir.name)
         if name == "$param_given":
@@ -2569,9 +2673,19 @@ def _replace_model_query_expr(expr_ir: ExprIR, model: Any) -> ExprIR:
                 return LiteralIR(1.0 if _model_port_connected(model, query_name) else 0.0)
         if name == "$mfactor" and not expr_ir.args:
             return LiteralIR(float(getattr(model, "_mfactor_value", 1.0)))
+        if name == "$analog_node_alias" and len(expr_ir.args) >= 2:
+            return LiteralIR(1.0)
+        rewritten_args = tuple(_replace_model_query_expr(arg, model) for arg in expr_ir.args)
+        if name == "$table_model":
+            rewritten_table = _rewrite_table_model_call(
+                FunctionCallIR(expr_ir.name, rewritten_args),
+                model,
+            )
+            if rewritten_table is not None:
+                return rewritten_table
         return FunctionCallIR(
             expr_ir.name,
-            tuple(_replace_model_query_expr(arg, model) for arg in expr_ir.args),
+            rewritten_args,
         )
     if isinstance(expr_ir, ArrayAccessIR):
         return ArrayAccessIR(
@@ -2604,6 +2718,311 @@ def _replace_model_query_expr(expr_ir: ExprIR, model: Any) -> ExprIR:
             tuple(_replace_model_query_expr(arg, model) for arg in expr_ir.args),
         )
     return expr_ir
+
+
+def _rewrite_table_model_call(
+    expr_ir: FunctionCallIR,
+    model: Any,
+) -> Optional[ExprIR]:
+    args = tuple(expr_ir.args)
+    if len(args) >= 5 and all(isinstance(arg, IdentifierIR) for arg in args[2:5]):
+        return _rewrite_table_model_2d(args, model)
+    if len(args) >= 2:
+        return _rewrite_table_model_1d(args, model)
+    return None
+
+
+def _rewrite_table_model_1d(
+    args: Tuple[ExprIR, ...],
+    model: Any,
+) -> Optional[ExprIR]:
+    filename = _resolve_model_string_expr(model, args[1])
+    if filename is None:
+        return None
+    points = _load_table_model_1d_points(filename)
+    if not points:
+        return None
+    return _piecewise_linear_1d_expr(args[0], points)
+
+
+def _rewrite_table_model_2d(
+    args: Tuple[ExprIR, ...],
+    model: Any,
+) -> Optional[ExprIR]:
+    arrays = _static_array_literal_values(model)
+    x_name = str(args[2].name) if isinstance(args[2], IdentifierIR) else ""
+    y_name = str(args[3].name) if isinstance(args[3], IdentifierIR) else ""
+    z_name = str(args[4].name) if isinstance(args[4], IdentifierIR) else ""
+    xvals = arrays.get(x_name, ())
+    yvals = arrays.get(y_name, ())
+    zvals = arrays.get(z_name, ())
+    n = min(len(xvals), len(yvals), len(zvals))
+    if n <= 0:
+        return None
+    points = tuple((float(xvals[i]), float(yvals[i]), float(zvals[i])) for i in range(n))
+    plane = _fit_plane(points)
+    if plane is not None:
+        a, b, c = plane
+        return _add(_add(_mul(_lit(a), args[0]), _mul(_lit(b), args[1])), _lit(c))
+    return _bilinear_rect_expr(args[0], args[1], points)
+
+
+def _load_table_model_1d_points(filename: str) -> Tuple[Tuple[float, float], ...]:
+    path = Path(filename)
+    if not path.exists():
+        path = Path.cwd() / filename
+    if not path.exists() or not path.is_file():
+        return ()
+    rows: list[tuple[float, float]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            tokens = stripped.replace(",", " ").split()
+            if len(tokens) < 2:
+                continue
+            try:
+                rows.append((float(tokens[0]), float(tokens[1])))
+            except ValueError:
+                continue
+    except OSError:
+        return ()
+    return tuple(sorted(rows, key=lambda item: item[0]))
+
+
+def _static_array_literal_values(model: Any) -> dict[str, Tuple[float, ...]]:
+    module = getattr(getattr(model, "__class__", type(model)), "_module_ast", None)
+    body = getattr(getattr(module, "analog_block", None), "body", None)
+    by_name: dict[str, dict[int, float]] = {}
+    for stmt in _iter_ast_statement_tree(body):
+        if not isinstance(stmt, AstAssignment):
+            continue
+        target = getattr(stmt, "target", None)
+        value = getattr(stmt, "value", None)
+        if not isinstance(target, AstArrayAccess):
+            continue
+        idx = _number_literal_value(getattr(target, "index", None))
+        val = _number_literal_value(value)
+        if idx is None or val is None:
+            continue
+        by_name.setdefault(str(target.name), {})[int(idx)] = float(val)
+    return {
+        name: tuple(values[idx] for idx in sorted(values))
+        for name, values in by_name.items()
+    }
+
+
+def _iter_ast_statement_tree(stmt: object):
+    if stmt is None:
+        return
+    yield stmt
+    if isinstance(stmt, AstBlock):
+        for child in getattr(stmt, "statements", ()) or ():
+            yield from _iter_ast_statement_tree(child)
+        return
+    if isinstance(stmt, AstEventStatement):
+        yield from _iter_ast_statement_tree(getattr(stmt, "body", None))
+        return
+    if isinstance(stmt, AstIfStatement):
+        yield from _iter_ast_statement_tree(getattr(stmt, "then_body", None))
+        yield from _iter_ast_statement_tree(getattr(stmt, "else_body", None))
+        return
+    if isinstance(stmt, AstForStatement):
+        yield from _iter_ast_statement_tree(getattr(stmt, "init", None))
+        yield from _iter_ast_statement_tree(getattr(stmt, "update", None))
+        yield from _iter_ast_statement_tree(getattr(stmt, "body", None))
+        return
+    if isinstance(stmt, AstWhileStatement):
+        yield from _iter_ast_statement_tree(getattr(stmt, "body", None))
+        return
+    if isinstance(stmt, AstCaseStatement):
+        for item in getattr(stmt, "items", ()) or ():
+            yield from _iter_ast_statement_tree(getattr(item, "body", None))
+
+
+def _iter_ast_exprs_from_stmt(stmt: object):
+    if isinstance(stmt, AstAssignment):
+        yield from _iter_ast_expr_tree(getattr(stmt, "target", None))
+        yield from _iter_ast_expr_tree(getattr(stmt, "value", None))
+        return
+    if isinstance(stmt, AstContribution):
+        yield from _iter_ast_expr_tree(getattr(stmt, "branch", None))
+        yield from _iter_ast_expr_tree(getattr(stmt, "expr", None))
+        return
+    if isinstance(stmt, AstEventStatement):
+        event = getattr(stmt, "event", None)
+        for arg in getattr(event, "args", ()) or ():
+            yield from _iter_ast_expr_tree(arg)
+        yield from _iter_ast_expr_tree(getattr(event, "time_tol_expr", None))
+        yield from _iter_ast_expr_tree(getattr(event, "expr_tol_expr", None))
+        return
+    if isinstance(stmt, AstIfStatement):
+        yield from _iter_ast_expr_tree(getattr(stmt, "cond", None))
+        return
+    if isinstance(stmt, AstForStatement):
+        yield from _iter_ast_expr_tree(getattr(stmt, "cond", None))
+        return
+    if isinstance(stmt, AstWhileStatement):
+        yield from _iter_ast_expr_tree(getattr(stmt, "cond", None))
+        return
+    if isinstance(stmt, AstCaseStatement):
+        yield from _iter_ast_expr_tree(getattr(stmt, "expr", None))
+        for item in getattr(stmt, "items", ()) or ():
+            for value in getattr(item, "values", ()) or ():
+                yield from _iter_ast_expr_tree(value)
+        return
+    if isinstance(stmt, (AstSystemTask, AstTaskCall)):
+        for arg in getattr(stmt, "args", ()) or ():
+            yield from _iter_ast_expr_tree(arg)
+
+
+def _iter_ast_expr_tree(expr: object):
+    if expr is None:
+        return
+    yield expr
+    if isinstance(expr, AstArrayAccess):
+        yield from _iter_ast_expr_tree(getattr(expr, "index", None))
+        yield from _iter_ast_expr_tree(getattr(expr, "index2", None))
+        return
+    if isinstance(expr, AstBranchAccess):
+        for child_name in (
+            "node1_index",
+            "node1_index2",
+            "node2_index",
+            "node2_index2",
+        ):
+            yield from _iter_ast_expr_tree(getattr(expr, child_name, None))
+        return
+    if isinstance(expr, AstBinaryExpr):
+        yield from _iter_ast_expr_tree(getattr(expr, "left", None))
+        yield from _iter_ast_expr_tree(getattr(expr, "right", None))
+        return
+    if isinstance(expr, AstUnaryExpr):
+        yield from _iter_ast_expr_tree(getattr(expr, "operand", None))
+        return
+    if isinstance(expr, AstTernaryExpr):
+        yield from _iter_ast_expr_tree(getattr(expr, "cond", None))
+        yield from _iter_ast_expr_tree(getattr(expr, "true_expr", None))
+        yield from _iter_ast_expr_tree(getattr(expr, "false_expr", None))
+        return
+    if isinstance(expr, (AstFunctionCall, AstMethodCall)):
+        for arg in getattr(expr, "args", ()) or ():
+            yield from _iter_ast_expr_tree(arg)
+
+
+def _number_literal_value(expr: object) -> Optional[float]:
+    if isinstance(expr, AstNumberLiteral):
+        return float(expr.value)
+    return None
+
+
+def _piecewise_linear_1d_expr(
+    x_expr: ExprIR,
+    points: Tuple[Tuple[float, float], ...],
+) -> ExprIR:
+    if len(points) == 1:
+        return _lit(points[0][1])
+    result: ExprIR = _lit(points[-1][1])
+    for left, right in reversed(tuple(zip(points, points[1:]))):
+        x0, y0 = left
+        x1, y1 = right
+        result = TernaryExprIR(
+            _le(x_expr, _lit(x1)),
+            _linear_segment_expr(x_expr, x0, y0, x1, y1),
+            result,
+        )
+    return TernaryExprIR(_le(x_expr, _lit(points[0][0])), _lit(points[0][1]), result)
+
+
+def _linear_segment_expr(
+    x_expr: ExprIR,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> ExprIR:
+    if abs(x1 - x0) <= 1e-30:
+        return _lit(y1)
+    slope = (y1 - y0) / (x1 - x0)
+    return _add(_lit(y0), _mul(_sub(x_expr, _lit(x0)), _lit(slope)))
+
+
+def _fit_plane(points: Tuple[Tuple[float, float, float], ...]) -> Optional[Tuple[float, float, float]]:
+    n = len(points)
+    for i in range(n):
+        x1, y1, z1 = points[i]
+        for j in range(i + 1, n):
+            x2, y2, z2 = points[j]
+            for k in range(j + 1, n):
+                x3, y3, z3 = points[k]
+                denom = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+                if abs(denom) <= 1e-30:
+                    continue
+                a = (z1 * (y2 - y3) + z2 * (y3 - y1) + z3 * (y1 - y2)) / denom
+                b = (x1 * (z2 - z3) + x2 * (z3 - z1) + x3 * (z1 - z2)) / denom
+                c = (
+                    x1 * (y3 * z2 - y2 * z3)
+                    + x2 * (y1 * z3 - y3 * z1)
+                    + x3 * (y2 * z1 - y1 * z2)
+                ) / denom
+                if all(abs(a * x + b * y + c - z) <= 1e-9 for x, y, z in points):
+                    return a, b, c
+    return None
+
+
+def _bilinear_rect_expr(
+    x_expr: ExprIR,
+    y_expr: ExprIR,
+    points: Tuple[Tuple[float, float, float], ...],
+) -> Optional[ExprIR]:
+    ux = sorted({x for x, _y, _z in points})
+    uy = sorted({y for _x, y, _z in points})
+    if len(ux) != 2 or len(uy) != 2:
+        return None
+    x0, x1 = ux
+    y0, y1 = uy
+    if abs(x1 - x0) <= 1e-30 or abs(y1 - y0) <= 1e-30:
+        return None
+    zmap = {(x, y): z for x, y, z in points}
+    if not all((x, y) in zmap for x in ux for y in uy):
+        return None
+    tx = _div(_sub(x_expr, _lit(x0)), _lit(x1 - x0))
+    ty = _div(_sub(y_expr, _lit(y0)), _lit(y1 - y0))
+    one_minus_tx = _sub(_lit(1.0), tx)
+    one_minus_ty = _sub(_lit(1.0), ty)
+    z00 = _lit(zmap[(x0, y0)])
+    z10 = _lit(zmap[(x1, y0)])
+    z01 = _lit(zmap[(x0, y1)])
+    z11 = _lit(zmap[(x1, y1)])
+    return _add(
+        _add(_mul(z00, _mul(one_minus_tx, one_minus_ty)), _mul(z10, _mul(tx, one_minus_ty))),
+        _add(_mul(z01, _mul(one_minus_tx, ty)), _mul(z11, _mul(tx, ty))),
+    )
+
+
+def _lit(value: float) -> LiteralIR:
+    return LiteralIR(float(value))
+
+
+def _add(left: ExprIR, right: ExprIR) -> BinaryExprIR:
+    return BinaryExprIR("+", left, right)
+
+
+def _sub(left: ExprIR, right: ExprIR) -> BinaryExprIR:
+    return BinaryExprIR("-", left, right)
+
+
+def _mul(left: ExprIR, right: ExprIR) -> BinaryExprIR:
+    return BinaryExprIR("*", left, right)
+
+
+def _div(left: ExprIR, right: ExprIR) -> BinaryExprIR:
+    return BinaryExprIR("/", left, right)
+
+
+def _le(left: ExprIR, right: ExprIR) -> BinaryExprIR:
+    return BinaryExprIR("<=", left, right)
 
 
 def _query_arg_name(expr_ir: ExprIR) -> Optional[str]:

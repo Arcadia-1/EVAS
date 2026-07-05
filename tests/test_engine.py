@@ -9915,6 +9915,81 @@ endmodule
         assert result.signals["out_ovr"][-1] == pytest.approx(0.6)
         assert result.signals["metric_ovr"][-1] == pytest.approx(5.0)
 
+    def test_rust_full_model_cadence_semantic_helpers_match_python(self, tmp_path):
+        _build_rust_core_or_skip()
+        table = tmp_path / "gain_profile.tbl"
+        table.write_text("0.0 0.1\n0.5 0.6\n1.0 1.1\n", encoding="utf-8")
+        table_s = str(table).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_cadence_semantic_helpers(
+    inp, xnode, ynode,
+    out_rtoi, out_m, out_oomr, out_alias, out_t1, out_t2
+);
+    input voltage inp, xnode, ynode;
+    output voltage out_rtoi, out_m, out_oomr, out_alias, out_t1, out_t2;
+    electrical aliased;
+    integer ok;
+    parameter string sigpath = "$root.vin";
+    parameter string table_file = "{table_s}";
+    real xs[0:3];
+    real ys[0:3];
+    real zs[0:3];
+    analog initial begin
+        ok = $analog_node_alias(aliased, sigpath);
+    end
+    analog begin
+        @(initial_step) begin
+            xs[0] = 0.0; ys[0] = 0.0; zs[0] = 0.0;
+            xs[1] = 1.0; ys[1] = 0.0; zs[1] = 1.0;
+            xs[2] = 0.0; ys[2] = 1.0; zs[2] = 2.0;
+            xs[3] = 1.0; ys[3] = 1.0; zs[3] = 3.0;
+        end
+        V(out_rtoi) <+ $rtoi(8.0 * V(inp)) / 7.0;
+        V(out_m) <+ $mfactor * V(inp);
+        V(out_oomr) <+ V(sigpath);
+        V(out_alias) <+ V(aliased);
+        V(out_t1) <+ $table_model(V(inp), table_file, "1L");
+        V(out_t2) <+ $table_model(V(xnode), V(ynode), xs, ys, zs, "1L,1L");
+    end
+endmodule
+"""
+        signals = ("out_rtoi", "out_m", "out_oomr", "out_alias", "out_t1", "out_t2")
+        results = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            model._mfactor_value = 2.0
+            sim = Simulator()
+            sim.add_source("inp", dc(0.25))
+            sim.add_source("vin", dc(0.42))
+            sim.add_source("xnode", dc(0.25))
+            sim.add_source("ynode", dc(0.5))
+            sim.add_model(model)
+            for signal in signals:
+                sim.record(signal)
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            results.append({signal: result.signals[signal][-1] for signal in signals})
+
+        assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
+        assert results[1]["out_rtoi"] == pytest.approx(2.0 / 7.0)
+        assert results[1]["out_m"] == pytest.approx(0.5)
+        assert results[1]["out_oomr"] == pytest.approx(0.42)
+        assert results[1]["out_alias"] == pytest.approx(0.42)
+        assert results[1]["out_t1"] == pytest.approx(0.35)
+        assert results[1]["out_t2"] == pytest.approx(1.25)
+
     def test_rust_full_model_continuous_cds_violation_keeps_if_state_write(self):
         _build_rust_core_or_skip()
         src = """\
