@@ -83,10 +83,15 @@ class StatementLoweringContext:
             "$fclose",
             "$fdisplay",
             "$fwrite",
+            "$fstrobe",
             "$sformat",
             "$swrite",
             "$strobe",
             "$display",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
         }
     )
 
@@ -1116,7 +1121,14 @@ def _append_body_stmt_ops(
         )
 
     if isinstance(stmt_ir, SystemTaskIR):
-        if side_effects is not None and stmt_ir.name in {"$display", "$strobe"}:
+        if side_effects is not None and stmt_ir.name in {
+            "$display",
+            "$strobe",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
+        }:
             return _append_strobe_stmt(
                 stmt_ir,
                 bindings,
@@ -1718,7 +1730,16 @@ def _collect_body_write_specs(
 
 
 def _is_noop_body_system_task(stmt_ir: SystemTaskIR) -> bool:
-    return stmt_ir.name in {"$display", "$strobe", "$sformat", "$swrite"}
+    return stmt_ir.name in {
+        "$display",
+        "$strobe",
+        "$debug",
+        "$warning",
+        "$info",
+        "$error",
+        "$sformat",
+        "$swrite",
+    }
 
 
 def _contribution_expr_with_reference(

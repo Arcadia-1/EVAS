@@ -1230,7 +1230,15 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, CaseStatementIR):
         return all(_is_continuous_body_stmt(item.body) for item in stmt_ir.items)
     if isinstance(stmt_ir, SystemTaskIR):
-        return stmt_ir.name in {"$bound_step", "$display", "$strobe"}
+        return stmt_ir.name in {
+            "$bound_step",
+            "$display",
+            "$strobe",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
+        }
     if isinstance(stmt_ir, BlockIR):
         return all(_is_continuous_body_stmt(child) for child in stmt_ir.statements)
     return False
@@ -1404,7 +1412,14 @@ def _stmt_has_display_strobe(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, CaseStatementIR):
         return any(_stmt_has_display_strobe(item.body) for item in stmt_ir.items)
     if isinstance(stmt_ir, SystemTaskIR):
-        return stmt_ir.name in {"$display", "$strobe"}
+        return stmt_ir.name in {
+            "$display",
+            "$strobe",
+            "$debug",
+            "$warning",
+            "$info",
+            "$error",
+        }
     return False
 
 

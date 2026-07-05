@@ -3819,6 +3819,63 @@ endmodule
         assert rust._perf_stats["rust_sim_program_side_effects"] == 1
         assert rust._perf_stats["generic_executor_runs"] == 0
 
+    def test_rust_sim_program_timer_warning_debug_info_match_python_side_effects(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module timer_system_output(out);
+    output voltage out;
+    integer code = 0;
+    analog begin
+        @(timer(1n)) begin
+            code = 5;
+            $warning("warn=%d", code);
+            $debug("debug=%d", code);
+            $info("info=%d", code);
+            if (code < 0) $error("unreachable");
+        end
+        V(out) <+ code;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert rust_model._strobe_log == ref_model._strobe_log
+        assert rust_model._strobe_log == [
+            (pytest.approx(1e-9), "warn=5"),
+            (pytest.approx(1e-9), "debug=5"),
+            (pytest.approx(1e-9), "info=5"),
+        ]
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_side_effects"] == 3
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
     def test_rust_sim_program_bound_step_scaled_transition_and_direct_output(self):
         _build_rust_core_or_skip()
         src = """\
@@ -9146,7 +9203,7 @@ module rust_fileio_metric(clk, done);
         end
         @(cross(V(clk) - 0.5, 1)) begin
             count = count + 1;
-            $fwrite(fd, "edge %d at %e\\n", count, $abstime);
+            $fstrobe(fd, "edge %d at %e", count, $abstime);
         end
         V(done) <+ transition(count > 0, 0.0, tr, tr);
     end
