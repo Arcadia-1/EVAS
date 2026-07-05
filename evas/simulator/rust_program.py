@@ -67,7 +67,11 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
     BODY_STMT_FILE_CLOSE,
+    BODY_STMT_FILE_GETS,
     BODY_STMT_FILE_OPEN,
+    BODY_STMT_FILE_SCANF,
+    BODY_STMT_FILE_SEEK,
+    BODY_STMT_FILE_TELL,
     BODY_STMT_FILE_WRITE,
     BODY_STMT_STROBE,
     BODY_TARGET_NODE,
@@ -111,6 +115,10 @@ SOURCE_PWL = "pwl"
 EVENT_DUE_ALWAYS = "always"
 EVENT_PHASE_PRE = 0
 EVENT_PHASE_POST = 1
+_INITIAL_FILE_READ_FUNCTIONS = frozenset(
+    {"$feof", "$fgets", "$fscanf", "$fseek", "$ftell", "$rewind"}
+)
+_INITIAL_FILE_READ_TASKS = frozenset({"$fgets", "$fscanf", "$fseek", "$rewind"})
 
 
 @dataclass(frozen=True)
@@ -303,6 +311,8 @@ class RustSimSideEffect:
     filename: str = ""
     mode: str = "w"
     fmt: str = ""
+    target_ids: Tuple[int, ...] = ()
+    target_integers: Tuple[bool, ...] = ()
     owner: Any = None
 
 
@@ -428,6 +438,14 @@ def _model_state_value(model: Any, state_name: str) -> float:
         array_name, idx = array_ref
         return float((getattr(model, "arrays", {}) or {}).get(array_name, {}).get(idx, 0.0))
     return 0.0
+
+
+def _model_state_is_numeric(model: Any, state_name: str) -> bool:
+    try:
+        _model_state_value(model, state_name)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _binding_array_slot_name(name: str, idx: int) -> str:
@@ -752,6 +770,30 @@ class _RustSimSideEffectBuilder:
     def add_file_close(self) -> int:
         return self._append(RustSimSideEffect(kind="fclose"))
 
+    def add_file_scanf(
+        self,
+        fmt: str,
+        target_ids: tuple[int, ...],
+        target_integers: tuple[bool, ...],
+    ) -> int:
+        return self._append(
+            RustSimSideEffect(
+                kind="fscanf",
+                fmt=fmt,
+                target_ids=target_ids,
+                target_integers=target_integers,
+            )
+        )
+
+    def add_file_gets(self, target_ids: tuple[int, ...] = ()) -> int:
+        return self._append(RustSimSideEffect(kind="fgets", target_ids=target_ids))
+
+    def add_file_tell(self) -> int:
+        return self._append(RustSimSideEffect(kind="ftell"))
+
+    def add_file_seek(self) -> int:
+        return self._append(RustSimSideEffect(kind="fseek"))
+
     def add_strobe(self, fmt: str) -> int:
         return self._append(RustSimSideEffect(kind="strobe", fmt=fmt, owner=self._model))
 
@@ -824,6 +866,7 @@ def _ensure_model_state_slots(
                     binding
                     for binding in bindings.bindings
                     if binding.kind == SYMBOL_STATE_SCALAR
+                    and _model_state_is_numeric(model, str(binding.name))
                 ),
                 key=lambda binding: int(binding.slot),
             )
@@ -1098,9 +1141,23 @@ def _append_body_program(
                 state_slot_to_global=state_slot_to_global,
                 param_slot_to_global=param_slot_to_global,
             )
+            if int(stmt.target_kind) in {BODY_STMT_FILE_SCANF, BODY_STMT_FILE_GETS}:
+                spec_pos = expr_start + expr_count - 1
+                if expr_count <= 0 or spec_pos >= len(body_expr_ops):
+                    continue
+                spec_op = body_expr_ops[spec_pos]
+                body_expr_ops[spec_pos] = BodyExprOp(
+                    op_kind=int(spec_op.op_kind),
+                    index=int(spec_op.index),
+                    value=float(spec_op.value) + float(side_effect_slot_offset),
+                )
         if stmt.target_kind == BODY_TARGET_NODE:
             target_id = int(node_slot_to_global.get(target_id, target_id))
-        elif stmt.target_kind == BODY_TARGET_STATE:
+        elif stmt.target_kind == BODY_TARGET_STATE or int(stmt.target_kind) in {
+            BODY_STMT_FILE_SCANF,
+            BODY_STMT_FILE_TELL,
+            BODY_STMT_FILE_SEEK,
+        }:
             target_id = int(state_slot_to_global.get(target_id, target_id))
         elif int(stmt.target_kind) in {
             BODY_STMT_FILE_WRITE,
@@ -1118,6 +1175,30 @@ def _append_body_program(
             )
         )
     return stmt_start, len(body_stmt_ops) - stmt_start
+
+
+def _remap_side_effect_targets(
+    effects: Iterable[RustSimSideEffect],
+    state_slot_to_global: Mapping[int, int],
+) -> tuple[RustSimSideEffect, ...]:
+    remapped: list[RustSimSideEffect] = []
+    for effect in effects:
+        target_ids = tuple(
+            int(state_slot_to_global.get(int(slot), int(slot)))
+            for slot in tuple(getattr(effect, "target_ids", ()) or ())
+        )
+        remapped.append(
+            RustSimSideEffect(
+                kind=str(effect.kind),
+                filename=str(effect.filename),
+                mode=str(effect.mode),
+                fmt=str(effect.fmt),
+                target_ids=target_ids,
+                target_integers=tuple(bool(v) for v in effect.target_integers),
+                owner=effect.owner,
+            )
+        )
+    return tuple(remapped)
 
 
 def _is_continuous_body_stmt(stmt_ir: object) -> bool:
@@ -1317,6 +1398,135 @@ def _stmt_has_display_strobe(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, SystemTaskIR):
         return stmt_ir.name in {"$display", "$strobe"}
     return False
+
+
+def _event_ir_is_pure_initial_step(event_ir: object) -> bool:
+    return (
+        isinstance(event_ir, EventTriggerIR)
+        and str(event_ir.event_type).upper() == "INITIAL_STEP"
+    )
+
+
+def _expr_has_initial_file_read(expr_ir: object) -> bool:
+    if isinstance(expr_ir, FunctionCallIR):
+        if str(expr_ir.name) in _INITIAL_FILE_READ_FUNCTIONS:
+            return True
+        return any(_expr_has_initial_file_read(arg) for arg in expr_ir.args)
+    if isinstance(expr_ir, BinaryExprIR):
+        return _expr_has_initial_file_read(expr_ir.left) or _expr_has_initial_file_read(
+            expr_ir.right
+        )
+    if isinstance(expr_ir, UnaryExprIR):
+        return _expr_has_initial_file_read(expr_ir.operand)
+    if isinstance(expr_ir, TernaryExprIR):
+        return (
+            _expr_has_initial_file_read(expr_ir.cond)
+            or _expr_has_initial_file_read(expr_ir.true_expr)
+            or _expr_has_initial_file_read(expr_ir.false_expr)
+        )
+    if isinstance(expr_ir, ArrayAccessIR):
+        return _expr_has_initial_file_read(expr_ir.index)
+    if isinstance(expr_ir, BranchAccessIR):
+        return any(
+            child is not None and _expr_has_initial_file_read(child)
+            for child in (
+                expr_ir.node1_index,
+                expr_ir.node1_index2,
+                expr_ir.node2_index,
+                expr_ir.node2_index2,
+            )
+        )
+    return False
+
+
+def _stmt_has_initial_file_read(stmt_ir: object) -> bool:
+    if isinstance(stmt_ir, BlockIR):
+        return any(_stmt_has_initial_file_read(child) for child in stmt_ir.statements)
+    if isinstance(stmt_ir, EventStatementIR):
+        return _stmt_has_initial_file_read(stmt_ir.body)
+    if isinstance(stmt_ir, AssignmentIR):
+        return _expr_has_initial_file_read(stmt_ir.value)
+    if isinstance(stmt_ir, SystemTaskIR):
+        return str(stmt_ir.name) in _INITIAL_FILE_READ_TASKS or any(
+            _expr_has_initial_file_read(arg) for arg in stmt_ir.args
+        )
+    if isinstance(stmt_ir, IfStatementIR):
+        return (
+            _expr_has_initial_file_read(stmt_ir.cond)
+            or _stmt_has_initial_file_read(stmt_ir.then_body)
+            or (
+                stmt_ir.else_body is not None
+                and _stmt_has_initial_file_read(stmt_ir.else_body)
+            )
+        )
+    if isinstance(stmt_ir, ForStatementIR):
+        return (
+            _stmt_has_initial_file_read(stmt_ir.init)
+            or _expr_has_initial_file_read(stmt_ir.cond)
+            or _stmt_has_initial_file_read(stmt_ir.update)
+            or _stmt_has_initial_file_read(stmt_ir.body)
+        )
+    if isinstance(stmt_ir, WhileStatementIR):
+        return _expr_has_initial_file_read(stmt_ir.cond) or _stmt_has_initial_file_read(
+            stmt_ir.body
+        )
+    if isinstance(stmt_ir, CaseStatementIR):
+        return _expr_has_initial_file_read(stmt_ir.expr) or any(
+            any(_expr_has_initial_file_read(value) for value in item.values)
+            or _stmt_has_initial_file_read(item.body)
+            for item in stmt_ir.items
+        )
+    if isinstance(stmt_ir, ContributionIR):
+        return _expr_has_initial_file_read(stmt_ir.expr)
+    return False
+
+
+def _strip_preapplied_initial_file_read_events(stmt_ir: object) -> object:
+    if isinstance(stmt_ir, BlockIR):
+        return BlockIR(
+            tuple(
+                _strip_preapplied_initial_file_read_events(child)
+                for child in stmt_ir.statements
+            )
+        )
+    if (
+        isinstance(stmt_ir, EventStatementIR)
+        and _event_ir_is_pure_initial_step(stmt_ir.event)
+        and _stmt_has_initial_file_read(stmt_ir.body)
+    ):
+        return EventStatementIR(stmt_ir.event, BlockIR(()))
+    return stmt_ir
+
+
+def model_has_pure_initial_step_file_read(model: Any) -> bool:
+    """Return True when Python must preapply an initial_step sidecar read.
+
+    RustSimProgram owns numeric state and waveform evolution, but it does not
+    currently carry file handles or string buffers in the C ABI.  For the
+    Spectre-supported subset where a pure initial_step event ingests a sidecar
+    file and later Rust-owned events use the resulting numeric state, Python can
+    execute that initial event before lowering and Rust can safely start from
+    the updated state vector.
+    """
+
+    model_cls = getattr(model, "__class__", type(model))
+    module = getattr(model_cls, "_module_ast", None)
+    analog_block = getattr(module, "analog_block", None) if module is not None else None
+    body_ast = getattr(analog_block, "body", None)
+    if body_ast is None:
+        return False
+    try:
+        body_ir = lower_stmt(body_ast)
+    except Exception:
+        return False
+    if not isinstance(body_ir, BlockIR):
+        return False
+    return any(
+        isinstance(stmt, EventStatementIR)
+        and _event_ir_is_pure_initial_step(stmt.event)
+        and _stmt_has_initial_file_read(stmt.body)
+        for stmt in body_ir.statements
+    )
 
 
 def _stmt_has_rustsim_event_transition_candidate(stmt_ir: object) -> bool:
@@ -1889,6 +2099,7 @@ def _convert_event_transition_ops(
     *,
     model: Any,
     model_index: int,
+    preapplied_initial_step_file_read: bool = False,
     global_contributed_nodes: frozenset[str],
     node_ids: dict[str, int],
     nodes: list[RustSimNode],
@@ -1913,6 +2124,8 @@ def _convert_event_transition_ops(
     body_ir = lower_stmt(body_ast)
     if not isinstance(body_ir, BlockIR):
         return (f"{prefix}:stmt_lower_failed",)
+    if preapplied_initial_step_file_read:
+        body_ir = _strip_preapplied_initial_file_read_events(body_ir)
     if _prefer_existing_timer_static_linear_path(
         model_cls
     ) and not _stmt_has_display_strobe(body_ir):
@@ -2309,7 +2522,9 @@ def _convert_event_transition_ops(
         and converted_slews == 0
     ):
         return (f"{prefix}:no_event_transition_ir",)
-    side_effects.extend(side_effect_builder.effects)
+    side_effects.extend(
+        _remap_side_effect_targets(side_effect_builder.effects, state_slot_to_global)
+    )
     return tuple(reasons)
 
 
@@ -2401,6 +2616,7 @@ def build_source_record_rust_program(
     current_sources: Iterable[Any] = (),
     recorded_signals: Iterable[str],
     models: Iterable[Any],
+    preapplied_initial_step_file_read_model_indices: Iterable[int] = (),
 ) -> RustSimCompileReport:
     """Lower source+record/no-model simulation into RustSimProgram.
 
@@ -2413,6 +2629,9 @@ def build_source_record_rust_program(
     current_source_list = tuple(current_sources)
     record_names = tuple(str(name) for name in recorded_signals)
     model_list = tuple(models)
+    preapplied_initial_step_file_read_indices = frozenset(
+        int(index) for index in preapplied_initial_step_file_read_model_indices
+    )
     global_contributed_nodes = _collect_global_contributed_nodes(model_list)
     reasons: list[str] = []
     if not record_names:
@@ -2516,6 +2735,9 @@ def build_source_record_rust_program(
             event_reasons = _convert_event_transition_ops(
                 model=model,
                 model_index=model_index,
+                preapplied_initial_step_file_read=(
+                    model_index in preapplied_initial_step_file_read_indices
+                ),
                 global_contributed_nodes=global_contributed_nodes,
                 node_ids=node_ids,
                 nodes=nodes,

@@ -120,6 +120,18 @@ class RustBodyStmtOp(ctypes.Structure):
     ]
 
 
+class RustFileIoSpec(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_uint8),
+        ("string_start", ctypes.c_size_t),
+        ("string_len", ctypes.c_size_t),
+        ("aux_start", ctypes.c_size_t),
+        ("aux_len", ctypes.c_size_t),
+        ("target_start", ctypes.c_size_t),
+        ("target_count", ctypes.c_size_t),
+    ]
+
+
 class RustSimSourceSpec(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_uint8),
@@ -245,6 +257,10 @@ BODY_EXPR_RDIST_ERLANG = 84
 
 BODY_TARGET_NODE = 0
 BODY_TARGET_STATE = 1
+BODY_STMT_FILE_SCANF = 239
+BODY_STMT_FILE_GETS = 240
+BODY_STMT_FILE_TELL = 241
+BODY_STMT_FILE_SEEK = 242
 BODY_STMT_LAST_CROSSING = 243
 BODY_STMT_IDTMOD = 244
 BODY_STMT_WHILE = 245
@@ -268,6 +284,14 @@ RUST_SIM_EVENT_ABOVE = 2
 RUST_SIM_EVENT_TIMER = 3
 RUST_SIM_EVENT_ALWAYS = 4
 RUST_SIM_EVENT_FINAL_STEP = 5
+RUST_FILE_SPEC_FOPEN = 1
+RUST_FILE_SPEC_FWRITE = 2
+RUST_FILE_SPEC_FCLOSE = 3
+RUST_FILE_SPEC_STROBE = 4
+RUST_FILE_SPEC_FSCANF = 5
+RUST_FILE_SPEC_FGETS = 6
+RUST_FILE_SPEC_FTELL = 7
+RUST_FILE_SPEC_FSEEK = 8
 
 
 def _rust_sim_source_kind_code(kind: str) -> int:
@@ -322,6 +346,12 @@ class RustSimSourceRecordProgram:
         self.side_effects: Tuple[object, ...] = tuple(
             getattr(program, "side_effects", ()) or ()
         )
+        (
+            self.file_io_specs,
+            self.file_io_string_bytes,
+            self.file_io_target_ids,
+            self.file_io_target_integers,
+        ) = self._build_file_io_specs(self.side_effects)
         self.source_data: Tuple[float, ...] = tuple(
             float(value) for value in getattr(program, "source_data", ())
         )
@@ -357,6 +387,18 @@ class RustSimSourceRecordProgram:
         self._body_ir_batch = RustBodyIrBatch(
             stmt_ops=body_stmt_ops,
             expr_ops=body_expr_ops,
+        )
+        file_spec_array_type = RustFileIoSpec * len(self.file_io_specs)
+        file_string_array_type = ctypes.c_uint8 * len(self.file_io_string_bytes)
+        file_target_array_type = ctypes.c_size_t * len(self.file_io_target_ids)
+        file_target_integer_array_type = ctypes.c_uint8 * len(
+            self.file_io_target_integers
+        )
+        self._c_file_io_specs = file_spec_array_type(*self.file_io_specs)
+        self._c_file_io_strings = file_string_array_type(*self.file_io_string_bytes)
+        self._c_file_io_target_ids = file_target_array_type(*self.file_io_target_ids)
+        self._c_file_io_target_integers = file_target_integer_array_type(
+            *self.file_io_target_integers
         )
         event_specs = []
         for event in tuple(getattr(program, "events", ()) or ()):
@@ -510,6 +552,82 @@ class RustSimSourceRecordProgram:
                 )
             )
         self._linear_batch = RustLinearBatch(linear_ops)
+
+    @staticmethod
+    def _file_spec_kind(action: str) -> int:
+        if action == "fopen":
+            return RUST_FILE_SPEC_FOPEN
+        if action == "fwrite":
+            return RUST_FILE_SPEC_FWRITE
+        if action == "fclose":
+            return RUST_FILE_SPEC_FCLOSE
+        if action == "strobe":
+            return RUST_FILE_SPEC_STROBE
+        if action == "fscanf":
+            return RUST_FILE_SPEC_FSCANF
+        if action == "fgets":
+            return RUST_FILE_SPEC_FGETS
+        if action == "ftell":
+            return RUST_FILE_SPEC_FTELL
+        if action == "fseek":
+            return RUST_FILE_SPEC_FSEEK
+        return 0
+
+    @classmethod
+    def _build_file_io_specs(
+        cls,
+        side_effects: Tuple[object, ...],
+    ) -> tuple[Tuple[RustFileIoSpec, ...], Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]:
+        string_bytes = bytearray()
+        target_ids: list[int] = []
+        target_integers: list[int] = []
+        specs: list[RustFileIoSpec] = []
+
+        def add_string(value: str) -> tuple[int, int]:
+            encoded = str(value).encode("utf-8")
+            start = len(string_bytes)
+            string_bytes.extend(encoded)
+            return start, len(encoded)
+
+        for effect in side_effects:
+            action = str(getattr(effect, "kind", ""))
+            kind = cls._file_spec_kind(action)
+            if action == "fopen":
+                string_start, string_len = add_string(
+                    str(getattr(effect, "filename", "output.txt"))
+                )
+                aux_start, aux_len = add_string(str(getattr(effect, "mode", "w") or "w"))
+            elif action in {"fwrite", "strobe", "fscanf"}:
+                string_start, string_len = add_string(str(getattr(effect, "fmt", "")))
+                aux_start, aux_len = add_string("")
+            else:
+                string_start, string_len = add_string("")
+                aux_start, aux_len = add_string("")
+
+            target_start = len(target_ids)
+            for target_id, target_integer in zip(
+                tuple(getattr(effect, "target_ids", ()) or ()),
+                tuple(getattr(effect, "target_integers", ()) or ()),
+            ):
+                target_ids.append(int(target_id))
+                target_integers.append(1 if bool(target_integer) else 0)
+            specs.append(
+                RustFileIoSpec(
+                    int(kind),
+                    int(string_start),
+                    int(string_len),
+                    int(aux_start),
+                    int(aux_len),
+                    int(target_start),
+                    int(len(target_ids) - target_start),
+                )
+            )
+        return (
+            tuple(specs),
+            tuple(int(value) for value in string_bytes),
+            tuple(target_ids),
+            tuple(target_integers),
+        )
 
     def apply_side_effects(
         self,
@@ -673,6 +791,34 @@ class RustSimSourceRecordProgram:
     @property
     def param_ptr(self):
         return self._c_param_values
+
+    @property
+    def file_io_spec_ptr(self):
+        return self._c_file_io_specs
+
+    @property
+    def file_io_string_ptr(self):
+        return self._c_file_io_strings
+
+    @property
+    def file_io_target_id_ptr(self):
+        return self._c_file_io_target_ids
+
+    @property
+    def file_io_target_integer_ptr(self):
+        return self._c_file_io_target_integers
+
+    @property
+    def file_io_spec_count(self) -> int:
+        return len(self.file_io_specs)
+
+    @property
+    def file_io_string_len(self) -> int:
+        return len(self.file_io_string_bytes)
+
+    @property
+    def file_io_target_count(self) -> int:
+        return len(self.file_io_target_ids)
 
 
 class RustLfsrEventBatch:
@@ -1903,6 +2049,14 @@ class RustBackend:
                 ctypes.POINTER(ctypes.c_double),
                 ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(RustFileIoSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_uint8),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_uint8),
+                ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_double),
                 ctypes.c_size_t,
                 ctypes.POINTER(ctypes.c_double),
@@ -2818,6 +2972,14 @@ class RustBackend:
                 side_values,
                 int(side_effect_value_capacity),
                 ctypes.byref(side_effect_value_count),
+                program.file_io_spec_ptr,
+                int(program.file_io_spec_count),
+                program.file_io_string_ptr,
+                int(program.file_io_string_len),
+                program.file_io_target_id_ptr,
+                int(program.file_io_target_count),
+                program.file_io_target_integer_ptr,
+                int(program.file_io_target_count),
                 program.param_ptr,
                 int(program.param_count),
                 node_buffer,

@@ -142,6 +142,10 @@ pub(crate) const BODY_EXPR_RANDOM_INT32: u8 = 81;
 pub(crate) const BODY_EXPR_RDIST_EXPONENTIAL: u8 = 82;
 pub(crate) const BODY_EXPR_RDIST_POISSON: u8 = 83;
 pub(crate) const BODY_EXPR_RDIST_ERLANG: u8 = 84;
+pub(crate) const BODY_STMT_FILE_SCANF: u8 = 239;
+pub(crate) const BODY_STMT_FILE_GETS: u8 = 240;
+pub(crate) const BODY_STMT_FILE_TELL: u8 = 241;
+pub(crate) const BODY_STMT_FILE_SEEK: u8 = 242;
 pub(crate) const BODY_STMT_LAST_CROSSING: u8 = 243;
 pub(crate) const BODY_STMT_IDTMOD: u8 = 244;
 pub(crate) const BODY_STMT_WHILE: u8 = 245;
@@ -171,6 +175,33 @@ pub struct EvasRustBodyStmtOp {
     pub target_id: usize,
     pub expr_start: usize,
     pub expr_count: usize,
+}
+
+pub(crate) const RUST_FILE_SPEC_FOPEN: u8 = 1;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_FWRITE: u8 = 2;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_FCLOSE: u8 = 3;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_STROBE: u8 = 4;
+pub(crate) const RUST_FILE_SPEC_FSCANF: u8 = 5;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_FGETS: u8 = 6;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_FTELL: u8 = 7;
+#[allow(dead_code)]
+pub(crate) const RUST_FILE_SPEC_FSEEK: u8 = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustFileIoSpec {
+    pub kind: u8,
+    pub string_start: usize,
+    pub string_len: usize,
+    pub aux_start: usize,
+    pub aux_len: usize,
+    pub target_start: usize,
+    pub target_count: usize,
 }
 
 pub(crate) const RUST_SIM_SOURCE_DC: u8 = 0;

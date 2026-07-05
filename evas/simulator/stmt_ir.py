@@ -47,12 +47,17 @@ from evas.simulator.expr_ir import (
     static_node_ref_name,
 )
 from evas.simulator.rust_backend import (
+    BODY_EXPR_CONST,
     BODY_STMT_BOUND_STEP,
     BODY_STMT_ELSE,
     BODY_STMT_ENDIF,
     BODY_STMT_ENDWHILE,
     BODY_STMT_FILE_CLOSE,
+    BODY_STMT_FILE_GETS,
     BODY_STMT_FILE_OPEN,
+    BODY_STMT_FILE_SCANF,
+    BODY_STMT_FILE_SEEK,
+    BODY_STMT_FILE_TELL,
     BODY_STMT_FILE_WRITE,
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
@@ -72,6 +77,8 @@ from evas.simulator.schedule_ir import (
     lower_event,
 )
 
+_NO_BODY_TARGET_ID = (1 << 63) - 1
+
 
 @dataclass(frozen=True)
 class StatementLoweringContext:
@@ -81,7 +88,11 @@ class StatementLoweringContext:
             "$bound_step",
             "$fclose",
             "$fdisplay",
+            "$fgets",
+            "$fscanf",
+            "$fseek",
             "$fwrite",
+            "$rewind",
             "$strobe",
             "$display",
         }
@@ -925,6 +936,16 @@ def _append_body_stmt_ops(
         )
         if last_crossing_encoded is not None:
             return last_crossing_encoded
+        file_read_encoded = _append_file_read_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+            side_effects,
+        )
+        if file_read_encoded is not None:
+            return file_read_encoded
         target = _encode_assignment_target(stmt_ir.target, bindings)
         if target is None:
             lowered_array_assignment = _dynamic_array_assignment_to_if_chain(
@@ -1137,6 +1158,33 @@ def _append_body_stmt_ops(
                 expr_ops,
                 side_effects,
             )
+        if side_effects is not None and stmt_ir.name == "$fscanf":
+            return _append_file_scanf_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
+        if side_effects is not None and stmt_ir.name in {"$fseek", "$rewind"}:
+            return _append_file_seek_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
+        if side_effects is not None and stmt_ir.name == "$fgets":
+            return _append_file_gets_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
         if stmt_ir.name != "$bound_step" or not stmt_ir.args:
             return False
         encoded_expr = encode_body_expr_ops(stmt_ir.args[0], bindings, node_slots)
@@ -1158,6 +1206,147 @@ def _append_body_stmt_ops(
     return False
 
 
+def _encode_fscanf_target(
+    target: ExprIR,
+    bindings: BindingTableIR,
+) -> Optional[tuple[int, bool]]:
+    if isinstance(target, IdentifierIR):
+        binding = bindings.resolve(target.name)
+    elif isinstance(target, ArrayAccessIR):
+        binding = resolve_static_array_element_binding(target, bindings)
+    else:
+        binding = None
+    if binding is None or binding.kind != SYMBOL_STATE_SCALAR:
+        return None
+    return int(binding.slot), bool(binding.integer)
+
+
+def _collect_fscanf_targets(
+    args: tuple[ExprIR, ...],
+    bindings: BindingTableIR,
+) -> Optional[tuple[tuple[int, ...], tuple[bool, ...]]]:
+    target_ids: list[int] = []
+    target_integers: list[bool] = []
+    for arg in args:
+        target = _encode_fscanf_target(arg, bindings)
+        if target is None:
+            return None
+        target_id, target_integer = target
+        target_ids.append(target_id)
+        target_integers.append(target_integer)
+    return tuple(target_ids), tuple(target_integers)
+
+
+def _add_file_scanf_side_effect(
+    side_effects: object,
+    fmt: str,
+    target_ids: tuple[int, ...],
+    target_integers: tuple[bool, ...],
+) -> Optional[int]:
+    add = getattr(side_effects, "add_file_scanf", None)
+    if add is None:
+        return None
+    return int(add(fmt, target_ids, target_integers))
+
+
+def _append_file_read_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object | None,
+) -> Optional[bool]:
+    if side_effects is None or not isinstance(stmt_ir.value, FunctionCallIR):
+        return None
+    name = str(stmt_ir.value.name)
+    if name not in {"$fscanf", "$feof", "$ftell", "$fseek", "$rewind"}:
+        return None
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    if target is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE:
+        return False
+    args = tuple(stmt_ir.value.args)
+    if name == "$fscanf":
+        if len(args) < 2:
+            return False
+        fmt = _resolve_side_effect_string(side_effects, args[1])
+        if fmt is None:
+            return False
+        targets = _collect_fscanf_targets(args[2:], bindings)
+        if targets is None:
+            return False
+        scan_target_ids, scan_target_integers = targets
+        spec_id = _add_file_scanf_side_effect(
+            side_effects,
+            fmt,
+            scan_target_ids,
+            scan_target_integers,
+        )
+        if spec_id is None:
+            return False
+        encoded_fd = encode_body_expr_ops(args[0], bindings, node_slots)
+        if encoded_fd is None:
+            return False
+        expr_start = len(expr_ops)
+        expr_ops.extend(encoded_fd)
+        stmt_ops.append(
+            BodyStmtOp(
+                target_kind=BODY_STMT_FILE_SCANF,
+                target_id=target_id,
+                expr_start=expr_start,
+                expr_count=len(encoded_fd),
+                target_integer=target_integer,
+            )
+        )
+        # The scanf format/targets live in the side-effect spec table.  The
+        # stmt target_id is the count destination; stash spec_id in expr_start
+        # after the fd expression by emitting it as a trailing constant.
+        expr_ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(spec_id)))
+        stmt_ops[-1] = BodyStmtOp(
+            target_kind=BODY_STMT_FILE_SCANF,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded_fd) + 1,
+            target_integer=target_integer,
+        )
+        return True
+    if not args:
+        return False
+    if name == "$rewind":
+        args = (args[0],)
+    elif name == "$fseek":
+        while len(args) < 3:
+            args = (*args, LiteralIR(0.0))
+    encoded: list[BodyExprOp] = []
+    for arg in args[:3]:
+        arg_ops = encode_body_expr_ops(arg, bindings, node_slots)
+        if arg_ops is None:
+            return False
+        encoded.extend(arg_ops)
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_kind = BODY_STMT_FILE_TELL if name in {"$feof", "$ftell"} else BODY_STMT_FILE_SEEK
+    op_code = 1.0 if name == "$feof" else 0.0
+    if name == "$rewind":
+        op_code = 2.0
+    elif name == "$fseek":
+        op_code = 1.0
+    expr_ops.append(BodyExprOp(BODY_EXPR_CONST, value=op_code))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=stmt_kind,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded) + 1,
+            target_integer=target_integer,
+        )
+    )
+    return True
+
+
 def _add_file_open_side_effect(side_effects: object, call_ir: FunctionCallIR) -> Optional[int]:
     filename = (
         _resolve_side_effect_string(side_effects, call_ir.args[0])
@@ -1175,6 +1364,117 @@ def _add_file_open_side_effect(side_effects: object, call_ir: FunctionCallIR) ->
     if add is None:
         return None
     return int(add(filename, mode))
+
+
+def _append_file_scanf_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if len(stmt_ir.args) < 2:
+        return False
+    fmt = _resolve_side_effect_string(side_effects, stmt_ir.args[1])
+    if fmt is None:
+        return False
+    targets = _collect_fscanf_targets(tuple(stmt_ir.args[2:]), bindings)
+    if targets is None:
+        return False
+    target_ids, target_integers = targets
+    spec_id = _add_file_scanf_side_effect(side_effects, fmt, target_ids, target_integers)
+    if spec_id is None:
+        return False
+    encoded_fd = encode_body_expr_ops(stmt_ir.args[0], bindings, node_slots)
+    if encoded_fd is None:
+        return False
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded_fd)
+    expr_ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(spec_id)))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_FILE_SCANF,
+            target_id=_NO_BODY_TARGET_ID,
+            expr_start=expr_start,
+            expr_count=len(encoded_fd) + 1,
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_file_seek_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if not stmt_ir.args:
+        return False
+    args = tuple(stmt_ir.args)
+    if stmt_ir.name == "$rewind":
+        args = (stmt_ir.args[0],)
+        op_code = 2.0
+    else:
+        while len(args) < 3:
+            args = (*args, LiteralIR(0.0))
+        op_code = 1.0
+    encoded: list[BodyExprOp] = []
+    for arg in args[:3]:
+        arg_ops = encode_body_expr_ops(arg, bindings, node_slots)
+        if arg_ops is None:
+            return False
+        encoded.extend(arg_ops)
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    expr_ops.append(BodyExprOp(BODY_EXPR_CONST, value=op_code))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_FILE_SEEK,
+            target_id=_NO_BODY_TARGET_ID,
+            expr_start=expr_start,
+            expr_count=len(encoded) + 1,
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_file_gets_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    if len(stmt_ir.args) < 2:
+        return False
+    # Rust state vectors are numeric, so this supports the synchronizing file
+    # cursor effect of $fgets but not string-state propagation into Rust.
+    encoded_fd = encode_body_expr_ops(stmt_ir.args[1], bindings, node_slots)
+    if encoded_fd is None:
+        return False
+    add = getattr(side_effects, "add_file_gets", None)
+    if add is None:
+        return False
+    spec_id = int(add(()))
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded_fd)
+    expr_ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(spec_id)))
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_FILE_GETS,
+            target_id=_NO_BODY_TARGET_ID,
+            expr_start=expr_start,
+            expr_count=len(encoded_fd) + 1,
+            target_integer=False,
+        )
+    )
+    return True
 
 
 def _append_file_write_stmt(

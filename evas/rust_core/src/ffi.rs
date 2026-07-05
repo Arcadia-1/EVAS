@@ -332,6 +332,14 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     side_effect_values: *mut f64,
     side_effect_value_capacity: usize,
     out_side_effect_value_count: *mut usize,
+    file_specs: *const EvasRustFileIoSpec,
+    file_spec_count: usize,
+    file_string_bytes: *const u8,
+    file_string_len: usize,
+    file_target_ids: *const usize,
+    file_target_count: usize,
+    file_target_integers: *const u8,
+    file_target_integer_count: usize,
     param_values: *const f64,
     param_count: usize,
     node_values: *mut f64,
@@ -400,6 +408,21 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     }
     if out_side_effect_count.is_null() || out_side_effect_value_count.is_null() {
         return -1023;
+    }
+    if file_spec_count > 0 && file_specs.is_null() {
+        return -1024;
+    }
+    if file_string_len > 0 && file_string_bytes.is_null() {
+        return -1025;
+    }
+    if file_target_count > 0 && file_target_ids.is_null() {
+        return -1026;
+    }
+    if file_target_integer_count > 0 && file_target_integers.is_null() {
+        return -1027;
+    }
+    if file_target_integer_count != file_target_count {
+        return -1028;
     }
     if param_count > 0 && param_values.is_null() {
         return -1010;
@@ -514,6 +537,26 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     } else {
         std::slice::from_raw_parts_mut(side_effect_values, side_effect_value_capacity)
     };
+    let file_spec_slice = if file_spec_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_specs, file_spec_count)
+    };
+    let file_string_slice = if file_string_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_string_bytes, file_string_len)
+    };
+    let file_target_slice = if file_target_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_target_ids, file_target_count)
+    };
+    let file_target_integer_slice = if file_target_integer_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_target_integers, file_target_integer_count)
+    };
     let param_slice = if param_count == 0 {
         &[]
     } else {
@@ -569,6 +612,10 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
         &mut *out_side_effect_count,
         side_effect_value_slice,
         &mut *out_side_effect_value_count,
+        file_spec_slice,
+        file_string_slice,
+        file_target_slice,
+        file_target_integer_slice,
         param_slice,
         node_slice,
         state_slice,

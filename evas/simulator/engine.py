@@ -15,7 +15,7 @@ import random
 import time as _wall_time
 from array import array
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -48,7 +48,10 @@ from evas.simulator.rust_backend import (
     TransitionTargetOp,
     load_optional_rust_backend,
 )
-from evas.simulator.rust_program import build_source_record_rust_program
+from evas.simulator.rust_program import (
+    build_source_record_rust_program,
+    model_has_pure_initial_step_file_read,
+)
 
 
 class _LazyFutureNodeVoltages:
@@ -626,12 +629,71 @@ class Simulator:
             self._rust_sim_program_last_rejection = "rust_backend_unavailable"
             return None
 
+        preapplied_initial_file_read_indices: List[int] = []
+        preapplied_snapshots: Dict[int, Tuple[Any, Any]] = {}
+
+        def _restore_preapplied_initial_file_reads() -> None:
+            for model_index, snapshots in reversed(tuple(preapplied_snapshots.items())):
+                if model_index < 0 or model_index >= len(self.models):
+                    continue
+                model = self.models[model_index]
+                cleanup = getattr(model, "_cleanup_files", None)
+                if cleanup is not None:
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+                state_snapshot, context_snapshot = snapshots
+                restore_state = getattr(model, "_restore_analysis_state", None)
+                restore_context = getattr(model, "_restore_analysis_context", None)
+                if restore_state is not None:
+                    restore_state(state_snapshot)
+                if restore_context is not None:
+                    restore_context(context_snapshot)
+
+        if self.models:
+            initial_node_voltages = dict(self.node_voltages)
+            for src in self.sources:
+                try:
+                    initial_node_voltages[str(src.node)] = float(src.waveform(0.0))
+                except Exception:
+                    pass
+            for model_index, model in enumerate(self.models):
+                if not model_has_pure_initial_step_file_read(model):
+                    continue
+                snapshot_state = getattr(model, "_snapshot_analysis_state", None)
+                snapshot_context = getattr(model, "_snapshot_analysis_context", None)
+                if snapshot_state is None or snapshot_context is None:
+                    self._perf_stats["rust_sim_program_rejections"] += 1
+                    self._rust_sim_program_last_rejection = (
+                        "initial_file_read_preapply_snapshot_unavailable"
+                    )
+                    _restore_preapplied_initial_file_reads()
+                    return None
+                preapplied_snapshots[model_index] = (
+                    snapshot_state(),
+                    snapshot_context(),
+                )
+                try:
+                    model.initial_step(initial_node_voltages, 0.0)
+                except Exception as exc:
+                    self._perf_stats["rust_sim_program_rejections"] += 1
+                    self._rust_sim_program_last_rejection = (
+                        f"initial_file_read_preapply_failed:{exc}"
+                    )
+                    _restore_preapplied_initial_file_reads()
+                    return None
+                preapplied_initial_file_read_indices.append(model_index)
+
         lower_t0 = _wall_time.perf_counter()
         report = build_source_record_rust_program(
             sources=self.sources,
             current_sources=self.current_sources,
             recorded_signals=self.recorded_signals.keys(),
             models=self.models,
+            preapplied_initial_step_file_read_model_indices=(
+                preapplied_initial_file_read_indices
+            ),
         )
         self._perf_stats["rust_sim_program_lower_elapsed_s"] = (
             _wall_time.perf_counter() - lower_t0
@@ -639,6 +701,7 @@ class Simulator:
         if not report.supported or report.program is None:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = ",".join(report.reasons)
+            _restore_preapplied_initial_file_reads()
             return None
 
         program = report.program
@@ -666,6 +729,7 @@ class Simulator:
         except RustBackendError as exc:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = f"abi_program_build_failed:{exc}"
+            _restore_preapplied_initial_file_reads()
             return None
         self._perf_stats["rust_sim_program_abi_build_elapsed_s"] = (
             _wall_time.perf_counter() - abi_t0
@@ -733,6 +797,7 @@ class Simulator:
         if not runtime_succeeded:
             self._perf_stats["rust_sim_program_rejections"] += 1
             self._rust_sim_program_last_rejection = f"runtime_failed:{last_runtime_error}"
+            _restore_preapplied_initial_file_reads()
             return None
 
         self._perf_stats["rust_sim_program_enabled"] = 1

@@ -133,12 +133,18 @@ TRANSIENT_ANALYSIS_FUNCTIONS = frozenset(
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
         "$dist_uniform",
+        "$feof",
+        "$fgets",
         "$fopen",
+        "$fscanf",
+        "$fseek",
+        "$ftell",
         "$random",
         "$rdist_erlang",
         "$rdist_exponential",
         "$rdist_normal",
         "$rdist_poisson",
+        "$rewind",
     }
 )
 

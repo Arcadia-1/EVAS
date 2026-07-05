@@ -1,6 +1,8 @@
 use crate::abi::*;
 use crate::event::*;
 use crate::util::*;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 // IR evaluators shared by Python-driven fast paths and Rust-owned programs.
 
@@ -117,6 +119,7 @@ pub fn evaluate_body_ir_ops_at_time(
         &mut ignored_bound_step,
         false,
         None,
+        None,
     )
 }
 
@@ -164,6 +167,262 @@ impl<'a> RustSideEffectLog<'a> {
     }
 }
 
+pub(crate) struct RustFileIoRuntime<'a> {
+    specs: &'a [EvasRustFileIoSpec],
+    string_bytes: &'a [u8],
+    target_ids: &'a [usize],
+    target_integers: &'a [u8],
+    handles: Vec<Option<BufReader<File>>>,
+}
+
+impl<'a> RustFileIoRuntime<'a> {
+    pub(crate) fn new(
+        specs: &'a [EvasRustFileIoSpec],
+        string_bytes: &'a [u8],
+        target_ids: &'a [usize],
+        target_integers: &'a [u8],
+    ) -> Self {
+        Self {
+            specs,
+            string_bytes,
+            target_ids,
+            target_integers,
+            handles: Vec::new(),
+        }
+    }
+
+    fn spec(&self, spec_id: usize, expected_kind: u8) -> Result<&EvasRustFileIoSpec, i32> {
+        let spec = self.specs.get(spec_id).ok_or(-2340)?;
+        if spec.kind != expected_kind {
+            return Err(-2341);
+        }
+        Ok(spec)
+    }
+
+    fn spec_string(&self, start: usize, len: usize) -> Result<String, i32> {
+        let end = start.checked_add(len).ok_or(-2342)?;
+        if end > self.string_bytes.len() {
+            return Err(-2343);
+        }
+        std::str::from_utf8(&self.string_bytes[start..end])
+            .map(|s| s.to_string())
+            .map_err(|_| -2344)
+    }
+
+    fn primary_string(&self, spec: &EvasRustFileIoSpec) -> Result<String, i32> {
+        self.spec_string(spec.string_start, spec.string_len)
+    }
+
+    fn aux_string(&self, spec: &EvasRustFileIoSpec) -> Result<String, i32> {
+        self.spec_string(spec.aux_start, spec.aux_len)
+    }
+
+    pub(crate) fn fopen(&mut self, spec_id: usize) -> Result<Option<f64>, i32> {
+        let spec = *self.spec(spec_id, RUST_FILE_SPEC_FOPEN)?;
+        let mode = self.aux_string(&spec)?;
+        if !mode.contains('r') {
+            return Ok(None);
+        }
+        let filename = self.primary_string(&spec)?;
+        let file = File::open(filename).map_err(|_| -2345)?;
+        self.handles.push(Some(BufReader::new(file)));
+        Ok(Some(self.handles.len() as f64))
+    }
+
+    fn handle_mut(&mut self, fd: f64) -> Option<&mut BufReader<File>> {
+        if !fd.is_finite() {
+            return None;
+        }
+        let rounded = to_veriloga_integer_trunc(fd);
+        if rounded <= 0 {
+            return None;
+        }
+        let idx = (rounded as usize).saturating_sub(1);
+        self.handles.get_mut(idx).and_then(|slot| slot.as_mut())
+    }
+
+    pub(crate) fn fclose(&mut self, fd: f64) -> bool {
+        if !fd.is_finite() {
+            return false;
+        }
+        let rounded = to_veriloga_integer_trunc(fd);
+        if rounded <= 0 {
+            return false;
+        }
+        let idx = (rounded as usize).saturating_sub(1);
+        if let Some(slot) = self.handles.get_mut(idx) {
+            if slot.is_some() {
+                *slot = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn ftell(&mut self, fd: f64) -> f64 {
+        self.handle_mut(fd)
+            .and_then(|handle| handle.stream_position().ok())
+            .map(|pos| pos as f64)
+            .unwrap_or(-1.0)
+    }
+
+    pub(crate) fn feof(&mut self, fd: f64) -> f64 {
+        let Some(handle) = self.handle_mut(fd) else {
+            return 1.0;
+        };
+        let Ok(pos) = handle.stream_position() else {
+            return 1.0;
+        };
+        let mut byte = [0_u8; 1];
+        let at_eof = match handle.read(&mut byte) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(_) => true,
+        };
+        let _ = handle.seek(SeekFrom::Start(pos));
+        if at_eof { 1.0 } else { 0.0 }
+    }
+
+    pub(crate) fn fseek(&mut self, fd: f64, offset: f64, whence: f64) -> f64 {
+        let Some(handle) = self.handle_mut(fd) else {
+            return -1.0;
+        };
+        let off = to_veriloga_integer_trunc(offset);
+        let whence_i = to_veriloga_integer_trunc(whence);
+        let seek_from = match whence_i {
+            0 => SeekFrom::Start(off.max(0) as u64),
+            1 => SeekFrom::Current(off),
+            2 => SeekFrom::End(off),
+            _ => return -1.0,
+        };
+        match handle.seek(seek_from) {
+            Ok(_) => 0.0,
+            Err(_) => -1.0,
+        }
+    }
+
+    pub(crate) fn fgets_discard(&mut self, fd: f64) -> f64 {
+        let Some(handle) = self.handle_mut(fd) else {
+            return 0.0;
+        };
+        let mut line = String::new();
+        match handle.read_line(&mut line) {
+            Ok(0) | Err(_) => 0.0,
+            Ok(_) => 1.0,
+        }
+    }
+
+    fn next_scan_value(
+        chars: &[char],
+        mut pos: usize,
+    ) -> (usize, Option<String>) {
+        while pos < chars.len() && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        let start = pos;
+        while pos < chars.len() && !chars[pos].is_whitespace() && chars[pos] != ',' {
+            pos += 1;
+        }
+        if pos == start {
+            (pos, None)
+        } else {
+            (pos, Some(chars[start..pos].iter().collect()))
+        }
+    }
+
+    pub(crate) fn fscanf(
+        &mut self,
+        spec_id: usize,
+        fd: f64,
+        state_values: &mut [f64],
+    ) -> Result<f64, i32> {
+        let spec = *self.spec(spec_id, RUST_FILE_SPEC_FSCANF)?;
+        let fmt = self.primary_string(&spec)?;
+        let target_end = spec.target_start.checked_add(spec.target_count).ok_or(-2350)?;
+        if target_end > self.target_ids.len() || target_end > self.target_integers.len() {
+            return Err(-2351);
+        }
+        let Some(handle) = self.handle_mut(fd) else {
+            return Ok(0.0);
+        };
+        let mut line = String::new();
+        let bytes = handle.read_line(&mut line).map_err(|_| -2352)?;
+        if bytes == 0 {
+            return Ok(0.0);
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut input_pos = 0_usize;
+        let mut assigned = 0_usize;
+        let mut fmt_iter = fmt.chars().peekable();
+        while let Some(ch) = fmt_iter.next() {
+            if ch.is_whitespace() {
+                while input_pos < chars.len() && chars[input_pos].is_whitespace() {
+                    input_pos += 1;
+                }
+                continue;
+            }
+            if ch != '%' {
+                if input_pos < chars.len() && chars[input_pos] == ch {
+                    input_pos += 1;
+                    continue;
+                }
+                break;
+            }
+            let mut suppress = false;
+            if matches!(fmt_iter.peek(), Some('*')) {
+                suppress = true;
+                fmt_iter.next();
+            }
+            while matches!(fmt_iter.peek(), Some(c) if c.is_ascii_digit() || *c == '.') {
+                fmt_iter.next();
+            }
+            while matches!(fmt_iter.peek(), Some('l' | 'L' | 'h' | 'H')) {
+                fmt_iter.next();
+            }
+            let Some(spec_ch) = fmt_iter.next() else {
+                break;
+            };
+            if spec_ch == '%' {
+                if input_pos < chars.len() && chars[input_pos] == '%' {
+                    input_pos += 1;
+                    continue;
+                }
+                break;
+            }
+            let (next_pos, token) = Self::next_scan_value(&chars, input_pos);
+            let Some(token) = token else {
+                break;
+            };
+            input_pos = next_pos;
+            if suppress {
+                continue;
+            }
+            if assigned >= spec.target_count {
+                break;
+            }
+            let value = match spec_ch.to_ascii_lowercase() {
+                'd' => token.parse::<f64>().map(to_veriloga_integer).map(|v| v as f64),
+                'e' | 'f' | 'g' => token.parse::<f64>(),
+                _ => break,
+            };
+            let Ok(mut value) = value else {
+                break;
+            };
+            let target_idx = spec.target_start + assigned;
+            let state_id = self.target_ids[target_idx];
+            if state_id >= state_values.len() {
+                return Err(-2353);
+            }
+            if self.target_integers[target_idx] != 0 {
+                value = to_veriloga_integer(value) as f64;
+            }
+            state_values[state_id] = value;
+            assigned += 1;
+        }
+        Ok(assigned as f64)
+    }
+}
+
 pub(crate) fn evaluate_body_ir_ops_at_time_impl(
     stmt_ops: &[EvasRustBodyStmtOp],
     expr_ops: &[EvasRustBodyExprOp],
@@ -173,6 +432,7 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
     time: f64,
     bound_step_limit: &mut f64,
     capture_bound_step: bool,
+    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
     mut side_effect_log: Option<&mut RustSideEffectLog<'_>>,
 ) -> Result<(), i32> {
     let mut stack: Vec<f64> = Vec::with_capacity(32);
@@ -481,13 +741,197 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                 if stmt.target_id >= state_values.len() {
                     return Err(-2211);
                 }
+                if let Some(runtime) = file_io.as_deref_mut() {
+                    if let Some(handle_id) = runtime.fopen(stmt.expr_start)? {
+                        state_values[stmt.target_id] = handle_id;
+                        pc += 1;
+                        continue;
+                    }
+                }
                 let handle_id = stmt.expr_start.checked_add(1).ok_or(-2223)?;
                 state_values[stmt.target_id] = handle_id as f64;
                 if let Some(log) = side_effect_log.as_deref_mut() {
                     log.push(BODY_STMT_FILE_OPEN, stmt.expr_start, time, &[])?;
                 }
             }
-            BODY_STMT_FILE_WRITE | BODY_STMT_FILE_CLOSE | BODY_STMT_STROBE => {
+            BODY_STMT_FILE_SCANF => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let spec_id = pop1(&mut stack)?;
+                let fd = pop1(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2209);
+                }
+                let Some(runtime) = file_io.as_deref_mut() else {
+                    return Err(-2360);
+                };
+                let count =
+                    runtime.fscanf(to_veriloga_integer_trunc(spec_id) as usize, fd, state_values)?;
+                if stmt.target_id < state_values.len() {
+                    state_values[stmt.target_id] = if stmt.target_integer != 0 {
+                        to_veriloga_integer(count) as f64
+                    } else {
+                        count
+                    };
+                }
+            }
+            BODY_STMT_FILE_GETS => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let _spec_id = pop1(&mut stack)?;
+                let fd = pop1(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2209);
+                }
+                let Some(runtime) = file_io.as_deref_mut() else {
+                    return Err(-2361);
+                };
+                let status = runtime.fgets_discard(fd);
+                if stmt.target_id < state_values.len() {
+                    state_values[stmt.target_id] = status;
+                }
+            }
+            BODY_STMT_FILE_TELL => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let op_code = pop1(&mut stack)?;
+                let fd = pop1(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2209);
+                }
+                let Some(runtime) = file_io.as_deref_mut() else {
+                    return Err(-2362);
+                };
+                let mut value = if to_veriloga_integer_trunc(op_code) == 1 {
+                    runtime.feof(fd)
+                } else {
+                    runtime.ftell(fd)
+                };
+                if stmt.target_integer != 0 {
+                    value = to_veriloga_integer(value) as f64;
+                }
+                if stmt.target_id < state_values.len() {
+                    state_values[stmt.target_id] = value;
+                }
+            }
+            BODY_STMT_FILE_SEEK => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let op_code = pop1(&mut stack)?;
+                let Some(runtime) = file_io.as_deref_mut() else {
+                    return Err(-2363);
+                };
+                let status = if to_veriloga_integer_trunc(op_code) == 2 {
+                    let fd = pop1(&mut stack)?;
+                    runtime.fseek(fd, 0.0, 0.0)
+                } else {
+                    let whence = pop1(&mut stack)?;
+                    let offset = pop1(&mut stack)?;
+                    let fd = pop1(&mut stack)?;
+                    runtime.fseek(fd, offset, whence)
+                };
+                if !stack.is_empty() {
+                    return Err(-2209);
+                }
+                if stmt.target_id < state_values.len() {
+                    let mut value = status;
+                    if stmt.target_integer != 0 {
+                        value = to_veriloga_integer(value) as f64;
+                    }
+                    state_values[stmt.target_id] = value;
+                }
+            }
+            BODY_STMT_FILE_CLOSE => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let fd = *stack.first().unwrap_or(&0.0);
+                let closed_runtime_handle = file_io
+                    .as_deref_mut()
+                    .map(|runtime| runtime.fclose(fd))
+                    .unwrap_or(false);
+                if !closed_runtime_handle {
+                    if let Some(log) = side_effect_log.as_deref_mut() {
+                        log.push(stmt.target_kind, stmt.target_id, time, &stack)?;
+                    }
+                }
+                stack.clear();
+            }
+            BODY_STMT_FILE_WRITE | BODY_STMT_STROBE => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;
                     continue;
