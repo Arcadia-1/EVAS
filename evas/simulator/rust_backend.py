@@ -16,6 +16,9 @@ class RustBackendError(RuntimeError):
     """Raised when an opt-in Rust backend call fails."""
 
 
+EXPECTED_RUST_CORE_ABI_VERSION = 20260706
+
+
 def _usize_max() -> int:
     return ctypes.c_size_t(-1).value
 
@@ -1328,6 +1331,24 @@ class RustBackend:
     def __init__(self, library_path: Path):
         self.library_path = Path(library_path)
         self._lib = ctypes.CDLL(str(self.library_path))
+        try:
+            abi_version_fn = self._lib.evas_rust_core_abi_version
+        except AttributeError as exc:
+            raise RustBackendError(
+                "Rust backend library does not export evas_rust_core_abi_version; "
+                "rebuild evas/rust_core with `cargo build --release`."
+            ) from exc
+        abi_version_fn.argtypes = []
+        abi_version_fn.restype = ctypes.c_uint32
+        abi_version = int(abi_version_fn())
+        if abi_version != EXPECTED_RUST_CORE_ABI_VERSION:
+            raise RustBackendError(
+                "Rust backend ABI mismatch: "
+                f"python expects {EXPECTED_RUST_CORE_ABI_VERSION}, "
+                f"library reports {abi_version}. "
+                "Rebuild evas/rust_core with `cargo build --release`."
+            )
+        self.abi_version = abi_version
         fn = self._lib.evas_rust_evaluate_static_affine
         fn.argtypes = [
             ctypes.POINTER(RustStaticAffineOp),
