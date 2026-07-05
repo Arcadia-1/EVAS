@@ -8,10 +8,17 @@ of silently falling back when strict EVAS2 is requested.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
+from evas.compiler.ast_nodes import (
+    ArrayAccess as AstArrayAccess,
+)
+from evas.compiler.ast_nodes import (
+    Assignment as AstAssignment,
+)
 from evas.compiler.ast_nodes import (
     BinaryExpr as AstBinaryExpr,
 )
@@ -22,7 +29,25 @@ from evas.compiler.ast_nodes import (
     BranchAccess as AstBranchAccess,
 )
 from evas.compiler.ast_nodes import (
+    CaseItem as AstCaseItem,
+)
+from evas.compiler.ast_nodes import (
+    CaseStatement as AstCaseStatement,
+)
+from evas.compiler.ast_nodes import (
+    CombinedEvent as AstCombinedEvent,
+)
+from evas.compiler.ast_nodes import (
     Contribution as AstContribution,
+)
+from evas.compiler.ast_nodes import (
+    EventExpr as AstEventExpr,
+)
+from evas.compiler.ast_nodes import (
+    EventStatement as AstEventStatement,
+)
+from evas.compiler.ast_nodes import (
+    ForStatement as AstForStatement,
 )
 from evas.compiler.ast_nodes import (
     FunctionCall as AstFunctionCall,
@@ -31,11 +56,29 @@ from evas.compiler.ast_nodes import (
     Identifier as AstIdentifier,
 )
 from evas.compiler.ast_nodes import (
+    IfStatement as AstIfStatement,
+)
+from evas.compiler.ast_nodes import (
+    MethodCall as AstMethodCall,
+)
+from evas.compiler.ast_nodes import (
     NumberLiteral as AstNumberLiteral,
 )
 from evas.compiler.ast_nodes import ParamType
 from evas.compiler.ast_nodes import (
+    SystemTask as AstSystemTask,
+)
+from evas.compiler.ast_nodes import (
+    TaskCall as AstTaskCall,
+)
+from evas.compiler.ast_nodes import (
+    TernaryExpr as AstTernaryExpr,
+)
+from evas.compiler.ast_nodes import (
     UnaryExpr as AstUnaryExpr,
+)
+from evas.compiler.ast_nodes import (
+    WhileStatement as AstWhileStatement,
 )
 from evas.simulator.evaluate_ir import (
     SOURCE_NODE,
@@ -631,6 +674,127 @@ def _extend_bindings_from_static_array_accesses(
     return BindingTableIR(tuple(rewritten))
 
 
+def _iter_repeat_hidden_names_from_expr(expr_ir: ExprIR) -> Iterable[str]:
+    if isinstance(expr_ir, IdentifierIR):
+        name = str(expr_ir.name)
+        if name.startswith("__evas_repeat_"):
+            yield name
+        return
+    if isinstance(expr_ir, ArrayAccessIR):
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.index)
+        return
+    if isinstance(expr_ir, BinaryExprIR):
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.left)
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.right)
+        return
+    if isinstance(expr_ir, UnaryExprIR):
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.operand)
+        return
+    if isinstance(expr_ir, TernaryExprIR):
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.cond)
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.true_expr)
+        yield from _iter_repeat_hidden_names_from_expr(expr_ir.false_expr)
+        return
+    if isinstance(expr_ir, FunctionCallIR):
+        for arg in expr_ir.args:
+            yield from _iter_repeat_hidden_names_from_expr(arg)
+        return
+    if isinstance(expr_ir, BranchAccessIR):
+        for child in (
+            expr_ir.node1_index,
+            expr_ir.node2_index,
+            expr_ir.node1_index2,
+            expr_ir.node2_index2,
+        ):
+            if child is not None:
+                yield from _iter_repeat_hidden_names_from_expr(child)
+
+
+def _iter_repeat_hidden_names_from_stmt(stmt_ir: object) -> Iterable[str]:
+    if isinstance(stmt_ir, AssignmentIR):
+        if isinstance(stmt_ir.target, IdentifierIR):
+            name = str(stmt_ir.target.name)
+            if name.startswith("__evas_repeat_"):
+                yield name
+        elif isinstance(stmt_ir.target, ArrayAccessIR):
+            yield from _iter_repeat_hidden_names_from_expr(stmt_ir.target.index)
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.value)
+        return
+    if isinstance(stmt_ir, ContributionIR):
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.branch)
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.expr)
+        return
+    if isinstance(stmt_ir, EventStatementIR):
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.body)
+        return
+    if isinstance(stmt_ir, BlockIR):
+        for child in stmt_ir.statements:
+            yield from _iter_repeat_hidden_names_from_stmt(child)
+        return
+    if isinstance(stmt_ir, IfStatementIR):
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.cond)
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.then_body)
+        if stmt_ir.else_body is not None:
+            yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.else_body)
+        return
+    if isinstance(stmt_ir, ForStatementIR):
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.init)
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.cond)
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.update)
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.body)
+        return
+    if isinstance(stmt_ir, WhileStatementIR):
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.cond)
+        yield from _iter_repeat_hidden_names_from_stmt(stmt_ir.body)
+        return
+    if isinstance(stmt_ir, CaseStatementIR):
+        yield from _iter_repeat_hidden_names_from_expr(stmt_ir.expr)
+        for item in stmt_ir.items:
+            for value in item.values:
+                yield from _iter_repeat_hidden_names_from_expr(value)
+            yield from _iter_repeat_hidden_names_from_stmt(item.body)
+        return
+    if isinstance(stmt_ir, SystemTaskIR):
+        for arg in stmt_ir.args:
+            yield from _iter_repeat_hidden_names_from_expr(arg)
+
+
+def _extend_bindings_with_repeat_loop_slots(
+    bindings: BindingTableIR,
+    stmt_ir: object,
+) -> BindingTableIR:
+    names = sorted(set(_iter_repeat_hidden_names_from_stmt(stmt_ir)))
+    if not names:
+        return bindings
+    present = {binding.name for binding in bindings.bindings}
+    missing = [name for name in names if name not in present]
+    if not missing:
+        return bindings
+    next_scalar_slot = (
+        max(
+            (
+                int(binding.slot)
+                for binding in bindings.bindings
+                if binding.kind == SYMBOL_STATE_SCALAR
+            ),
+            default=-1,
+        )
+        + 1
+    )
+    rewritten = list(bindings.bindings)
+    for name in missing:
+        rewritten.append(
+            StateBindingIR(
+                name=name,
+                kind=SYMBOL_STATE_SCALAR,
+                slot=next_scalar_slot,
+                integer=True,
+            )
+        )
+        next_scalar_slot += 1
+    return BindingTableIR(tuple(rewritten))
+
+
 def _extend_bindings_with_stateful_function_slots(
     bindings: BindingTableIR,
     stmt_ir: object,
@@ -851,11 +1015,21 @@ class _RustSimSideEffectBuilder:
 def _external_node(model: Any, local_name: str) -> str:
     node_map = getattr(model, "node_map", {}) or {}
     if local_name in node_map:
-        return str(node_map[local_name])
+        ext = str(node_map[local_name])
+        if ext.startswith("@parent:"):
+            parent = getattr(model, "_parent_model", None)
+            if parent is not None:
+                return _external_node(parent, ext[len("@parent:") :])
+        return ext
     local_folded = str(local_name).casefold()
     for key, value in node_map.items():
         if str(key).casefold() == local_folded:
-            return str(value)
+            ext = str(value)
+            if ext.startswith("@parent:"):
+                parent = getattr(model, "_parent_model", None)
+                if parent is not None:
+                    return _external_node(parent, ext[len("@parent:") :])
+            return ext
     return str(local_name)
 
 
@@ -880,8 +1054,6 @@ def _reject_model_dynamic_semantics(model: Any, model_index: int) -> Tuple[str, 
     model_cls = getattr(model, "__class__", type(model))
     prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
     reasons: list[str] = []
-    if getattr(model, "_child_models", None):
-        reasons.append(f"{prefix}:child_models_not_lowered")
     has_dynamic = getattr(model, "_has_dynamic_breakpoints_tree", None)
     if has_dynamic is not None and bool(has_dynamic()):
         reasons.append(f"{prefix}:event_breakpoints_not_lowered")
@@ -1301,12 +1473,39 @@ def _collect_global_contributed_nodes(models: Iterable[Any]) -> frozenset[str]:
         if body_ast is None:
             continue
         try:
-            body_ir = lower_stmt(body_ast)
+            body_ir = _lower_module_body_with_user_function_inlining(module)
         except Exception:
+            continue
+        if body_ir is None:
             continue
         for local_name in _collect_contributed_nodes(body_ir):
             nodes.add(_external_node(model, local_name))
     return frozenset(nodes)
+
+
+def _flatten_models_child_first(models: Iterable[Any]) -> Tuple[Any, ...]:
+    """Return a deterministic child-before-parent lowering order.
+
+    The Python backend evaluates hierarchical instances before the parent body
+    observes their internal nets.  Rust full-model lowering uses the same
+    ordering so simple hierarchy can be represented as one flat opcode program.
+    """
+
+    flattened: list[Any] = []
+    visiting: set[int] = set()
+
+    def visit(model: Any) -> None:
+        ident = id(model)
+        if ident in visiting:
+            return
+        visiting.add(ident)
+        for child in tuple(getattr(model, "_child_models", ()) or ()):
+            visit(child)
+        flattened.append(model)
+
+    for top in models:
+        visit(top)
+    return tuple(flattened)
 
 
 def _expr_references_nodes(expr_ir: ExprIR, nodes: frozenset[str]) -> bool:
@@ -1515,9 +1714,7 @@ def _expr_contains_transition_or_slew_call(expr_ir: ExprIR) -> bool:
 
 def _model_has_rustsim_event_transition_candidate(model_cls: Any) -> bool:
     module = getattr(model_cls, "_module_ast", None)
-    analog_block = getattr(module, "analog_block", None)
-    body_ast = getattr(analog_block, "body", None)
-    body_ir = lower_stmt(body_ast)
+    body_ir = _lower_module_body_with_user_function_inlining(module)
     if body_ir is None:
         return False
     return _stmt_has_rustsim_event_transition_candidate(body_ir)
@@ -1525,10 +1722,8 @@ def _model_has_rustsim_event_transition_candidate(model_cls: Any) -> bool:
 
 def _model_has_rustsim_continuous_body_candidate(model_cls: Any) -> bool:
     module = getattr(model_cls, "_module_ast", None)
-    analog_block = getattr(module, "analog_block", None)
-    body_ast = getattr(analog_block, "body", None)
-    body_ir = lower_stmt(body_ast)
-    if not isinstance(body_ir, BlockIR):
+    body_ir = _lower_module_body_with_user_function_inlining(module)
+    if body_ir is None:
         return False
     return any(_is_continuous_body_stmt(stmt) for stmt in body_ir.statements)
 
@@ -1873,6 +2068,227 @@ def _match_scaled_idt_call(expr: Any) -> Optional[tuple[Any, AstFunctionCall]]:
     return None
 
 
+def _flatten_ast_block_statements(stmt: Any) -> tuple[Any, ...]:
+    if isinstance(stmt, AstBlock):
+        flattened: list[Any] = []
+        for child in stmt.statements:
+            flattened.extend(_flatten_ast_block_statements(child))
+        return tuple(flattened)
+    return (stmt,)
+
+
+def _simple_user_function_return_expr(decl: Any) -> Optional[Any]:
+    statements = _flatten_ast_block_statements(getattr(decl, "body", None))
+    if len(statements) != 1:
+        return None
+    stmt = statements[0]
+    if not isinstance(stmt, AstAssignment):
+        return None
+    target = stmt.target
+    if not isinstance(target, AstIdentifier) or str(target.name) != str(decl.name):
+        return None
+    return stmt.value
+
+
+def _simple_user_function_map(module: Any) -> dict[str, Any]:
+    return {
+        str(getattr(decl, "name", "")): decl
+        for decl in tuple(getattr(module, "functions", ()) or ())
+        if _simple_user_function_return_expr(decl) is not None
+    }
+
+
+def _inline_user_function_expr(
+    expr: Any,
+    functions: Mapping[str, Any],
+    env: Optional[Mapping[str, Any]] = None,
+    *,
+    depth: int = 0,
+) -> Any:
+    if depth > 32:
+        return copy.deepcopy(expr)
+    env = env or {}
+    if isinstance(expr, AstIdentifier):
+        if expr.name in env:
+            return copy.deepcopy(env[expr.name])
+        return copy.deepcopy(expr)
+    if isinstance(expr, AstNumberLiteral):
+        return copy.deepcopy(expr)
+    if isinstance(expr, AstArrayAccess):
+        return AstArrayAccess(
+            expr.name,
+            _inline_user_function_expr(expr.index, functions, env, depth=depth),
+            (
+                _inline_user_function_expr(expr.index2, functions, env, depth=depth)
+                if expr.index2 is not None
+                else None
+            ),
+        )
+    if isinstance(expr, AstBranchAccess):
+        cloned = copy.deepcopy(expr)
+        for attr in ("node1_index", "node2_index", "node1_index2", "node2_index2"):
+            child = getattr(expr, attr, None)
+            if child is not None:
+                setattr(
+                    cloned,
+                    attr,
+                    _inline_user_function_expr(child, functions, env, depth=depth),
+                )
+        return cloned
+    if isinstance(expr, AstUnaryExpr):
+        return AstUnaryExpr(
+            expr.op,
+            _inline_user_function_expr(expr.operand, functions, env, depth=depth),
+        )
+    if isinstance(expr, AstBinaryExpr):
+        return AstBinaryExpr(
+            expr.op,
+            _inline_user_function_expr(expr.left, functions, env, depth=depth),
+            _inline_user_function_expr(expr.right, functions, env, depth=depth),
+        )
+    if isinstance(expr, AstTernaryExpr):
+        return AstTernaryExpr(
+            _inline_user_function_expr(expr.cond, functions, env, depth=depth),
+            _inline_user_function_expr(expr.true_expr, functions, env, depth=depth),
+            _inline_user_function_expr(expr.false_expr, functions, env, depth=depth),
+        )
+    if isinstance(expr, AstFunctionCall):
+        inlined_args = [
+            _inline_user_function_expr(arg, functions, env, depth=depth)
+            for arg in expr.args
+        ]
+        decl = functions.get(str(expr.name))
+        if decl is None:
+            return AstFunctionCall(expr.name, inlined_args)
+        return_expr = _simple_user_function_return_expr(decl)
+        args = tuple(getattr(decl, "args", ()) or ())
+        if return_expr is None or len(args) != len(inlined_args):
+            return AstFunctionCall(expr.name, inlined_args)
+        local_env = dict(env)
+        for arg_decl, arg_expr in zip(args, inlined_args):
+            local_env[str(arg_decl.name)] = arg_expr
+        return _inline_user_function_expr(
+            return_expr,
+            functions,
+            local_env,
+            depth=depth + 1,
+        )
+    if isinstance(expr, AstMethodCall):
+        return AstMethodCall(
+            expr.obj,
+            expr.method,
+            [
+                _inline_user_function_expr(arg, functions, env, depth=depth)
+                for arg in expr.args
+            ],
+        )
+    return copy.deepcopy(expr)
+
+
+def _inline_user_function_event(event: Any, functions: Mapping[str, Any]) -> Any:
+    if isinstance(event, AstEventExpr):
+        cloned = copy.deepcopy(event)
+        cloned.args = [
+            _inline_user_function_expr(arg, functions) for arg in event.args
+        ]
+        if cloned.time_tol_expr is not None:
+            cloned.time_tol_expr = _inline_user_function_expr(
+                cloned.time_tol_expr, functions
+            )
+        if cloned.expr_tol_expr is not None:
+            cloned.expr_tol_expr = _inline_user_function_expr(
+                cloned.expr_tol_expr, functions
+            )
+        return cloned
+    if isinstance(event, AstCombinedEvent):
+        return AstCombinedEvent(
+            [_inline_user_function_event(child, functions) for child in event.events]
+        )
+    return copy.deepcopy(event)
+
+
+def _inline_user_function_stmt(stmt: Any, functions: Mapping[str, Any]) -> Any:
+    if not functions:
+        return stmt
+    if isinstance(stmt, AstBlock):
+        return AstBlock([
+            _inline_user_function_stmt(child, functions) for child in stmt.statements
+        ])
+    if isinstance(stmt, AstAssignment):
+        return AstAssignment(
+            copy.deepcopy(stmt.target),
+            _inline_user_function_expr(stmt.value, functions),
+        )
+    if isinstance(stmt, AstContribution):
+        return AstContribution(
+            copy.deepcopy(stmt.branch),
+            _inline_user_function_expr(stmt.expr, functions),
+        )
+    if isinstance(stmt, AstEventStatement):
+        return AstEventStatement(
+            _inline_user_function_event(stmt.event, functions),
+            _inline_user_function_stmt(stmt.body, functions),
+        )
+    if isinstance(stmt, AstIfStatement):
+        return AstIfStatement(
+            _inline_user_function_expr(stmt.cond, functions),
+            _inline_user_function_stmt(stmt.then_body, functions),
+            (
+                _inline_user_function_stmt(stmt.else_body, functions)
+                if stmt.else_body is not None
+                else None
+            ),
+        )
+    if isinstance(stmt, AstForStatement):
+        return AstForStatement(
+            _inline_user_function_stmt(stmt.init, functions),
+            _inline_user_function_expr(stmt.cond, functions),
+            _inline_user_function_stmt(stmt.update, functions),
+            _inline_user_function_stmt(stmt.body, functions),
+        )
+    if isinstance(stmt, AstWhileStatement):
+        return AstWhileStatement(
+            _inline_user_function_expr(stmt.cond, functions),
+            _inline_user_function_stmt(stmt.body, functions),
+        )
+    if isinstance(stmt, AstCaseStatement):
+        return AstCaseStatement(
+            _inline_user_function_expr(stmt.expr, functions),
+            [
+                AstCaseItem(
+                    [
+                        _inline_user_function_expr(value, functions)
+                        for value in item.values
+                    ],
+                    _inline_user_function_stmt(item.body, functions),
+                )
+                for item in stmt.items
+            ],
+        )
+    if isinstance(stmt, AstSystemTask):
+        return AstSystemTask(
+            stmt.name,
+            [_inline_user_function_expr(arg, functions) for arg in stmt.args],
+        )
+    if isinstance(stmt, AstTaskCall):
+        return AstTaskCall(
+            stmt.name,
+            [_inline_user_function_expr(arg, functions) for arg in stmt.args],
+        )
+    return copy.deepcopy(stmt)
+
+
+def _lower_module_body_with_user_function_inlining(module: Any) -> Optional[BlockIR]:
+    analog_block = getattr(module, "analog_block", None)
+    body_ast = getattr(analog_block, "body", None)
+    if body_ast is None:
+        return None
+    body_ir = lower_stmt(
+        _inline_user_function_stmt(body_ast, _simple_user_function_map(module))
+    )
+    return body_ir if isinstance(body_ir, BlockIR) else None
+
+
 def _iter_ast_block_contributions(stmt: Any):
     if isinstance(stmt, AstBlock):
         for child in stmt.statements:
@@ -2012,21 +2428,18 @@ def _convert_event_transition_ops(
     module = getattr(model_cls, "_module_ast", None)
     if module is None:
         return (f"{prefix}:module_ast_unavailable",)
-    analog_block = getattr(module, "analog_block", None)
-    body_ast = getattr(analog_block, "body", None)
-    body_ir = lower_stmt(body_ast)
+    body_ir = _lower_module_body_with_user_function_inlining(module)
     if not isinstance(body_ir, BlockIR):
         return (f"{prefix}:stmt_lower_failed",)
     if _prefer_existing_timer_static_linear_path(
         model_cls
     ) and not _stmt_has_display_strobe(body_ir):
         return (f"{prefix}:timer_static_linear_specialized_path_preferred",)
-    if getattr(model, "_child_models", None):
-        return (f"{prefix}:child_models_not_lowered",)
     bindings = _extend_bindings_from_static_array_accesses(
         build_state_binding_ir(module),
         body_ir,
     )
+    bindings = _extend_bindings_with_repeat_loop_slots(bindings, body_ir)
     bindings = _extend_bindings_with_stateful_function_slots(bindings, body_ir)
     local_node_slots, node_slot_to_global = _node_slot_maps(
         model=model,
@@ -2516,7 +2929,7 @@ def build_source_record_rust_program(
     source_list = tuple(sources)
     current_source_list = tuple(current_sources)
     record_names = tuple(str(name) for name in recorded_signals)
-    model_list = tuple(models)
+    model_list = _flatten_models_child_first(models)
     global_contributed_nodes = _collect_global_contributed_nodes(model_list)
     reasons: list[str] = []
     if not record_names:
@@ -2679,6 +3092,15 @@ def build_source_record_rust_program(
         if has_rustsim_program_ir and all(
             str(reason).endswith(":no_continuous_linear_ir")
             for reason in model_reasons
+        ):
+            model_reasons = ()
+        if (
+            not has_rustsim_program_ir
+            and getattr(model, "_child_models", None)
+            and all(
+                str(reason).endswith(":no_continuous_linear_ir")
+                for reason in model_reasons
+            )
         ):
             model_reasons = ()
         if model_reasons:

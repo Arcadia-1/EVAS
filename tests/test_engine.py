@@ -8368,6 +8368,54 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(14.0, abs=1e-12)
 
+    def test_rust_full_model_repeat_event_body_uses_hidden_loop_slots(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_repeat_probe(clk, out, metric);
+    input voltage clk;
+    output voltage out;
+    output voltage metric;
+    integer count_q;
+    integer acc_q;
+    analog begin
+        @(initial_step) count_q = 0;
+        @(cross(V(clk) - 0.5, +1)) begin
+            acc_q = 0;
+            repeat (4) begin
+                acc_q = acc_q + count_q + 1;
+            end
+            count_q = count_q + 1;
+        end
+        V(out) <+ acc_q > 4 ? 0.9 : 0.0;
+        V(metric) <+ acc_q;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("out")
+        sim.record("metric")
+        result = sim.run(
+            tstop=55e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert result.signals["out"][-1] == pytest.approx(0.9)
+        assert result.signals["metric"][-1] == pytest.approx(12.0)
+
 
 class TestDynamicTransferOperators:
 
@@ -8396,6 +8444,97 @@ endmodule
         nv1 = {"vin": 2.0}
         model.evaluate(nv1, 2.0)
         assert nv1["out"] == pytest.approx(9.0)
+
+    def test_rust_full_model_event_body_limexp_matches_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_limexp_probe(vin, clk, out);
+    input voltage vin;
+    input voltage clk;
+    output voltage out;
+    real out_v;
+    analog begin
+        @(initial_step) out_v = 0.0;
+        @(cross(V(clk) - 0.5, +1))
+            out_v = limexp(V(vin));
+        V(out) <+ transition(out_v, 0.0, 100p, 100p);
+    end
+endmodule
+"""
+        results = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("vin", dc(0.25))
+            sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                         rise=0.1e-9, fall=0.1e-9, duty=0.5))
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=35e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            results.append(result.signals["out"][-1])
+
+        assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
+        assert results[1] == pytest.approx(math.exp(0.25), rel=1e-4)
+
+    def test_rust_full_model_inlines_nested_pure_user_functions(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_nested_function_pipeline(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog function real f2;
+        input x;
+        real x;
+        begin f2 = x * x; end
+    endfunction
+    analog function real f1;
+        input x;
+        real x;
+        begin f1 = f2(x) + 1.0; end
+    endfunction
+    analog begin
+        V(out) <+ f1(V(vin));
+    end
+endmodule
+"""
+        results = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("vin", dc(0.75))
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=5e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            results.append(result.signals["out"][-1])
+
+        assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
+        assert results[1] == pytest.approx(1.5625)
 
     def test_laplace_nd_first_order_lowpass_advances_state(self):
         src = """\
@@ -10045,6 +10184,53 @@ endmodule
         assert top._child_models[1].params["gain"] == pytest.approx(3.0)
         assert nv["mid"] == pytest.approx(1.0)
         assert nv["OUT"] == pytest.approx(3.0)
+
+    def test_rust_full_model_flattens_child_gain_chain(self):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        child_mod = parse(self.VA_GAIN_CHILD)
+        top_mod = parse(self.VA_GAIN_TOP)
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_gain": (ChildCls, child_mod),
+            "gain_chain": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        def run_model(use_rust: bool):
+            top = TopCls()
+            top.node_map = {"inp": "INP", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("INP", dc(0.5))
+            sim.add_model(top)
+            sim.record("mid")
+            sim.record("OUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["mid"].tolist() == pytest.approx(
+            default_result.signals["mid"].tolist()
+        )
+        assert rust_result.signals["OUT"].tolist() == pytest.approx(
+            default_result.signals["OUT"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 2
 
     def test_ordered_port_instance_with_parameter_override(self):
         from evas.compiler.parser import parse
