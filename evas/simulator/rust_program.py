@@ -157,6 +157,7 @@ from evas.simulator.stmt_ir import (
     idtmod_hidden_state_names,
     last_crossing_hidden_state_names,
     lower_stmt,
+    transfer_hidden_state_names,
     unroll_static_for_statement,
 )
 from evas.simulator.transition_runtime import encode_transition_contribution_program
@@ -173,6 +174,18 @@ _INITIAL_FILE_READ_FUNCTIONS = frozenset(
     {"$feof", "$fgets", "$fscanf", "$fseek", "$ftell", "$rewind"}
 )
 _INITIAL_FILE_READ_TASKS = frozenset({"$fgets", "$fscanf", "$fseek", "$rewind"})
+_TRANSFER_ASSIGNMENT_FUNCTIONS = frozenset(
+    {
+        "laplace_nd",
+        "laplace_np",
+        "laplace_zd",
+        "laplace_zp",
+        "zi_nd",
+        "zi_np",
+        "zi_zd",
+        "zi_zp",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -853,6 +866,11 @@ def _extend_bindings_with_stateful_function_slots(
 ) -> BindingTableIR:
     ddt_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "ddt"))
     idt_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "idt"))
+    transfer_targets: set[str] = set()
+    for function_name in _TRANSFER_ASSIGNMENT_FUNCTIONS:
+        transfer_targets.update(
+            _iter_stateful_assignment_target_names(stmt_ir, bindings, function_name)
+        )
     idtmod_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "idtmod"))
     last_crossing_targets = set(
         _iter_stateful_assignment_target_names(stmt_ir, bindings, "last_crossing")
@@ -860,6 +878,7 @@ def _extend_bindings_with_stateful_function_slots(
     if (
         not ddt_targets
         and not idt_targets
+        and not transfer_targets
         and not idtmod_targets
         and not last_crossing_targets
     ):
@@ -888,6 +907,8 @@ def _extend_bindings_with_stateful_function_slots(
             hidden_names.extend(ddt_hidden_state_names(binding.name))
         if binding.name in idt_targets:
             hidden_names.extend(idt_hidden_state_names(binding.name))
+        if binding.name in transfer_targets:
+            hidden_names.extend(transfer_hidden_state_names(binding.name))
         if binding.name in idtmod_targets:
             hidden_names.extend(idtmod_hidden_state_names(binding.name))
         if binding.name in last_crossing_targets:
@@ -911,10 +932,7 @@ def _iter_stateful_assignment_target_names(
     function_name: str,
 ) -> Iterable[str]:
     if isinstance(stmt_ir, AssignmentIR):
-        if (
-            isinstance(stmt_ir.value, FunctionCallIR)
-            and str(stmt_ir.value.name) == function_name
-        ):
+        if _assignment_value_calls_stateful_function(stmt_ir.value, function_name):
             target_name = _assignment_target_name_for_bindings(stmt_ir.target, bindings)
             if target_name is not None:
                 yield target_name
@@ -939,6 +957,23 @@ def _iter_stateful_assignment_target_names(
     if isinstance(stmt_ir, CaseStatementIR):
         for item in stmt_ir.items:
             yield from _iter_stateful_assignment_target_names(item.body, bindings, function_name)
+
+
+def _assignment_value_calls_stateful_function(
+    expr_ir: ExprIR,
+    function_name: str,
+) -> bool:
+    if isinstance(expr_ir, FunctionCallIR):
+        return str(expr_ir.name) == function_name
+    if isinstance(expr_ir, BinaryExprIR) and expr_ir.op == "*":
+        return (
+            isinstance(expr_ir.left, FunctionCallIR)
+            and str(expr_ir.left.name) == function_name
+        ) or (
+            isinstance(expr_ir.right, FunctionCallIR)
+            and str(expr_ir.right.name) == function_name
+        )
+    return False
 
 
 def _assignment_target_name_for_bindings(

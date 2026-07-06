@@ -24,6 +24,7 @@ from evas.compiler.ast_nodes import (
     BranchAccess,
     CaseStatement,
     CombinedEvent,
+    ConcatExpr,
     Contribution,
     EventExpr,
     EventStatement,
@@ -121,9 +122,17 @@ STATEFUL_ANALOG_FUNCTIONS = frozenset(
         "ddt",
         "idt",
         "idtmod",
+        "laplace_nd",
+        "laplace_np",
+        "laplace_zd",
+        "laplace_zp",
         "last_crossing",
         "slew",
         "transition",
+        "zi_nd",
+        "zi_np",
+        "zi_zd",
+        "zi_zp",
     }
 )
 
@@ -335,6 +344,11 @@ class FunctionCallIR:
 
 
 @dataclass(frozen=True)
+class VectorLiteralIR:
+    items: Tuple["ExprIR", ...]
+
+
+@dataclass(frozen=True)
 class BranchAccessIR:
     access_type: str
     node1: str
@@ -385,6 +399,7 @@ ExprIR = Union[
     UnaryExprIR,
     TernaryExprIR,
     FunctionCallIR,
+    VectorLiteralIR,
     BranchAccessIR,
     MethodCallIR,
 ]
@@ -438,6 +453,12 @@ def lower_expr(
         if cond is None or true_expr is None or false_expr is None:
             return None
         return TernaryExprIR(cond, true_expr, false_expr)
+
+    if isinstance(ast_expr, ConcatExpr):
+        items = _lower_expr_tuple(ast_expr.parts, ctx)
+        if items is None:
+            return None
+        return VectorLiteralIR(items)
 
     if isinstance(ast_expr, FunctionCall):
         source_name = str(ast_expr.name)
@@ -801,6 +822,9 @@ def emit_python(expr_ir: ExprIR) -> str:
 
     if isinstance(expr_ir, FunctionCallIR):
         return _emit_function_call(expr_ir)
+
+    if isinstance(expr_ir, VectorLiteralIR):
+        return "[" + ", ".join(emit_python(item) for item in expr_ir.items) + "]"
 
     if isinstance(expr_ir, BranchAccessIR):
         return _emit_branch_access(expr_ir)
