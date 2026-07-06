@@ -651,6 +651,104 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                 state_values[prev_t_id] = time;
                 state_values[prev_x_id] = value;
             }
+            BODY_STMT_DDT => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let init_id = stmt.target_id.checked_add(1).ok_or(-2260)?;
+                let last_t_id = stmt.target_id.checked_add(2).ok_or(-2261)?;
+                let last_x_id = stmt.target_id.checked_add(3).ok_or(-2262)?;
+                if last_x_id >= state_values.len() {
+                    return Err(-2263);
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let x = pop1(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2264);
+                }
+
+                if state_values[init_id] == 0.0 {
+                    state_values[stmt.target_id] = 0.0;
+                    state_values[init_id] = 1.0;
+                    state_values[last_t_id] = time;
+                    state_values[last_x_id] = x;
+                    pc += 1;
+                    continue;
+                }
+                let dt = time - state_values[last_t_id];
+                if dt > 0.0 {
+                    let y = (x - state_values[last_x_id]) / dt;
+                    state_values[stmt.target_id] = y;
+                    state_values[last_t_id] = time;
+                    state_values[last_x_id] = x;
+                }
+            }
+            BODY_STMT_IDT => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let init_id = stmt.target_id.checked_add(1).ok_or(-2270)?;
+                let last_t_id = stmt.target_id.checked_add(2).ok_or(-2271)?;
+                let last_x_id = stmt.target_id.checked_add(3).ok_or(-2272)?;
+                let last_eval_t_id = stmt.target_id.checked_add(4).ok_or(-2273)?;
+                if last_eval_t_id >= state_values.len() {
+                    return Err(-2274);
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+                let (x, ic) = pop2(&mut stack)?;
+                if !stack.is_empty() {
+                    return Err(-2275);
+                }
+
+                if state_values[init_id] == 0.0 {
+                    state_values[stmt.target_id] = ic;
+                    state_values[init_id] = 1.0;
+                    state_values[last_t_id] = time;
+                    state_values[last_x_id] = x;
+                    state_values[last_eval_t_id] = time;
+                    pc += 1;
+                    continue;
+                }
+                if time != state_values[last_eval_t_id] {
+                    let dt = time - state_values[last_t_id];
+                    if dt > 0.0 {
+                        state_values[stmt.target_id] += 0.5 * (x + state_values[last_x_id]) * dt;
+                        state_values[last_t_id] = time;
+                        state_values[last_x_id] = x;
+                    } else if dt < 0.0 {
+                        state_values[stmt.target_id] = ic;
+                        state_values[last_t_id] = time;
+                        state_values[last_x_id] = x;
+                    }
+                    state_values[last_eval_t_id] = time;
+                }
+            }
             BODY_STMT_IDTMOD => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;
