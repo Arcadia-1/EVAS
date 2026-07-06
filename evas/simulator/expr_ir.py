@@ -186,6 +186,7 @@ SYMBOL_PORT = "port"
 SYMBOL_SPECIAL = "special"
 SYMBOL_STATE_ARRAY = "state_array"
 SYMBOL_STATE_SCALAR = "state_scalar"
+_MAX_DYNAMIC_STATE_ARRAY_READ_UNROLL = 256
 
 _BODY_BINARY_OPS = {
     "+": BODY_EXPR_ADD,
@@ -730,6 +731,60 @@ def resolve_static_array_element_binding(
     return binding
 
 
+def _expr_is_safe_repeated_dynamic_array_index(expr_ir: ExprIR) -> bool:
+    if isinstance(expr_ir, (LiteralIR, IdentifierIR)):
+        return True
+    if isinstance(expr_ir, BinaryExprIR):
+        return (
+            _expr_is_safe_repeated_dynamic_array_index(expr_ir.left)
+            and _expr_is_safe_repeated_dynamic_array_index(expr_ir.right)
+        )
+    if isinstance(expr_ir, UnaryExprIR):
+        return _expr_is_safe_repeated_dynamic_array_index(expr_ir.operand)
+    if isinstance(expr_ir, TernaryExprIR):
+        return (
+            _expr_is_safe_repeated_dynamic_array_index(expr_ir.cond)
+            and _expr_is_safe_repeated_dynamic_array_index(expr_ir.true_expr)
+            and _expr_is_safe_repeated_dynamic_array_index(expr_ir.false_expr)
+        )
+    return False
+
+
+def dynamic_array_access_to_select_chain(
+    expr_ir: ArrayAccessIR,
+    bindings: BindingTableIR,
+) -> Optional[ExprIR]:
+    """Lower a small dynamic state-array read to static reads plus selects."""
+
+    if resolve_static_array_element_binding(expr_ir, bindings) is not None:
+        return None
+    array_binding = bindings.resolve(expr_ir.name)
+    if (
+        array_binding is None
+        or array_binding.kind != SYMBOL_STATE_ARRAY
+        or array_binding.lo is None
+        or array_binding.hi is None
+    ):
+        return None
+    if not _expr_is_safe_repeated_dynamic_array_index(expr_ir.index):
+        return None
+    lo = int(array_binding.lo)
+    hi = int(array_binding.hi)
+    count = hi - lo + 1
+    if count <= 0 or count > _MAX_DYNAMIC_STATE_ARRAY_READ_UNROLL:
+        return None
+
+    value: ExprIR = LiteralIR(0.0, raw="0")
+    for idx in range(hi, lo - 1, -1):
+        idx_expr = LiteralIR(float(idx), raw=str(idx))
+        value = TernaryExprIR(
+            BinaryExprIR("==", expr_ir.index, idx_expr),
+            ArrayAccessIR(expr_ir.name, idx_expr),
+            value,
+        )
+    return value
+
+
 def static_array_element_name(
     expr_ir: ArrayAccessIR,
     bindings: BindingTableIR,
@@ -876,10 +931,13 @@ def _append_body_expr_ops(
 
     if isinstance(expr_ir, ArrayAccessIR):
         binding = resolve_static_array_element_binding(expr_ir, bindings)
-        if binding is None:
+        if binding is not None:
+            ops.append(BodyExprOp(BODY_EXPR_READ_STATE, index=binding.slot))
+            return True
+        dynamic_read = dynamic_array_access_to_select_chain(expr_ir, bindings)
+        if dynamic_read is None:
             return False
-        ops.append(BodyExprOp(BODY_EXPR_READ_STATE, index=binding.slot))
-        return True
+        return _append_body_expr_ops(dynamic_read, bindings, node_slots, ops)
 
     if isinstance(expr_ir, BranchAccessIR):
         return _append_branch_body_expr_ops(expr_ir, bindings, node_slots, ops)
