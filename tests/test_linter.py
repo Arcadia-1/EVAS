@@ -50,7 +50,6 @@ def test_lint_rule_registry_covers_current_diagnostics():
         "EVAS-AHDL-W5006",
         "EVAS-AHDL-W5007",
         "EVAS-AHDL-W5008",
-        "EVAS-AHDL-W5010",
         "EVAS-AHDL-W5011",
         "EVAS-AHDL-W5012",
         "EVAS-AHDL-W5013",
@@ -272,7 +271,7 @@ def test_conditional_slew_is_compat_error():
     assert has_compat_errors(diags)
 
 
-def test_conditional_direct_contribution_does_not_error():
+def test_conditional_direct_contribution_matches_oracle_negative():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module conditional_direct(en, out);
@@ -290,7 +289,7 @@ def test_conditional_direct_contribution_does_not_error():
 
     diags = lint_source(source)
 
-    assert "EVAS-AHDL-W5010" in _codes(diags)
+    assert "EVAS-AHDL-W5010" not in _codes(diags)
     assert not has_compat_errors(diags)
 
 

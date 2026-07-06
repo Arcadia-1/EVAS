@@ -88,8 +88,8 @@ language areas. Text output shows `[support-tier: <name>]`; JSON output includes
 a `support_tier` field.
 
 Current warning diagnostics cover a Cadence AHDL-inspired static subset:
-transition timing and simple continuous-input dataflow, conditional potential
-contributions, case defaults, exact branch equality tests, floor/ceil
+transition timing and simple continuous-input dataflow, case defaults,
+exact branch equality tests, floor/ceil
 contribution discontinuities, `gnd` node portability, discrete function
 arguments, implicit integer casts, and simulator-stop tasks inside loops.
 The implementation keeps diagnostic metadata in a rule registry, including the

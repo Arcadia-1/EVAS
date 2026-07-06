@@ -83,8 +83,8 @@ block a candidate, and warning diagnostics for AHDL-style modeling risks such as
 discrete signals directly driving analog contributions or suspicious transition
 usage. Lint warnings do not change simulation pass/fail status.
 Current warning coverage includes a Cadence AHDL-inspired subset for
-transition timing and simple continuous-input dataflow, conditional potential
-contributions, case defaults, exact branch equality tests, floor/ceil
+transition timing and simple continuous-input dataflow, case defaults,
+exact branch equality tests, floor/ceil
 contribution discontinuities, `gnd` node portability, discrete function
 arguments, implicit integer casts, and simulator-stop tasks inside loops.
 Each lint diagnostic is backed by a small rule registry that records its code,

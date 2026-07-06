@@ -142,7 +142,6 @@ LINT_RULE_SPECS: Dict[str, RuleSpec] = {
         _rule("EVAS-AHDL-W5006", STATIC_WARNING, "tiny-transition-delay", spectre_ids=("AHDLLINT-5006",), phase="static-numeric"),
         _rule("EVAS-AHDL-W5007", STATIC_WARNING, "transition-continuous-input", spectre_ids=("AHDLLINT-5007", "AHDLLINT-8004")),
         _rule("EVAS-AHDL-W5008", STATIC_WARNING, "discrete-contribution-transition", spectre_ids=("AHDLLINT-5008",)),
-        _rule("EVAS-AHDL-W5010", STATIC_WARNING, "conditional-potential-contribution", spectre_ids=("AHDLLINT-5010",)),
         _rule("EVAS-AHDL-W5011", STATIC_WARNING, "case-without-default", spectre_ids=("AHDLLINT-5011",)),
         _rule("EVAS-AHDL-W5012", STATIC_WARNING, "abstime-exact-equality", spectre_ids=("AHDLLINT-5012",)),
         _rule("EVAS-AHDL-W5013", STATIC_WARNING, "access-function-exact-equality", spectre_ids=("AHDLLINT-5013",)),
@@ -1158,20 +1157,6 @@ def _lint_statement(
                 )
             )
         if conditional_depth > 0:
-            if stmt.branch.access_type.upper() == "V":
-                diagnostics.append(
-                    _diag(
-                        code="EVAS-AHDL-W5010",
-                        message=(
-                            "potential contribution is switched by runtime "
-                            "control flow; prefer a continuous contribution "
-                            "with a smoothly updated target when possible"
-                        ),
-                        file=filename,
-                        module=module,
-                        node=stmt,
-                    )
-                )
             diagnostics.extend(
                 _conditional_analog_operator_diagnostics(
                     stmt.expr,
