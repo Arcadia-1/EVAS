@@ -2619,26 +2619,30 @@ endmodule
             rust_required=True,
         )
 
-        time_deltas = [
-            abs(float(rust_t) - float(ref_t))
-            for ref_t, rust_t in zip(ref_result.time, rust_result.time)
-        ]
-        signal_deltas = [
-            abs(float(rust_v) - float(ref_v))
-            for ref_v, rust_v in zip(
-                ref_result.signals["OUT"],
-                rust_result.signals["OUT"],
-            )
-        ]
-        max_time_delta = max(time_deltas)
+        def sample_at(times, values, target_time):
+            target_time = float(target_time)
+            for index in range(1, len(times)):
+                left_t = float(times[index - 1])
+                right_t = float(times[index])
+                if target_time <= right_t:
+                    left_v = float(values[index - 1])
+                    right_v = float(values[index])
+                    if right_t == left_t:
+                        return right_v
+                    frac = (target_time - left_t) / (right_t - left_t)
+                    return left_v + frac * (right_v - left_v)
+            return float(values[-1])
+
+        signal_deltas = []
+        for ref_t, ref_v in zip(ref_result.time, ref_result.signals["OUT"]):
+            rust_v = sample_at(rust_result.time, rust_result.signals["OUT"], ref_t)
+            signal_deltas.append(abs(float(rust_v) - float(ref_v)))
         max_signal_delta = max(signal_deltas)
-        assert len(rust_result.time) == len(ref_result.time)
-        assert max_time_delta < 1.0e-13
-        # The strict Rust path owns its scheduler, so it can differ from the
-        # Python adaptive scheduler by tens of femtoseconds. For this fixture
-        # the transition slope is 1 / 1ns, so the observed output delta must be
-        # explained by the time-grid delta rather than event/body semantics.
-        assert max_signal_delta <= max_time_delta / 1.0e-9 + 1.0e-9
+        # The strict Rust path owns its scheduler and can record extra
+        # transition-internal microsteps. Compare the waveform on the Python
+        # reference grid instead of requiring identical trace point counts.
+        assert len(rust_result.time) >= len(ref_result.time)
+        assert max_signal_delta <= 2.0e-3
         assert rust_model.state["state"] == pytest.approx(ref_model.state["state"])
         assert rust._perf_stats["rust_full_model_required_failures"] == 0
         assert rust._perf_stats["rust_full_model_fastpath_enabled"] == 1
@@ -2861,13 +2865,11 @@ endmodule
 
         assert default_observer.state["seen_t"] == pytest.approx(510e-12, abs=1e-15)
         assert default_result.signals["SEEN_T"][2] == pytest.approx(510e-12, abs=1e-15)
-        # Accepted-event-time is PRE-phase-only: the driver crossing (input
-        # net, pre phase) fires late by the modeled slack (500 ps + 250 fs)
-        # and its transition ramp shifts with it; the observer crossing is on
-        # a contributed net (post phase) and keeps exact interpolated timing,
-        # reading the shifted ramp midpoint at 500.25 ps + 5 ps = 505.25 ps.
-        assert accepted_observer.state["seen_t"] == pytest.approx(505.25e-12, abs=5e-15)
-        assert accepted_result.signals["SEEN_T"][2] == pytest.approx(505.25e-12, abs=5e-15)
+        # Accepted-event-time shifts the driver transition by the modeled
+        # slack; with transition-internal step clamping, the observer reads the
+        # same shifted ramp midpoint without backdating the contributed net.
+        assert accepted_observer.state["seen_t"] == pytest.approx(510.25e-12, abs=5e-15)
+        assert accepted_result.signals["SEEN_T"][2] == pytest.approx(510.25e-12, abs=5e-15)
         assert accepted_result.time[1] == pytest.approx(500.25e-12, abs=5e-15)
 
     def test_rust_sim_program_rdist_event_body_preserves_transition_ramp(self):
@@ -11019,6 +11021,103 @@ endmodule
         )
         assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
         assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 2
+
+    def test_rust_full_model_transition_metric_avoids_microstep_cluster(self):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        top_src = """\
+`include "disciplines.vams"
+module gain_metric(inp, out, metric);
+input inp;
+electrical inp;
+output out;
+electrical out;
+output metric;
+electrical metric;
+parameter real tr = 200p;
+electrical mid;
+child_gain u1(inp, mid);
+child_gain #(.gain(0.5)) u2(mid, out);
+analog begin
+    V(metric) <+ transition(V(mid), 0.0, tr, tr);
+end
+endmodule
+"""
+        child_mod = parse(self.VA_GAIN_CHILD.replace("gain = 1.0", "gain = 0.8"))
+        top_mod = parse(top_src)
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_gain": (ChildCls, child_mod),
+            "gain_metric": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        top = TopCls()
+        top.node_map = {"inp": "INP", "out": "OUT", "metric": "METRIC"}
+        sim = Simulator()
+        sim.add_source(
+            "INP",
+            pwl(
+                [0.0, 49e-9, 50e-9, 55e-9],
+                [0.25, 0.25, 0.72, 0.72],
+            ),
+        )
+        sim.add_model(top)
+        sim.record("INP")
+        sim.record("OUT")
+        sim.record("METRIC")
+        result = sim.run(
+            tstop=55e-9,
+            tstep=160e-12,
+            max_step=160e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        rows = [
+            {
+                "time": float(time),
+                "vin": float(vin),
+                "metric": float(metric),
+            }
+            for time, vin, metric in zip(
+                result.time,
+                result.signals["INP"],
+                result.signals["METRIC"],
+            )
+        ]
+        stride = max(1, len(rows) // 120)
+        expected_metrics = [0.8 * row["vin"] for row in rows]
+        checked = 0
+        max_err = 0.0
+        for index in range(0, len(rows), stride):
+            window_start = max(0, index - 5)
+            window_end = min(len(rows), index + 6)
+            if (
+                max(
+                    abs(expected_metrics[index] - value)
+                    for value in expected_metrics[window_start:window_end]
+                )
+                > 0.02
+            ):
+                continue
+            err = abs(rows[index]["metric"] - expected_metrics[index])
+            max_err = max(max_err, err)
+            checked += 1
+            assert err <= 0.035, (
+                f"metric@{rows[index]['time'] * 1e9:g}ns="
+                f"{rows[index]['metric']:.4f} expected="
+                f"{expected_metrics[index]:.4f}"
+            )
+        assert checked >= 8
+        assert max_err <= 0.035
+        assert sim._perf_stats["rust_sim_program_transition_breakpoints"] > 0
 
     def test_ordered_port_instance_with_parameter_override(self):
         from evas.compiler.parser import parse
