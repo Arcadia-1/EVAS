@@ -36,6 +36,10 @@ from evas.simulator.rust_coverage import (
     estimate_event_transition_plan_profiles,
     estimate_event_transition_profiles,
 )
+from evas.simulator.rust_backend import (
+    EXPECTED_RUST_CORE_ABI_VERSION,
+    load_rust_backend,
+)
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 
@@ -44,6 +48,13 @@ def _build_rust_core_or_skip():
     if shutil.which("cargo") is None:
         pytest.skip("cargo is not available")
     subprocess.run(["cargo", "build", "--release"], cwd=RUST_CORE, check=True)
+
+
+def test_rust_backend_abi_version_matches_python_loader():
+    _build_rust_core_or_skip()
+    backend = load_rust_backend()
+
+    assert backend.abi_version == EXPECTED_RUST_CORE_ABI_VERSION
 
 
 # ===========================================================================
