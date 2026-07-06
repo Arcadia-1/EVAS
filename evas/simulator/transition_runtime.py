@@ -18,6 +18,7 @@ from evas.simulator.expr_ir import (
     BodyExprOp,
     BranchAccessIR,
     FunctionCallIR,
+    IdentifierIR,
     LiteralIR,
     UnaryExprIR,
     encode_body_expr_ops,
@@ -214,9 +215,18 @@ def _append_transition_contribution_specs(
     output_slots: list[int],
     reference_slots: list[Optional[int]],
     expr_segments: list[Tuple[BodyExprOp, ...]],
+    transition_temps: Optional[dict[str, object]] = None,
 ) -> bool:
+    if transition_temps is None:
+        transition_temps = {}
+
     if isinstance(stmt_ir, BlockIR):
+        local_temps = dict(transition_temps)
         for child in stmt_ir.statements:
+            temp_name = _transition_temp_assignment_name(child)
+            if temp_name is not None:
+                local_temps[temp_name] = child.value
+                continue
             if not _append_transition_contribution_specs(
                 child,
                 bindings,
@@ -224,6 +234,7 @@ def _append_transition_contribution_specs(
                 output_slots,
                 reference_slots,
                 expr_segments,
+                local_temps,
             ):
                 return False
         return True
@@ -254,6 +265,7 @@ def _append_transition_contribution_specs(
             output_slots,
             reference_slots,
             expr_segments,
+            transition_temps,
         )
 
     if not isinstance(stmt_ir, ContributionIR):
@@ -262,7 +274,8 @@ def _append_transition_contribution_specs(
     target = _encode_transition_contribution_target(stmt_ir.branch, node_slots)
     if target is None:
         return False
-    transition_args = _transition_call_args(stmt_ir.expr)
+    expr = _substitute_transition_temp(stmt_ir.expr, transition_temps)
+    transition_args = _transition_call_args(expr)
     if transition_args is None:
         return False
 
@@ -278,6 +291,34 @@ def _append_transition_contribution_specs(
     reference_slots.append(reference_slot)
     expr_segments.extend(encoded_segments)
     return True
+
+
+def _transition_temp_assignment_name(stmt_ir: object) -> Optional[str]:
+    if not isinstance(stmt_ir, AssignmentIR):
+        return None
+    target = stmt_ir.target
+    if not isinstance(target, IdentifierIR):
+        return None
+    if _transition_call_args(stmt_ir.value) is None:
+        return None
+    return target.name
+
+
+def _substitute_transition_temp(expr: object, transition_temps: dict[str, object]) -> object:
+    if isinstance(expr, IdentifierIR):
+        return transition_temps.get(expr.name, expr)
+    if isinstance(expr, UnaryExprIR):
+        operand = _substitute_transition_temp(expr.operand, transition_temps)
+        if operand is expr.operand:
+            return expr
+        return UnaryExprIR(expr.op, operand)
+    if isinstance(expr, BinaryExprIR):
+        left = _substitute_transition_temp(expr.left, transition_temps)
+        right = _substitute_transition_temp(expr.right, transition_temps)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryExprIR(expr.op, left, right)
+    return expr
 
 
 def _encode_transition_contribution_target(

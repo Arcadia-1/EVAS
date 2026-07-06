@@ -31,14 +31,14 @@ from evas.simulator.engine import (
     sine,
     square,
 )
+from evas.simulator.rust_backend import (
+    EXPECTED_RUST_CORE_ABI_VERSION,
+    load_rust_backend,
+)
 from evas.simulator.rust_coverage import (
     audit_veriloga_paths,
     estimate_event_transition_plan_profiles,
     estimate_event_transition_profiles,
-)
-from evas.simulator.rust_backend import (
-    EXPECTED_RUST_CORE_ABI_VERSION,
-    load_rust_backend,
 )
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
@@ -3190,6 +3190,103 @@ endmodule
         assert max(rust_out) <= 0.81
         assert rust_out[8] > rust_out[0] + 0.45
         assert rust_out[-1] < rust_out[8] - 0.35
+
+    def test_rust_sim_program_transition_temp_assignment_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module dynamic_supply_level_driver(din, vdd, vss, out);
+    input voltage din, vdd, vss;
+    output voltage out;
+    parameter real vsup_min = 0.55;
+    parameter real vth_frac = 0.5;
+    parameter real tr = 200p;
+    real supply_v;
+    real vss_v;
+    real normalized_in;
+    real out_frac;
+    real target_v;
+    analog begin
+        supply_v = V(vdd, vss);
+        vss_v = V(vss);
+        if (supply_v < vsup_min) begin
+            out_frac = 0.0;
+        end else begin
+            normalized_in = (V(din) - vss_v) / supply_v;
+            out_frac = (normalized_in > vth_frac) ? 1.0 : 0.0;
+        end
+        target_v = vss_v + supply_v * transition(out_frac, 0.0, tr, tr);
+        V(out) <+ target_v;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {
+                "din": "DIN",
+                "vdd": "VDD",
+                "vss": "VSS",
+                "out": "OUT",
+            }
+            sim = Simulator()
+            sim.add_source("VDD", dc(0.9))
+            sim.add_source("VSS", dc(0.0))
+            sim.add_source("DIN", pwl([0.0, 1e-9, 2e-9], [0.0, 0.9, 0.0]))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim
+
+        ref = build_sim()
+        ref_result = ref.run(
+            tstop=3e-9,
+            tstep=100e-12,
+            record_step=100e-12,
+            skip_source_error_control=True,
+        )
+
+        rust = build_sim()
+        rust_result = rust.run(
+            tstop=3e-9,
+            tstep=100e-12,
+            record_step=100e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert rust._perf_stats["rust_full_model_required_failures"] == 0
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert len(rust_result.time) >= len(ref_result.time)
+
+        def interp(times, values, sample_time):
+            time_list = list(times)
+            value_list = list(values)
+            for idx in range(1, len(time_list)):
+                t0 = time_list[idx - 1]
+                t1 = time_list[idx]
+                if sample_time <= t1:
+                    if t1 == t0:
+                        return value_list[idx]
+                    frac = (sample_time - t0) / (t1 - t0)
+                    return value_list[idx - 1] + frac * (value_list[idx] - value_list[idx - 1])
+            return value_list[-1]
+
+        sample_times = [idx * 100e-12 for idx in range(31)]
+        rust_out = [
+            interp(rust_result.time, rust_result.signals["OUT"], t)
+            for t in sample_times
+        ]
+        assert all(math.isfinite(value) for value in rust_out)
+        assert rust_out[4] < 0.05
+        assert rust_out[8] > 0.8
+        assert rust_out[-1] < 0.05
+        assert max(rust_result.signals["OUT"]) > 0.8
 
     def test_rust_sim_program_conditional_integer_weighted_transition_target(self):
         _build_rust_core_or_skip()
