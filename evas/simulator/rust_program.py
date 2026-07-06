@@ -151,7 +151,9 @@ from evas.simulator.stmt_ir import (
     SystemTaskIR,
     WhileStatementIR,
     classify_body_stmt_ops_rejection,
+    ddt_hidden_state_names,
     encode_body_stmt_ops,
+    idt_hidden_state_names,
     idtmod_hidden_state_names,
     last_crossing_hidden_state_names,
     lower_stmt,
@@ -849,11 +851,18 @@ def _extend_bindings_with_stateful_function_slots(
     bindings: BindingTableIR,
     stmt_ir: object,
 ) -> BindingTableIR:
+    ddt_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "ddt"))
+    idt_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "idt"))
     idtmod_targets = set(_iter_stateful_assignment_target_names(stmt_ir, bindings, "idtmod"))
     last_crossing_targets = set(
         _iter_stateful_assignment_target_names(stmt_ir, bindings, "last_crossing")
     )
-    if not idtmod_targets and not last_crossing_targets:
+    if (
+        not ddt_targets
+        and not idt_targets
+        and not idtmod_targets
+        and not last_crossing_targets
+    ):
         return bindings
 
     rewritten: list[StateBindingIR] = []
@@ -875,6 +884,10 @@ def _extend_bindings_with_stateful_function_slots(
         next_scalar_slot += 1
 
         hidden_names: list[str] = []
+        if binding.name in ddt_targets:
+            hidden_names.extend(ddt_hidden_state_names(binding.name))
+        if binding.name in idt_targets:
+            hidden_names.extend(idt_hidden_state_names(binding.name))
         if binding.name in idtmod_targets:
             hidden_names.extend(idtmod_hidden_state_names(binding.name))
         if binding.name in last_crossing_targets:

@@ -50,6 +50,7 @@ from evas.simulator.expr_ir import (
 from evas.simulator.rust_backend import (
     BODY_EXPR_CONST,
     BODY_STMT_BOUND_STEP,
+    BODY_STMT_DDT,
     BODY_STMT_ELSE,
     BODY_STMT_ENDIF,
     BODY_STMT_ENDWHILE,
@@ -60,6 +61,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_SEEK,
     BODY_STMT_FILE_TELL,
     BODY_STMT_FILE_WRITE,
+    BODY_STMT_IDT,
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
     BODY_STMT_LAST_CROSSING,
@@ -205,6 +207,19 @@ IDTMOD_HIDDEN_STATE_SUFFIXES = (
     "__evas2_idtmod_last_eval_t",
 )
 
+DDT_HIDDEN_STATE_SUFFIXES = (
+    "__evas2_ddt_initialized",
+    "__evas2_ddt_last_t",
+    "__evas2_ddt_last_x",
+)
+
+IDT_HIDDEN_STATE_SUFFIXES = (
+    "__evas2_idt_initialized",
+    "__evas2_idt_last_t",
+    "__evas2_idt_last_x",
+    "__evas2_idt_last_eval_t",
+)
+
 LAST_CROSSING_HIDDEN_STATE_SUFFIXES = (
     "__evas2_last_crossing_initialized",
     "__evas2_last_crossing_prev_t",
@@ -214,6 +229,14 @@ LAST_CROSSING_HIDDEN_STATE_SUFFIXES = (
 
 def idtmod_hidden_state_names(target_name: str) -> Tuple[str, ...]:
     return tuple(f"{target_name}.{suffix}" for suffix in IDTMOD_HIDDEN_STATE_SUFFIXES)
+
+
+def ddt_hidden_state_names(target_name: str) -> Tuple[str, ...]:
+    return tuple(f"{target_name}.{suffix}" for suffix in DDT_HIDDEN_STATE_SUFFIXES)
+
+
+def idt_hidden_state_names(target_name: str) -> Tuple[str, ...]:
+    return tuple(f"{target_name}.{suffix}" for suffix in IDT_HIDDEN_STATE_SUFFIXES)
 
 
 def last_crossing_hidden_state_names(target_name: str) -> Tuple[str, ...]:
@@ -840,7 +863,16 @@ def _iter_expr_rejection_tags(
         name = str(expr_ir.name)
         if name == "transition":
             yield "transition_expr"
-        elif name in {"cross", "above", "timer", "idtmod", "last_crossing", "slew"}:
+        elif name in {
+            "cross",
+            "above",
+            "timer",
+            "ddt",
+            "idt",
+            "idtmod",
+            "last_crossing",
+            "slew",
+        }:
             yield f"stateful_analog_function:{name}"
         elif name.startswith("$") and name not in {
             "$random",
@@ -971,6 +1003,94 @@ def _lower_assignment_target(
     return None
 
 
+def _append_ddt_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+) -> Optional[bool]:
+    value = stmt_ir.value
+    if not isinstance(value, FunctionCallIR) or str(value.name) != "ddt":
+        return None
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    target_name = _assignment_target_name(stmt_ir.target, bindings)
+    if target is None or target_name is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE or target_integer:
+        return False
+    if not _has_adjacent_ddt_hidden_slots(target_name, target_id, bindings):
+        return False
+    if len(value.args) > 1:
+        return False
+
+    arg = value.args[0] if value.args else LiteralIR(0.0)
+    encoded = encode_body_expr_ops(arg, bindings, node_slots)
+    if encoded is None:
+        return False
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_DDT,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_idt_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+) -> Optional[bool]:
+    value = stmt_ir.value
+    if not isinstance(value, FunctionCallIR) or str(value.name) != "idt":
+        return None
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    target_name = _assignment_target_name(stmt_ir.target, bindings)
+    if target is None or target_name is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE or target_integer:
+        return False
+    if not _has_adjacent_idt_hidden_slots(target_name, target_id, bindings):
+        return False
+    if len(value.args) > 2:
+        return False
+
+    args = list(value.args)
+    if not args:
+        args.append(LiteralIR(0.0))
+    while len(args) < 2:
+        args.append(LiteralIR(0.0))
+
+    encoded: list[BodyExprOp] = []
+    for arg in args:
+        arg_ops = encode_body_expr_ops(arg, bindings, node_slots)
+        if arg_ops is None:
+            return False
+        encoded.extend(arg_ops)
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_IDT,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
 def _append_idtmod_assignment_stmt_ops(
     stmt_ir: AssignmentIR,
     bindings: BindingTableIR,
@@ -1072,6 +1192,38 @@ def _append_last_crossing_assignment_stmt_ops(
     return True
 
 
+def _has_adjacent_ddt_hidden_slots(
+    target_name: str,
+    target_slot: int,
+    bindings: BindingTableIR,
+) -> bool:
+    for offset, hidden_name in enumerate(ddt_hidden_state_names(target_name), start=1):
+        hidden = bindings.resolve(hidden_name)
+        if (
+            hidden is None
+            or hidden.kind != SYMBOL_STATE_SCALAR
+            or int(hidden.slot) != int(target_slot) + offset
+        ):
+            return False
+    return True
+
+
+def _has_adjacent_idt_hidden_slots(
+    target_name: str,
+    target_slot: int,
+    bindings: BindingTableIR,
+) -> bool:
+    for offset, hidden_name in enumerate(idt_hidden_state_names(target_name), start=1):
+        hidden = bindings.resolve(hidden_name)
+        if (
+            hidden is None
+            or hidden.kind != SYMBOL_STATE_SCALAR
+            or int(hidden.slot) != int(target_slot) + offset
+        ):
+            return False
+    return True
+
+
 def _has_adjacent_idtmod_hidden_slots(
     target_name: str,
     target_slot: int,
@@ -1127,6 +1279,24 @@ def _append_body_stmt_ops(
         return True
 
     if isinstance(stmt_ir, AssignmentIR):
+        ddt_encoded = _append_ddt_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+        )
+        if ddt_encoded is not None:
+            return ddt_encoded
+        idt_encoded = _append_idt_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+        )
+        if idt_encoded is not None:
+            return idt_encoded
         idtmod_encoded = _append_idtmod_assignment_stmt_ops(
             stmt_ir,
             bindings,

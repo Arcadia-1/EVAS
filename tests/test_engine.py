@@ -8502,6 +8502,71 @@ endmodule
         assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
         assert results[1] == pytest.approx(math.exp(0.25), rel=1e-4)
 
+    def test_rust_full_model_body_assignment_ddt_idt_match_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_body_ddt_idt_probe(vin, ddt_out, idt_out);
+    input voltage vin;
+    output voltage ddt_out;
+    output voltage idt_out;
+    real deriv;
+    real integ;
+    analog begin
+        deriv = ddt(V(vin));
+        integ = idt(V(vin), 0.1);
+        V(ddt_out) <+ transition(deriv * 1e-9, 0.0, 10p, 10p);
+        V(idt_out) <+ integ;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source(
+                "vin",
+                pwl(
+                    [0.0, 1.0e-9, 3.0e-9, 5.0e-9],
+                    [0.0, 0.0, 0.4, 0.4],
+                ),
+            )
+            sim.add_model(model)
+            sim.record("ddt_out")
+            sim.record("idt_out")
+            result = sim.run(
+                tstop=5.0e-9,
+                tstep=100.0e-12,
+                record_step=100.0e-12,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        for sample_time in (1.5e-9, 2.5e-9, 4.5e-9):
+            default_idx = min(
+                range(len(default_result.time)),
+                key=lambda idx: abs(float(default_result.time[idx]) - sample_time),
+            )
+            rust_idx = min(
+                range(len(rust_result.time)),
+                key=lambda idx: abs(float(rust_result.time[idx]) - sample_time),
+            )
+            assert rust_result.signals["ddt_out"][rust_idx] == pytest.approx(
+                default_result.signals["ddt_out"][default_idx], rel=0.12, abs=1.0e-8
+            )
+            assert rust_result.signals["idt_out"][rust_idx] == pytest.approx(
+                default_result.signals["idt_out"][default_idx], rel=1e-8, abs=1.0e-10
+            )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_full_model_inlines_nested_pure_user_functions(self):
         _build_rust_core_or_skip()
         src = """\
