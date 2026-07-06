@@ -146,3 +146,13 @@ def test_unary_and_integer_operator_emit_compile():
     assert ir is not None
 
     compile(emit_python(ir), "<audit-094a-int-ops>", "eval")
+
+    reduction_expr = BinaryExpr(
+        "+",
+        UnaryExpr("^", Identifier("a")),
+        UnaryExpr("|", Identifier("flag")),
+    )
+    reduction_ir = lower_expr(reduction_expr, LoweringContext.veriloga_body())
+    assert reduction_ir is not None
+
+    compile(emit_python(reduction_ir), "<audit-094a-reduction-ops>", "eval")
