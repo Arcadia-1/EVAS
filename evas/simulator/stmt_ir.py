@@ -39,6 +39,7 @@ from evas.simulator.expr_ir import (
     MethodCallIR,
     TernaryExprIR,
     UnaryExprIR,
+    VectorLiteralIR,
     emit_python,
     encode_body_expr_ops,
     iter_identifier_names,
@@ -62,10 +63,18 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_WRITE,
     BODY_STMT_IDTMOD,
     BODY_STMT_IF,
+    BODY_STMT_LAPLACE_ND,
+    BODY_STMT_LAPLACE_NP,
+    BODY_STMT_LAPLACE_ZD,
+    BODY_STMT_LAPLACE_ZP,
     BODY_STMT_LAST_CROSSING,
     BODY_STMT_STRING_WRITE,
     BODY_STMT_STROBE,
     BODY_STMT_WHILE,
+    BODY_STMT_ZI_ND,
+    BODY_STMT_ZI_NP,
+    BODY_STMT_ZI_ZD,
+    BODY_STMT_ZI_ZP,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
     BodyExprOp,
@@ -201,6 +210,13 @@ IDTMOD_HIDDEN_STATE_SUFFIXES = (
     "__evas2_idtmod_last_eval_t",
 )
 
+TRANSFER_HIDDEN_STATE_SUFFIXES = (
+    "__evas2_transfer_initialized",
+    "__evas2_transfer_last_t",
+    "__evas2_transfer_last_eval_t",
+    "__evas2_transfer_aux",
+)
+
 LAST_CROSSING_HIDDEN_STATE_SUFFIXES = (
     "__evas2_last_crossing_initialized",
     "__evas2_last_crossing_prev_t",
@@ -210,6 +226,10 @@ LAST_CROSSING_HIDDEN_STATE_SUFFIXES = (
 
 def idtmod_hidden_state_names(target_name: str) -> Tuple[str, ...]:
     return tuple(f"{target_name}.{suffix}" for suffix in IDTMOD_HIDDEN_STATE_SUFFIXES)
+
+
+def transfer_hidden_state_names(target_name: str) -> Tuple[str, ...]:
+    return tuple(f"{target_name}.{suffix}" for suffix in TRANSFER_HIDDEN_STATE_SUFFIXES)
 
 
 def last_crossing_hidden_state_names(target_name: str) -> Tuple[str, ...]:
@@ -721,11 +741,31 @@ def _iter_expr_rejection_tags(
         yield from _iter_expr_rejection_tags(expr_ir.false_expr, bindings, node_slots)
         return
 
+    if isinstance(expr_ir, VectorLiteralIR):
+        for item in expr_ir.items:
+            yield from _iter_expr_rejection_tags(item, bindings, node_slots)
+        return
+
     if isinstance(expr_ir, FunctionCallIR):
         name = str(expr_ir.name)
         if name == "transition":
             yield "transition_expr"
-        elif name in {"cross", "above", "timer", "idtmod", "last_crossing", "slew"}:
+        elif name in {
+            "cross",
+            "above",
+            "timer",
+            "idtmod",
+            "last_crossing",
+            "slew",
+            "laplace_nd",
+            "laplace_np",
+            "laplace_zd",
+            "laplace_zp",
+            "zi_nd",
+            "zi_np",
+            "zi_zd",
+            "zi_zp",
+        }:
             yield f"stateful_analog_function:{name}"
         elif name.startswith("$") and name not in {
             "$random",
@@ -856,6 +896,221 @@ def _lower_assignment_target(
     return None
 
 
+_TRANSFER_STMT_KINDS = {
+    "laplace_nd": BODY_STMT_LAPLACE_ND,
+    "laplace_np": BODY_STMT_LAPLACE_NP,
+    "laplace_zd": BODY_STMT_LAPLACE_ZD,
+    "laplace_zp": BODY_STMT_LAPLACE_ZP,
+    "zi_nd": BODY_STMT_ZI_ND,
+    "zi_np": BODY_STMT_ZI_NP,
+    "zi_zd": BODY_STMT_ZI_ZD,
+    "zi_zp": BODY_STMT_ZI_ZP,
+}
+
+
+def _append_transfer_assignment_stmt_ops(
+    stmt_ir: AssignmentIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+) -> Optional[bool]:
+    extracted = _extract_transfer_call_with_scale(stmt_ir.value)
+    if extracted is None:
+        return None
+    scale, value = extracted
+    name = str(value.name)
+    stmt_kind = _TRANSFER_STMT_KINDS.get(name)
+    if stmt_kind is None:
+        return None
+    if name.startswith("zi_") and scale != 1.0:
+        return False
+
+    target = _encode_assignment_target(stmt_ir.target, bindings)
+    target_name = _assignment_target_name(stmt_ir.target, bindings)
+    if target is None or target_name is None:
+        return False
+    target_kind, target_id, target_integer = target
+    if target_kind != BODY_TARGET_STATE or target_integer:
+        return False
+    if not _has_adjacent_transfer_hidden_slots(target_name, target_id, bindings):
+        return False
+
+    encoded = _encode_transfer_assignment_args(name, scale, value, bindings, node_slots)
+    if encoded is None:
+        return False
+    expr_start = len(expr_ops)
+    expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=stmt_kind,
+            target_id=target_id,
+            expr_start=expr_start,
+            expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _extract_transfer_call_with_scale(
+    expr_ir: ExprIR,
+) -> Optional[Tuple[float, FunctionCallIR]]:
+    if isinstance(expr_ir, FunctionCallIR) and str(expr_ir.name) in _TRANSFER_STMT_KINDS:
+        return 1.0, expr_ir
+
+    if not isinstance(expr_ir, BinaryExprIR) or expr_ir.op != "*":
+        return None
+    left_scale = _static_coeff_scalar(expr_ir.left)
+    if (
+        left_scale is not None
+        and isinstance(expr_ir.right, FunctionCallIR)
+        and str(expr_ir.right.name) in _TRANSFER_STMT_KINDS
+    ):
+        return left_scale, expr_ir.right
+    right_scale = _static_coeff_scalar(expr_ir.right)
+    if (
+        right_scale is not None
+        and isinstance(expr_ir.left, FunctionCallIR)
+        and str(expr_ir.left.name) in _TRANSFER_STMT_KINDS
+    ):
+        return right_scale, expr_ir.left
+    return None
+
+
+def _encode_transfer_assignment_args(
+    name: str,
+    scale: float,
+    value: FunctionCallIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+) -> Optional[list[BodyExprOp]]:
+    args = list(value.args)
+    if name.startswith("laplace_") and len(args) < 3:
+        return None
+    if name.startswith("zi_") and len(args) < 4:
+        return None
+
+    encoded = list(encode_body_expr_ops(args[0], bindings, node_slots) or ())
+    if not encoded:
+        return None
+
+    def append_coeffs(values: Tuple[float, ...]) -> None:
+        for coeff in values:
+            encoded.append(BodyExprOp(BODY_EXPR_CONST, value=float(coeff)))
+
+    if name == "laplace_nd":
+        num = _static_coeff_vector(args[1])
+        den = _static_coeff_vector(args[2])
+        if num is None or den is None or len(num) != 1 or len(den) != 2:
+            return None
+        if den[0] == 0.0 or den[1] == 0.0:
+            return None
+        append_coeffs((num[0], den[0], den[1], scale))
+        return encoded
+
+    if name == "laplace_np":
+        num = _static_coeff_vector(args[1])
+        poles = _static_coeff_vector(args[2])
+        if num is None or poles is None or len(num) != 1 or not poles:
+            return None
+        if poles[0] == 0.0:
+            return None
+        append_coeffs((num[0], poles[0], scale))
+        return encoded
+
+    if name == "laplace_zd":
+        zeros = _static_coeff_vector(args[1])
+        den = _static_coeff_vector(args[2])
+        if zeros is None or den is None or len(zeros) != 2 or len(den) != 2:
+            return None
+        if zeros[0] != 0.0 or zeros[1] != 0.0 or den[0] == 0.0 or den[1] == 0.0:
+            return None
+        append_coeffs((zeros[0], zeros[1], den[0], den[1], scale))
+        return encoded
+
+    if name == "laplace_zp":
+        zeros = _static_coeff_vector(args[1])
+        poles = _static_coeff_vector(args[2])
+        if zeros is None or poles is None or len(zeros) != 2 or len(poles) < 2:
+            return None
+        if zeros[0] != 0.0 or zeros[1] != 0.0 or poles[0] == 0.0 or poles[1] != 0.0:
+            return None
+        append_coeffs((zeros[0], zeros[1], poles[0], poles[1], scale))
+        return encoded
+
+    if name == "zi_nd":
+        num = _static_coeff_vector(args[1])
+        den = _static_coeff_vector(args[2])
+        interval = encode_body_expr_ops(args[3], bindings, node_slots)
+        if num is None or den is None or interval is None:
+            return None
+        if len(num) != 1 or len(den) != 2 or den[0] == 0.0:
+            return None
+        append_coeffs((num[0], den[0], den[1]))
+        encoded.extend(interval)
+        return encoded
+
+    if name == "zi_np":
+        num = _static_coeff_vector(args[1])
+        poles = _static_coeff_vector(args[2])
+        interval = encode_body_expr_ops(args[3], bindings, node_slots)
+        if num is None or poles is None or interval is None:
+            return None
+        if len(num) != 1 or len(poles) < 2 or poles[1] != 0.0:
+            return None
+        append_coeffs((num[0], poles[0], poles[1]))
+        encoded.extend(interval)
+        return encoded
+
+    if name == "zi_zd":
+        zeros = _static_coeff_vector(args[1])
+        den = _static_coeff_vector(args[2])
+        interval = encode_body_expr_ops(args[3], bindings, node_slots)
+        if zeros is None or den is None or interval is None:
+            return None
+        if len(zeros) != 2 or len(den) != 2 or zeros[1] != 0.0 or den[0] == 0.0:
+            return None
+        append_coeffs((zeros[0], zeros[1], den[0], den[1]))
+        encoded.extend(interval)
+        return encoded
+
+    if name == "zi_zp":
+        zeros = _static_coeff_vector(args[1])
+        poles = _static_coeff_vector(args[2])
+        interval = encode_body_expr_ops(args[3], bindings, node_slots)
+        if zeros is None or poles is None or interval is None:
+            return None
+        if len(zeros) != 2 or len(poles) < 2 or zeros[1] != 0.0 or poles[1] != 0.0:
+            return None
+        append_coeffs((zeros[0], zeros[1], poles[0], poles[1]))
+        encoded.extend(interval)
+        return encoded
+
+    return None
+
+
+def _static_coeff_vector(expr_ir: ExprIR) -> Optional[Tuple[float, ...]]:
+    if isinstance(expr_ir, VectorLiteralIR):
+        values: list[float] = []
+        for item in expr_ir.items:
+            value = _static_coeff_scalar(item)
+            if value is None:
+                return None
+            values.append(value)
+        return tuple(values)
+    value = _static_coeff_scalar(expr_ir)
+    if value is None:
+        return None
+    return (value,)
+
+
+def _static_coeff_scalar(expr_ir: ExprIR) -> Optional[float]:
+    if not isinstance(expr_ir, LiteralIR) or not isinstance(expr_ir.value, (int, float)):
+        return None
+    return float(expr_ir.value)
+
+
 def _append_idtmod_assignment_stmt_ops(
     stmt_ir: AssignmentIR,
     bindings: BindingTableIR,
@@ -957,6 +1212,22 @@ def _append_last_crossing_assignment_stmt_ops(
     return True
 
 
+def _has_adjacent_transfer_hidden_slots(
+    target_name: str,
+    target_slot: int,
+    bindings: BindingTableIR,
+) -> bool:
+    for offset, hidden_name in enumerate(transfer_hidden_state_names(target_name), start=1):
+        hidden = bindings.resolve(hidden_name)
+        if (
+            hidden is None
+            or hidden.kind != SYMBOL_STATE_SCALAR
+            or int(hidden.slot) != int(target_slot) + offset
+        ):
+            return False
+    return True
+
+
 def _has_adjacent_idtmod_hidden_slots(
     target_name: str,
     target_slot: int,
@@ -1012,6 +1283,15 @@ def _append_body_stmt_ops(
         return True
 
     if isinstance(stmt_ir, AssignmentIR):
+        transfer_encoded = _append_transfer_assignment_stmt_ops(
+            stmt_ir,
+            bindings,
+            node_slots,
+            stmt_ops,
+            expr_ops,
+        )
+        if transfer_encoded is not None:
+            return transfer_encoded
         idtmod_encoded = _append_idtmod_assignment_stmt_ops(
             stmt_ir,
             bindings,

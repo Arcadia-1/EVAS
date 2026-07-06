@@ -430,6 +430,51 @@ impl<'a> RustFileIoRuntime<'a> {
     }
 }
 
+fn body_transfer_hidden_slots(
+    state_values: &[f64],
+    target_id: usize,
+) -> Result<(usize, usize, usize, usize), i32> {
+    let init_id = target_id.checked_add(1).ok_or(-2400)?;
+    let last_t_id = target_id.checked_add(2).ok_or(-2401)?;
+    let last_eval_t_id = target_id.checked_add(3).ok_or(-2402)?;
+    let aux_id = target_id.checked_add(4).ok_or(-2403)?;
+    if aux_id >= state_values.len() {
+        return Err(-2404);
+    }
+    Ok((init_id, last_t_id, last_eval_t_id, aux_id))
+}
+
+fn body_first_order_update(
+    state_values: &mut [f64],
+    target_id: usize,
+    time: f64,
+    target: f64,
+    tau: f64,
+) -> Result<f64, i32> {
+    let (init_id, last_t_id, last_eval_t_id, aux_id) =
+        body_transfer_hidden_slots(state_values, target_id)?;
+    if state_values[init_id] == 0.0 {
+        state_values[init_id] = 1.0;
+        state_values[last_t_id] = time;
+        state_values[last_eval_t_id] = time;
+        state_values[aux_id] = target;
+        return Ok(target);
+    }
+    if time != state_values[last_eval_t_id] {
+        let dt = time - state_values[last_t_id];
+        if dt > 0.0 && tau > 0.0 {
+            let alpha = 1.0 - (-dt / tau).exp();
+            state_values[aux_id] += alpha * (target - state_values[aux_id]);
+            state_values[last_t_id] = time;
+        } else if dt < 0.0 {
+            state_values[aux_id] = target;
+            state_values[last_t_id] = time;
+        }
+        state_values[last_eval_t_id] = time;
+    }
+    Ok(state_values[aux_id])
+}
+
 pub(crate) fn evaluate_body_ir_ops_at_time_impl(
     stmt_ops: &[EvasRustBodyStmtOp],
     expr_ops: &[EvasRustBodyExprOp],
@@ -650,6 +695,255 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                 }
                 state_values[prev_t_id] = time;
                 state_values[prev_x_id] = value;
+            }
+            BODY_STMT_LAPLACE_ND | BODY_STMT_LAPLACE_NP | BODY_STMT_LAPLACE_ZD
+            | BODY_STMT_LAPLACE_ZP | BODY_STMT_ZI_ND | BODY_STMT_ZI_NP | BODY_STMT_ZI_ZD
+            | BODY_STMT_ZI_ZP => {
+                if !branch_active_stack.iter().all(|flag| *flag != 0) {
+                    pc += 1;
+                    continue;
+                }
+                let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+                if expr_end > expr_ops.len() {
+                    return Err(-2207);
+                }
+                stack.clear();
+                evaluate_body_expr_segment(
+                    &expr_ops[stmt.expr_start..expr_end],
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    &mut stack,
+                )?;
+
+                match stmt.target_kind {
+                    BODY_STMT_LAPLACE_ND => {
+                        let scale = pop1(&mut stack)?;
+                        let d1 = pop1(&mut stack)?;
+                        let d0 = pop1(&mut stack)?;
+                        let n0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || d0 == 0.0 || d1 == 0.0 {
+                            return Err(-2410);
+                        }
+                        let target = (n0 / d0) * x;
+                        let tau = (d1 / d0).abs();
+                        let y = body_first_order_update(
+                            state_values,
+                            stmt.target_id,
+                            time,
+                            target,
+                            tau,
+                        )?;
+                        state_values[stmt.target_id] = scale * y;
+                    }
+                    BODY_STMT_LAPLACE_NP => {
+                        let scale = pop1(&mut stack)?;
+                        let p0 = pop1(&mut stack)?;
+                        let n0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || p0 == 0.0 {
+                            return Err(-2411);
+                        }
+                        let target = n0 * x;
+                        let tau = 1.0 / p0.abs();
+                        let y = body_first_order_update(
+                            state_values,
+                            stmt.target_id,
+                            time,
+                            target,
+                            tau,
+                        )?;
+                        state_values[stmt.target_id] = scale * y;
+                    }
+                    BODY_STMT_LAPLACE_ZD => {
+                        let scale = pop1(&mut stack)?;
+                        let d1 = pop1(&mut stack)?;
+                        let d0 = pop1(&mut stack)?;
+                        let _z1 = pop1(&mut stack)?;
+                        let _z0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || d0 == 0.0 || d1 == 0.0 {
+                            return Err(-2412);
+                        }
+                        let tau = (d1 / d0).abs();
+                        let lowpass = body_first_order_update(
+                            state_values,
+                            stmt.target_id,
+                            time,
+                            x / d0,
+                            tau,
+                        )?;
+                        state_values[stmt.target_id] = scale * (x - d0 * lowpass) / d1;
+                    }
+                    BODY_STMT_LAPLACE_ZP => {
+                        let scale = pop1(&mut stack)?;
+                        let _p1 = pop1(&mut stack)?;
+                        let p0 = pop1(&mut stack)?;
+                        let _z1 = pop1(&mut stack)?;
+                        let _z0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || p0 == 0.0 {
+                            return Err(-2413);
+                        }
+                        let tau = 1.0 / p0.abs();
+                        let lowpass =
+                            body_first_order_update(state_values, stmt.target_id, time, x, tau)?;
+                        state_values[stmt.target_id] = scale * (x - lowpass) / tau;
+                    }
+                    BODY_STMT_ZI_ND => {
+                        let interval = pop1(&mut stack)?.max(0.0);
+                        let a1 = pop1(&mut stack)?;
+                        let a0 = pop1(&mut stack)?;
+                        let b0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || a0 == 0.0 {
+                            return Err(-2414);
+                        }
+                        let (init_id, last_sample_t_id, last_eval_t_id, aux_id) =
+                            body_transfer_hidden_slots(state_values, stmt.target_id)?;
+                        if state_values[init_id] == 0.0 {
+                            let y = (b0 * x) / a0;
+                            state_values[stmt.target_id] = y;
+                            state_values[init_id] = 1.0;
+                            state_values[last_sample_t_id] = time;
+                            state_values[last_eval_t_id] = time;
+                            state_values[aux_id] = y;
+                        } else if time != state_values[last_eval_t_id] {
+                            if time < state_values[last_sample_t_id] {
+                                state_values[stmt.target_id] = 0.0;
+                                state_values[aux_id] = 0.0;
+                                state_values[last_sample_t_id] = f64::NEG_INFINITY;
+                            }
+                            if interval > 0.0
+                                && (time - state_values[last_sample_t_id]) < interval * 0.999999
+                            {
+                                state_values[last_eval_t_id] = time;
+                            } else {
+                                let y = (b0 * x - a1 * state_values[aux_id]) / a0;
+                                state_values[stmt.target_id] = y;
+                                state_values[aux_id] = y;
+                                state_values[last_sample_t_id] = time;
+                                state_values[last_eval_t_id] = time;
+                            }
+                        }
+                    }
+                    BODY_STMT_ZI_NP => {
+                        let interval = pop1(&mut stack)?.max(0.0);
+                        let _p1 = pop1(&mut stack)?;
+                        let p0 = pop1(&mut stack)?;
+                        let b0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() {
+                            return Err(-2415);
+                        }
+                        let (init_id, last_sample_t_id, last_eval_t_id, _aux_id) =
+                            body_transfer_hidden_slots(state_values, stmt.target_id)?;
+                        if state_values[init_id] == 0.0 {
+                            state_values[stmt.target_id] = x;
+                            state_values[init_id] = 1.0;
+                            state_values[last_sample_t_id] = time;
+                            state_values[last_eval_t_id] = time;
+                        } else if time != state_values[last_eval_t_id] {
+                            if time < state_values[last_sample_t_id] {
+                                state_values[stmt.target_id] = x;
+                                state_values[last_sample_t_id] = time;
+                            } else if interval > 0.0
+                                && (time - state_values[last_sample_t_id]) < interval * 0.999999
+                            {
+                                state_values[last_eval_t_id] = time;
+                                pc += 1;
+                                continue;
+                            } else {
+                                state_values[stmt.target_id] =
+                                    b0 * x + p0 * state_values[stmt.target_id];
+                                state_values[last_sample_t_id] = time;
+                            }
+                            state_values[last_eval_t_id] = time;
+                        }
+                    }
+                    BODY_STMT_ZI_ZD => {
+                        let interval = pop1(&mut stack)?.max(0.0);
+                        let a1 = pop1(&mut stack)?;
+                        let a0 = pop1(&mut stack)?;
+                        let _z1 = pop1(&mut stack)?;
+                        let z0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() || a0 == 0.0 {
+                            return Err(-2416);
+                        }
+                        let pole = -a1 / a0;
+                        let (init_id, last_sample_t_id, last_eval_t_id, last_x_id) =
+                            body_transfer_hidden_slots(state_values, stmt.target_id)?;
+                        if state_values[init_id] == 0.0 {
+                            state_values[stmt.target_id] = 0.0;
+                            state_values[init_id] = 1.0;
+                            state_values[last_sample_t_id] = time;
+                            state_values[last_eval_t_id] = time;
+                            state_values[last_x_id] = x;
+                        } else if time != state_values[last_eval_t_id] {
+                            if time < state_values[last_sample_t_id] {
+                                state_values[stmt.target_id] = 0.0;
+                                state_values[last_x_id] = x;
+                                state_values[last_sample_t_id] = time;
+                            } else if interval > 0.0
+                                && (time - state_values[last_sample_t_id]) < interval * 0.999999
+                            {
+                                state_values[last_eval_t_id] = time;
+                                pc += 1;
+                                continue;
+                            } else {
+                                let y = x - z0 * state_values[last_x_id]
+                                    + pole * state_values[stmt.target_id];
+                                state_values[last_x_id] = x;
+                                state_values[stmt.target_id] = y;
+                                state_values[last_sample_t_id] = time;
+                            }
+                            state_values[last_eval_t_id] = time;
+                        }
+                    }
+                    BODY_STMT_ZI_ZP => {
+                        let interval = pop1(&mut stack)?.max(0.0);
+                        let _p1 = pop1(&mut stack)?;
+                        let p0 = pop1(&mut stack)?;
+                        let _z1 = pop1(&mut stack)?;
+                        let z0 = pop1(&mut stack)?;
+                        let x = pop1(&mut stack)?;
+                        if !stack.is_empty() {
+                            return Err(-2417);
+                        }
+                        let (init_id, last_sample_t_id, last_eval_t_id, last_x_id) =
+                            body_transfer_hidden_slots(state_values, stmt.target_id)?;
+                        if state_values[init_id] == 0.0 {
+                            state_values[stmt.target_id] = 0.0;
+                            state_values[init_id] = 1.0;
+                            state_values[last_sample_t_id] = time;
+                            state_values[last_eval_t_id] = time;
+                            state_values[last_x_id] = x;
+                        } else if time != state_values[last_eval_t_id] {
+                            if time < state_values[last_sample_t_id] {
+                                state_values[stmt.target_id] = 0.0;
+                                state_values[last_x_id] = x;
+                                state_values[last_sample_t_id] = time;
+                            } else if interval > 0.0
+                                && (time - state_values[last_sample_t_id]) < interval * 0.999999
+                            {
+                                state_values[last_eval_t_id] = time;
+                                pc += 1;
+                                continue;
+                            } else {
+                                let y = x - z0 * state_values[last_x_id]
+                                    + p0 * state_values[stmt.target_id];
+                                state_values[last_x_id] = x;
+                                state_values[stmt.target_id] = y;
+                                state_values[last_sample_t_id] = time;
+                            }
+                            state_values[last_eval_t_id] = time;
+                        }
+                    }
+                    _ => return Err(-2418),
+                }
             }
             BODY_STMT_IDTMOD => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {

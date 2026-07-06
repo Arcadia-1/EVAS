@@ -8536,6 +8536,76 @@ endmodule
         assert results[1] == pytest.approx(results[0], rel=1e-8, abs=1e-8)
         assert results[1] == pytest.approx(1.5625)
 
+    def test_rust_full_model_body_transfer_assignments_match_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_body_transfer_probe(vin, lp_out, hp_out, zi_out);
+    input voltage vin;
+    output voltage lp_out;
+    output voltage hp_out;
+    output voltage zi_out;
+    real lp_v;
+    real hp_v;
+    real zi_v;
+    analog begin
+        lp_v = laplace_nd(V(vin), {1.0}, {1.0, 20n});
+        hp_v = (20n * laplace_zp(V(vin), {0.0, 0.0}, {-5.0e7, 0.0}));
+        zi_v = zi_np(V(vin), {0.25}, {0.75, 0.0}, 20n);
+        V(lp_out) <+ transition(lp_v, 0.0, 100p, 100p);
+        V(hp_out) <+ transition(hp_v, 0.0, 100p, 100p);
+        V(zi_out) <+ zi_v;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source(
+                "vin",
+                pwl(
+                    [0.0, 20e-9, 20.1e-9, 100e-9],
+                    [0.0, 0.0, 0.8, 0.8],
+                ),
+            )
+            sim.add_model(model)
+            sim.record("lp_out")
+            sim.record("hp_out")
+            sim.record("zi_out")
+            result = sim.run(
+                tstop=100e-9,
+                tstep=2e-9,
+                record_step=2e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        for sample_time in (24e-9, 40e-9, 80e-9):
+            default_idx = min(
+                range(len(default_result.time)),
+                key=lambda idx: abs(float(default_result.time[idx]) - sample_time),
+            )
+            rust_idx = min(
+                range(len(rust_result.time)),
+                key=lambda idx: abs(float(rust_result.time[idx]) - sample_time),
+            )
+            for signal in ("lp_out", "hp_out", "zi_out"):
+                assert rust_result.signals[signal][rust_idx] == pytest.approx(
+                    default_result.signals[signal][default_idx],
+                    rel=0.12,
+                    abs=1e-8,
+                )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_laplace_nd_first_order_lowpass_advances_state(self):
         src = """\
 `include "disciplines.vams"
