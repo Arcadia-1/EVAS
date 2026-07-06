@@ -109,7 +109,7 @@ LINT_RULE_SPECS: Dict[str, RuleSpec] = {
         _rule("EVAS-COMP-E2154", COMPAT_ERROR, "conditional-analog-operator", spectre_ids=("VACOMP-2154",), category="spectre-compat"),
         _rule("EVAS-COMP-E2157", COMPAT_ERROR, "event-body-contribution", spectre_ids=("VACOMP-2157",), category="spectre-compat"),
         _rule("EVAS-COMP-E2446", COMPAT_ERROR, "nonconstant-discipline-range", spectre_ids=("VACOMP-2446",), category="spectre-compat", phase="static-token"),
-        _rule("EVAS-COMP-EKCL", COMPAT_ERROR, "unsupported-conservative-current-kcl", category="evas-compat", oracle_status="evas-specific"),
+        _rule("EVAS-COMP-EKCL", STATIC_WARNING, "conservative-current-kcl-boundary", category="evas-compat", oracle_status="evas-specific"),
         _rule("EVAS-COMP-ESPECTRESTRICT", COMPAT_ERROR, "strict-spectre-rejected-extension", category="spectre-compat", oracle_status="evas-specific"),
         _rule("EVAS-COMP-EUNSUPPORTED", COMPAT_ERROR, "unsupported-function", category="evas-compat", oracle_status="evas-specific"),
         _rule("EVAS-AHDL-W5003", STATIC_WARNING, "transition-missing-rise-time", spectre_ids=("AHDLLINT-5003",)),
