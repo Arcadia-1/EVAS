@@ -12,6 +12,7 @@ import pytest
 from evas.compiler.ast_nodes import BranchAccess, Identifier
 from evas.compiler.parser import parse
 from evas.compiler.preprocessor import preprocess
+from evas.simulator.backend import compile_module
 from evas.simulator.expr_ir import (
     BinaryExprIR,
     BranchAccessIR,
@@ -21,6 +22,8 @@ from evas.simulator.expr_ir import (
     lower_expr,
 )
 from evas.simulator.rust_backend import (
+    BODY_STMT_FILE_GETS,
+    BODY_STMT_FILE_SCANF,
     BODY_STMT_WHILE,
     BODY_TARGET_STATE,
     BodyStmtOp,
@@ -36,6 +39,7 @@ from evas.simulator.stmt_ir import (
     encode_event_body_program,
     lower_stmt,
 )
+from evas.simulator.rust_program import _RustSimSideEffectBuilder
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 PIPELINE_STAGE_VA = (
@@ -275,6 +279,52 @@ endmodule
 
     assert state_values.tolist() == pytest.approx([0.9])
     assert node_values.tolist() == pytest.approx([0.91, 0.9])
+
+
+def test_stmt_ir_rewrites_fgets_sscanf_pair_to_file_scanf():
+    module = parse(
+        """\
+`include "disciplines.vams"
+module file_line_parse();
+    parameter string filename = "config_lines.txt";
+    integer fd;
+    integer parsed;
+    integer mode;
+    string line;
+    analog begin
+        @(initial_step) begin
+            fd = $fopen(filename, "r");
+            $fgets(line, fd);
+            parsed = $sscanf(line, "mode=%d", mode);
+            $fclose(fd);
+        end
+    end
+endmodule
+"""
+    )
+    model = compile_module(module)()
+    initial_body = module.analog_block.body.statements[0].body
+    stmt_ir = lower_stmt(initial_body)
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    side_effects = _RustSimSideEffectBuilder(model)
+
+    program = encode_body_stmt_ops(
+        stmt_ir,
+        bindings,
+        {},
+        side_effects=side_effects,
+    )
+
+    assert isinstance(program, BodyStmtProgram)
+    kinds = [int(op.target_kind) for op in program.stmt_ops]
+    assert BODY_STMT_FILE_SCANF in kinds
+    assert BODY_STMT_FILE_GETS not in kinds
+    assert [effect.kind for effect in side_effects.effects] == [
+        "fopen",
+        "fscanf",
+        "fclose",
+    ]
 
 
 def test_stmt_ir_encoder_rejects_event_body_until_scheduler_owns_ordering():

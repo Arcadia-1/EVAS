@@ -160,6 +160,7 @@ SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
         "$rdist_uniform",
         "$rewind",
         "$rtoi",
+        "$sscanf",
         "$sformat",
         "$simparam",
         "$table_model",
