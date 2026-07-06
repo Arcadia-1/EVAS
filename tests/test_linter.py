@@ -65,7 +65,8 @@ def test_lint_rule_registry_covers_current_diagnostics():
     assert expected_codes == set(LINT_RULE_SPECS)
     assert LINT_RULE_SPECS["EVAS-COMP-E2143"].severity == "compat-error"
     assert LINT_RULE_SPECS["EVAS-AHDL-W5011"].category == "cadence-ahdl"
-    assert LINT_RULE_SPECS["EVAS-COMP-EKCL"].rule == "unsupported-conservative-current-kcl"
+    assert LINT_RULE_SPECS["EVAS-COMP-EKCL"].severity == "static-warning"
+    assert LINT_RULE_SPECS["EVAS-COMP-EKCL"].rule == "conservative-current-kcl-boundary"
     assert LINT_RULE_SPECS["EVAS-COMP-EUNSUPPORTED"].oracle_status == "evas-specific"
     assert LINT_RULE_SPECS["EVAS-COMP-ESPECTRESTRICT"].category == "spectre-compat"
 
@@ -665,7 +666,7 @@ def test_unsupported_random_distribution_is_behavioral_event_tiered():
     assert has_compat_errors(diags)
 
 
-def test_current_contribution_is_kcl_tier_compat_error():
+def test_current_contribution_is_kcl_tier_boundary_warning():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module current_drive(out);
@@ -681,12 +682,13 @@ def test_current_contribution_is_kcl_tier_compat_error():
     diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
 
     assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert diag.severity == "static-warning"
     assert "current contribution I(...) <+ ..." in diag.message
     assert f"support-tier: {CONSERVATIVE_CURRENT_KCL}" in diag.format_text()
-    assert has_compat_errors(diags)
+    assert not has_compat_errors(diags)
 
 
-def test_current_probe_is_kcl_tier_compat_error():
+def test_current_probe_is_kcl_tier_boundary_warning():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module current_probe(inp, out);
@@ -703,11 +705,12 @@ def test_current_probe_is_kcl_tier_compat_error():
     diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
 
     assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert diag.severity == "static-warning"
     assert "current probe I(...)" in diag.message
-    assert has_compat_errors(diags)
+    assert not has_compat_errors(diags)
 
 
-def test_indirect_branch_is_kcl_tier_compat_error():
+def test_indirect_branch_is_kcl_tier_boundary_warning():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module indirect_branch(inp, out);
@@ -724,8 +727,9 @@ def test_indirect_branch_is_kcl_tier_compat_error():
     diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EKCL")
 
     assert diag.support_tier == CONSERVATIVE_CURRENT_KCL
+    assert diag.severity == "static-warning"
     assert "indirect branch equation" in diag.message
-    assert has_compat_errors(diags)
+    assert not has_compat_errors(diags)
 
 
 def test_unsupported_digital_procedural_block_is_ams_digital_tier():

@@ -29,8 +29,8 @@ SUPPORT_TIER_DESCRIPTIONS = {
         "assign, packed vectors, specify/specparam, and connect rules"
     ),
     CONSERVATIVE_CURRENT_KCL: (
-        "current contributions, current probes, indirect branch equations, "
-        "and KCL/MNA topology solving"
+        "selected current contributions, current probes, and indirect branch "
+        "helpers; not general KCL/MNA topology solving"
     ),
     OUTSIDE_CURRENT_SCOPE: "constructs outside the current EVAS support taxonomy",
 }
