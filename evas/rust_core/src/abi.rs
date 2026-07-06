@@ -70,6 +70,16 @@ pub struct EvasRustZiNdOp {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustLaplaceNdOp {
+    pub target_node_id: usize,
+    pub reference_node_id: usize,
+    pub input_node_id: usize,
+    pub gain: f64,
+    pub tau: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvasRustBranchIdtOp {
     pub target_node_id: usize,
     pub reference_node_id: usize,

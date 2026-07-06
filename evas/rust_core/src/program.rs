@@ -234,6 +234,12 @@ fn rust_sim_init_zi_nd_states(zi_nd_ops: &[EvasRustZiNdOp]) -> Result<Vec<RustSi
     Ok(states)
 }
 
+fn rust_sim_init_laplace_nd_states(
+    laplace_nd_ops: &[EvasRustLaplaceNdOp],
+) -> Vec<RustSimBranchIdtState> {
+    vec![RustSimBranchIdtState::new(); laplace_nd_ops.len()]
+}
+
 fn rust_sim_init_branch_idt_states(
     branch_idt_ops: &[EvasRustBranchIdtOp],
 ) -> Vec<RustSimBranchIdtState> {
@@ -505,6 +511,59 @@ fn rust_sim_step_indirect_branch_ode_ops(
     Ok(())
 }
 
+fn rust_sim_step_laplace_nd_ops(
+    laplace_nd_ops: &[EvasRustLaplaceNdOp],
+    node_values: &mut [f64],
+    states: &mut [RustSimBranchIdtState],
+    time: f64,
+) -> Result<(), i32> {
+    if laplace_nd_ops.len() != states.len() {
+        return Err(-892);
+    }
+    for (idx, op) in laplace_nd_ops.iter().enumerate() {
+        if op.target_node_id >= node_values.len() || op.input_node_id >= node_values.len() {
+            return Err(-893);
+        }
+        if op.reference_node_id != usize::MAX && op.reference_node_id >= node_values.len() {
+            return Err(-894);
+        }
+        if !op.tau.is_finite() || op.tau <= 0.0 || !op.gain.is_finite() {
+            return Err(-895);
+        }
+        let input = node_values[op.input_node_id];
+        let target = op.gain * input;
+        let state = &mut states[idx];
+        let output = if !state.has_last_eval {
+            state.last_t = time;
+            state.last_x = target;
+            state.last_eval_t = time;
+            state.has_last_eval = true;
+            target
+        } else if time == state.last_eval_t {
+            state.last_x
+        } else {
+            let dt = time - state.last_t;
+            if dt > 0.0 {
+                let alpha = 1.0 - (-dt / op.tau).exp();
+                state.last_x += (target - state.last_x) * alpha;
+                state.last_t = time;
+            } else if dt < 0.0 {
+                state.last_x = target;
+                state.last_t = time;
+            }
+            state.last_eval_t = time;
+            state.last_x
+        };
+        let reference = if op.reference_node_id == usize::MAX {
+            0.0
+        } else {
+            node_values[op.reference_node_id]
+        };
+        node_values[op.target_node_id] = reference + output;
+    }
+    Ok(())
+}
+
 fn rust_sim_next_zi_nd_breakpoint_after(
     zi_nd_ops: &[EvasRustZiNdOp],
     states: &[RustSimZiNdState],
@@ -750,6 +809,7 @@ pub fn rust_sim_source_linear_record_trace(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
     zi_nd_ops: &[EvasRustZiNdOp],
+    laplace_nd_ops: &[EvasRustLaplaceNdOp],
     branch_idt_ops: &[EvasRustBranchIdtOp],
     branch_ddt_ops: &[EvasRustBranchDdtOp],
     indirect_branch_ode_ops: &[EvasRustIndirectBranchOdeOp],
@@ -800,6 +860,7 @@ pub fn rust_sim_source_linear_record_trace(
         f64::INFINITY
     };
     let mut zi_nd_states = rust_sim_init_zi_nd_states(zi_nd_ops)?;
+    let mut laplace_nd_states = rust_sim_init_laplace_nd_states(laplace_nd_ops);
     let mut branch_idt_states = rust_sim_init_branch_idt_states(branch_idt_ops);
     let mut branch_ddt_states = rust_sim_init_branch_ddt_states(branch_ddt_ops);
     let mut indirect_branch_ode_states =
@@ -828,6 +889,7 @@ pub fn rust_sim_source_linear_record_trace(
         0.0,
     )?;
     rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, 0.0)?;
+    rust_sim_step_laplace_nd_ops(laplace_nd_ops, node_values, &mut laplace_nd_states, 0.0)?;
     evaluate_static_linear_ops(
         linear_ops,
         linear_terms,
@@ -917,6 +979,7 @@ pub fn rust_sim_source_linear_record_trace(
             time,
         )?;
         rust_sim_step_zi_nd_ops(zi_nd_ops, source_data, node_values, &mut zi_nd_states, time)?;
+        rust_sim_step_laplace_nd_ops(laplace_nd_ops, node_values, &mut laplace_nd_states, time)?;
         evaluate_static_linear_ops(
             linear_ops,
             linear_terms,
