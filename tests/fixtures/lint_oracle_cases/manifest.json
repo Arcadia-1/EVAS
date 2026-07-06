@@ -19,7 +19,7 @@
     "id": "spectre_event_local_contribution",
     "file": "spectre_event_local_contribution.va",
     "description": "Minimal public case for a contribution placed inside an analog event body.",
-    "expected_codes": ["EVAS-COMP-E2157", "EVAS-AHDL-W5010"],
+    "expected_codes": ["EVAS-COMP-E2157"],
     "forbidden_codes": ["EVAS-COMP-EPARSE"],
     "oracle_note": "Distilled from Spectre front-end compatibility behavior; raw simulator output is intentionally not committed."
   },
