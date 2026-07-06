@@ -1573,7 +1573,7 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     """Return True for ordered non-event state writes that Rust can own per step."""
 
     if isinstance(stmt_ir, AssignmentIR):
-        return True
+        return not _expr_contains_transition_or_slew_call(stmt_ir.value)
     if isinstance(stmt_ir, ContributionIR):
         return not _expr_contains_transition_or_slew_call(stmt_ir.expr)
     if isinstance(stmt_ir, IfStatementIR):
@@ -1605,6 +1605,57 @@ def _is_continuous_body_stmt(stmt_ir: object) -> bool:
     if isinstance(stmt_ir, BlockIR):
         return all(_is_continuous_body_stmt(child) for child in stmt_ir.statements)
     return False
+
+
+def _transition_temp_assignment_name(stmt_ir: object) -> Optional[str]:
+    if not isinstance(stmt_ir, AssignmentIR):
+        return None
+    target = stmt_ir.target
+    if not isinstance(target, IdentifierIR):
+        return None
+    if not _expr_contains_transition_call(stmt_ir.value):
+        return None
+    return target.name
+
+
+def _contribution_reads_identifier(stmt_ir: object, name: str) -> bool:
+    return (
+        isinstance(stmt_ir, ContributionIR)
+        and isinstance(stmt_ir.expr, IdentifierIR)
+        and stmt_ir.expr.name == name
+    )
+
+
+def _coalesce_transition_temp_contribution_statements(
+    statements: Tuple[object, ...],
+) -> Tuple[object, ...]:
+    coalesced: list[object] = []
+    idx = 0
+    while idx < len(statements):
+        stmt = statements[idx]
+        next_stmt = statements[idx + 1] if idx + 1 < len(statements) else None
+        temp_name = _transition_temp_assignment_name(stmt)
+        if (
+            temp_name is not None
+            and next_stmt is not None
+            and _contribution_reads_identifier(next_stmt, temp_name)
+        ):
+            coalesced.append(BlockIR((stmt, next_stmt)))
+            idx += 2
+            continue
+        coalesced.append(stmt)
+        idx += 1
+    return tuple(coalesced)
+
+
+def _is_transition_temp_contribution_block(stmt_ir: object) -> bool:
+    if not isinstance(stmt_ir, BlockIR) or len(stmt_ir.statements) != 2:
+        return False
+    temp_name = _transition_temp_assignment_name(stmt_ir.statements[0])
+    return temp_name is not None and _contribution_reads_identifier(
+        stmt_ir.statements[1],
+        temp_name,
+    )
 
 
 def _is_branch_ddt_contribution_stmt(stmt_ir: object) -> bool:
@@ -1990,6 +2041,8 @@ def _stmt_has_rustsim_event_transition_candidate(stmt_ir: object) -> bool:
         )
     if isinstance(stmt_ir, EventStatementIR):
         return True
+    if isinstance(stmt_ir, AssignmentIR):
+        return _expr_contains_transition_or_slew_call(stmt_ir.value)
     if isinstance(stmt_ir, ContributionIR):
         return _expr_contains_transition_or_slew_call(stmt_ir.expr)
     if isinstance(stmt_ir, IfStatementIR):
@@ -3885,8 +3938,104 @@ def _convert_event_transition_ops(
         )
         converted_always_bodies += 1
 
-    for stmt in body_ir.statements:
+    def append_transition_program(transition_program: Any) -> None:
+        nonlocal converted_transitions, seen_transition
+        for idx, output_slot in enumerate(transition_program.output_node_slots):
+            expr_base = idx * 6
+            if expr_base + 5 >= len(transition_program.expr_segments):
+                reasons.append(f"{prefix}:transition_expr_segment_mismatch")
+                continue
+            target_start, target_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            delay_start, delay_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base + 1],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            rise_start, rise_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base + 2],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            fall_start, fall_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base + 3],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            output_bias_start, output_bias_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base + 4],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            output_scale_start, output_scale_count = _append_expr_segment(
+                body_expr_ops,
+                transition_program.expr_segments[expr_base + 5],
+                node_slot_to_global=node_slot_to_global,
+                state_slot_to_global=state_slot_to_global,
+                param_slot_to_global=param_slot_to_global,
+            )
+            reference_slot = transition_program.reference_node_slots[idx]
+            transitions.append(
+                RustSimTransition(
+                    transition_id=len(transitions),
+                    output_node_id=int(
+                        node_slot_to_global.get(int(output_slot), output_slot)
+                    ),
+                    reference_node_id=(
+                        None
+                        if reference_slot is None
+                        else int(
+                            node_slot_to_global.get(int(reference_slot), reference_slot)
+                        )
+                    ),
+                    target_expr_start=target_start,
+                    target_expr_count=target_count,
+                    delay_expr_start=delay_start,
+                    delay_expr_count=delay_count,
+                    rise_expr_start=rise_start,
+                    rise_expr_count=rise_count,
+                    fall_expr_start=fall_start,
+                    fall_expr_count=fall_count,
+                    output_bias_expr_start=output_bias_start,
+                    output_bias_expr_count=output_bias_count,
+                    output_scale_expr_start=output_scale_start,
+                    output_scale_expr_count=output_scale_count,
+                    default_transition=float(
+                        getattr(model, "default_transition", 1.0e-12)
+                        or 1.0e-12
+                    ),
+                )
+            )
+            converted_transitions += 1
+            seen_transition = True
+
+    for stmt in _coalesce_transition_temp_contribution_statements(body_ir.statements):
         if _is_branch_ddt_contribution_stmt(stmt):
+            continue
+        if _is_transition_temp_contribution_block(stmt):
+            flush_continuous_body()
+            transition_program = encode_transition_contribution_program(
+                stmt,
+                bindings,
+                local_node_slots,
+            )
+            if transition_program is None:
+                reasons.append(f"{prefix}:transition_temp_contribution_not_lowered")
+                continue
+            append_transition_program(transition_program)
             continue
         if _is_continuous_body_stmt(stmt):
             if seen_transition:
@@ -4103,83 +4252,7 @@ def _convert_event_transition_ops(
                     continue
                 reasons.append(f"{prefix}:continuous_contribution_not_lowered")
                 continue
-            for idx, output_slot in enumerate(transition_program.output_node_slots):
-                expr_base = idx * 6
-                if expr_base + 5 >= len(transition_program.expr_segments):
-                    reasons.append(f"{prefix}:transition_expr_segment_mismatch")
-                    continue
-                target_start, target_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                delay_start, delay_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base + 1],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                rise_start, rise_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base + 2],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                fall_start, fall_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base + 3],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                output_bias_start, output_bias_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base + 4],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                output_scale_start, output_scale_count = _append_expr_segment(
-                    body_expr_ops,
-                    transition_program.expr_segments[expr_base + 5],
-                    node_slot_to_global=node_slot_to_global,
-                    state_slot_to_global=state_slot_to_global,
-                    param_slot_to_global=param_slot_to_global,
-                )
-                reference_slot = transition_program.reference_node_slots[idx]
-                transitions.append(
-                    RustSimTransition(
-                        transition_id=len(transitions),
-                        output_node_id=int(node_slot_to_global.get(int(output_slot), output_slot)),
-                        reference_node_id=(
-                            None
-                            if reference_slot is None
-                            else int(node_slot_to_global.get(int(reference_slot), reference_slot))
-                        ),
-                        target_expr_start=target_start,
-                        target_expr_count=target_count,
-                        delay_expr_start=delay_start,
-                        delay_expr_count=delay_count,
-                        rise_expr_start=rise_start,
-                        rise_expr_count=rise_count,
-                        fall_expr_start=fall_start,
-                        fall_expr_count=fall_count,
-                        output_bias_expr_start=output_bias_start,
-                        output_bias_expr_count=output_bias_count,
-                        output_scale_expr_start=output_scale_start,
-                        output_scale_expr_count=output_scale_count,
-                        default_transition=float(
-                            getattr(model, "default_transition", 1.0e-12)
-                            or 1.0e-12
-                        ),
-                    )
-                )
-                converted_transitions += 1
-                seen_transition = True
+            append_transition_program(transition_program)
             continue
 
     flush_continuous_body()
