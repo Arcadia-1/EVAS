@@ -92,6 +92,7 @@ class CompiledModel:
     _evaluate_ir_static_linear_non_event_ops = ()
     _evaluate_ir_static_linear_rejections = ()
     _evaluate_ir_sampled_zi_nd_ops = ()
+    _evaluate_ir_laplace_nd_ops = ()
     _transition_target_ir_ops = ()
     _ordered_transition_segment_ir_ops = ((), ())
     _event_lfsr_shift_ir_ops = ()
@@ -6036,6 +6037,11 @@ class _ModuleCompiler:
             if mod.analog_block
             else ()
         )
+        evaluate_ir_laplace_nd_ops = (
+            self._collect_evaluate_ir_laplace_nd_ops(mod.analog_block.body)
+            if mod.analog_block
+            else ()
+        )
         transition_target_ir_ops = (
             self._collect_transition_target_ir_ops(mod.analog_block.body)
             if mod.analog_block
@@ -6480,6 +6486,7 @@ class _ModuleCompiler:
             evaluate_ir_static_linear_rejections
         )
         cls._evaluate_ir_sampled_zi_nd_ops = tuple(evaluate_ir_sampled_zi_nd_ops)
+        cls._evaluate_ir_laplace_nd_ops = tuple(evaluate_ir_laplace_nd_ops)
         cls._transition_target_ir_ops = tuple(transition_target_ir_ops)
         cls._transition_target_probe_count = int(transition_target_probe_count)
         cls._ordered_transition_segment_ir_ops = ordered_transition_segment_ir_ops
@@ -7542,6 +7549,81 @@ class _ModuleCompiler:
         if value is None:
             return None
         return (value,)
+
+    def _collect_evaluate_ir_laplace_nd_ops(
+        self,
+        stmt,
+    ) -> Tuple[Tuple[str, Optional[str], str, Any, Any, Any], ...]:
+        """Collect simple first-order continuous laplace_nd voltage contributions."""
+
+        ops: List[Tuple[str, Optional[str], str, Any, Any, Any]] = []
+        if not self._collect_evaluate_ir_laplace_nd_ops_from_stmt(stmt, ops):
+            return ()
+        return tuple(ops)
+
+    def _collect_evaluate_ir_laplace_nd_ops_from_stmt(
+        self,
+        stmt,
+        ops: List[Tuple[str, Optional[str], str, Any, Any, Any]],
+    ) -> bool:
+        if stmt is None:
+            return True
+
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                if not self._collect_evaluate_ir_laplace_nd_ops_from_stmt(child, ops):
+                    return False
+            return True
+
+        if isinstance(stmt, EventStatement):
+            return self._evaluate_ir_event_is_evaluate_noop(stmt.event)
+
+        if not isinstance(stmt, Contribution):
+            return False
+
+        branch = stmt.branch
+        if (
+            branch.access_type != "V"
+            or branch.node1_index is not None
+            or branch.node1_index2 is not None
+            or branch.node2_index is not None
+            or branch.node2_index2 is not None
+        ):
+            return False
+
+        call = stmt.expr
+        if not isinstance(call, FunctionCall) or str(call.name).lower() != "laplace_nd":
+            return False
+        if len(call.args) < 3:
+            return False
+
+        input_branch = call.args[0]
+        if (
+            not isinstance(input_branch, BranchAccess)
+            or input_branch.access_type != "V"
+            or input_branch.node2 is not None
+            or input_branch.node1_index is not None
+            or input_branch.node1_index2 is not None
+            or input_branch.node2_index is not None
+            or input_branch.node2_index2 is not None
+        ):
+            return False
+
+        num = self._rust_sampled_zi_nd_coeff_vector(call.args[1])
+        den = self._rust_sampled_zi_nd_coeff_vector(call.args[2])
+        if num is None or den is None or len(num) != 1 or len(den) != 2:
+            return False
+        ops.append(
+            (
+                branch.node1,
+                branch.node2,
+                input_branch.node1,
+                num[0],
+                den[0],
+                den[1],
+            )
+        )
+        return True
 
     def _static_float_or_none(self, value) -> Optional[float]:
         try:

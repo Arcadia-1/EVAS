@@ -76,6 +76,16 @@ class RustZiNdOp(ctypes.Structure):
     ]
 
 
+class RustLaplaceNdOp(ctypes.Structure):
+    _fields_ = [
+        ("target_node_id", ctypes.c_size_t),
+        ("reference_node_id", ctypes.c_size_t),
+        ("input_node_id", ctypes.c_size_t),
+        ("gain", ctypes.c_double),
+        ("tau", ctypes.c_double),
+    ]
+
+
 class RustBranchIdtOp(ctypes.Structure):
     _fields_ = [
         ("target_node_id", ctypes.c_size_t),
@@ -507,6 +517,20 @@ class RustSimSourceRecordProgram:
             )
         zi_nd_array_type = RustZiNdOp * len(zi_nd_specs)
         self._c_zi_nd_ops = zi_nd_array_type(*zi_nd_specs)
+        laplace_nd_specs = []
+        for op in tuple(getattr(program, "laplace_nd_ops", ()) or ()):
+            reference_node_id = getattr(op, "reference_node_id", None)
+            laplace_nd_specs.append(
+                RustLaplaceNdOp(
+                    int(getattr(op, "target_node_id", 0)),
+                    _usize_max() if reference_node_id is None else int(reference_node_id),
+                    int(getattr(op, "input_node_id", 0)),
+                    float(getattr(op, "gain", 1.0)),
+                    float(getattr(op, "tau", 0.0)),
+                )
+            )
+        laplace_nd_array_type = RustLaplaceNdOp * len(laplace_nd_specs)
+        self._c_laplace_nd_ops = laplace_nd_array_type(*laplace_nd_specs)
         branch_idt_specs = []
         for op in tuple(getattr(program, "branch_idt_ops", ()) or ()):
             reference_node_id = getattr(op, "reference_node_id", None)
@@ -797,6 +821,10 @@ class RustSimSourceRecordProgram:
         return len(self._c_zi_nd_ops)
 
     @property
+    def laplace_nd_count(self) -> int:
+        return len(self._c_laplace_nd_ops)
+
+    @property
     def branch_idt_count(self) -> int:
         return len(self._c_branch_idt_ops)
 
@@ -843,6 +871,10 @@ class RustSimSourceRecordProgram:
     @property
     def zi_nd_ptr(self):
         return self._c_zi_nd_ops
+
+    @property
+    def laplace_nd_ptr(self):
+        return self._c_laplace_nd_ops
 
     @property
     def branch_idt_ptr(self):
@@ -2051,6 +2083,8 @@ class RustBackend:
                 ctypes.c_size_t,
                 ctypes.POINTER(RustZiNdOp),
                 ctypes.c_size_t,
+                ctypes.POINTER(RustLaplaceNdOp),
+                ctypes.c_size_t,
                 ctypes.POINTER(RustBranchIdtOp),
                 ctypes.c_size_t,
                 ctypes.POINTER(RustBranchDdtOp),
@@ -2943,6 +2977,7 @@ class RustBackend:
             program.continuous_linear_count > 0
             or program.state_count > 0
             or program.zi_nd_count > 0
+            or program.laplace_nd_count > 0
             or program.branch_idt_count > 0
             or program.branch_ddt_count > 0
             or program.indirect_branch_ode_count > 0
@@ -2950,6 +2985,10 @@ class RustBackend:
         if use_event_transition_abi and program.zi_nd_count > 0:
             raise RustBackendError(
                 "RustSim zi_nd sampled-data ops are not supported with event+transition ABI"
+            )
+        if use_event_transition_abi and program.laplace_nd_count > 0:
+            raise RustBackendError(
+                "RustSim laplace_nd continuous ops are not supported with event+transition ABI"
             )
         if use_event_transition_abi and program.branch_idt_count > 0:
             raise RustBackendError(
@@ -3091,6 +3130,8 @@ class RustBackend:
                 len(program.source_data),
                 program.zi_nd_ptr,
                 int(program.zi_nd_count),
+                program.laplace_nd_ptr,
+                int(program.laplace_nd_count),
                 program.branch_idt_ptr,
                 int(program.branch_idt_count),
                 program.branch_ddt_ptr,

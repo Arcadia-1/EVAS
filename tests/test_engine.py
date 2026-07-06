@@ -8558,6 +8558,46 @@ endmodule
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(1.0 - math.exp(-1.0))
 
+    def test_rust_full_model_continuous_laplace_nd_matches_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rust_laplace_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ laplace_nd(V(vin), {1.0}, {1.0, 2n});
+    end
+endmodule
+"""
+        traces = []
+        for use_rust in (False, True):
+            ModelCls = compile_module(parse(src))
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source(
+                "vin",
+                pwl([0.0, 1.0e-9, 1.1e-9, 8.0e-9], [0.0, 0.0, 1.0, 1.0]),
+            )
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=8.0e-9,
+                tstep=0.2e-9,
+                record_step=0.4e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            if use_rust:
+                assert sim._perf_stats["rust_sim_program_enabled"] == 1
+                assert sim._perf_stats["rust_full_model_required_failures"] == 0
+            traces.append(result.signals["out"].tolist())
+
+        assert traces[1] == pytest.approx(traces[0], rel=1e-8, abs=1e-8)
+        assert traces[1][-1] > 0.9
+
     def test_laplace_np_first_real_pole_advances_state(self):
         src = """\
 `include "disciplines.vams"

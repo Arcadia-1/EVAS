@@ -294,6 +294,17 @@ class RustSimZiNdOp:
 
 
 @dataclass(frozen=True)
+class RustSimLaplaceNdOp:
+    """A first-order continuous laplace_nd voltage write executed by Rust."""
+
+    target_node_id: int
+    reference_node_id: Optional[int]
+    input_node_id: int
+    gain: float
+    tau: float
+
+
+@dataclass(frozen=True)
 class RustSimBranchIdtOp:
     """A branch-current idt() voltage contribution executed by Rust."""
 
@@ -417,6 +428,7 @@ class RustSimProgram:
     side_effects: Tuple[RustSimSideEffect, ...] = ()
     continuous_linear_ops: Tuple[RustSimLinearOp, ...] = ()
     zi_nd_ops: Tuple[RustSimZiNdOp, ...] = ()
+    laplace_nd_ops: Tuple[RustSimLaplaceNdOp, ...] = ()
     branch_idt_ops: Tuple[RustSimBranchIdtOp, ...] = ()
     branch_ddt_ops: Tuple[RustSimBranchDdtOp, ...] = ()
     indirect_branch_ode_ops: Tuple[RustSimIndirectBranchOdeOp, ...] = ()
@@ -2257,6 +2269,68 @@ def _convert_sampled_zi_nd_ops(
                 den_start=den_start,
                 den_count=len(den_values),
                 interval=float(interval),
+            )
+        )
+
+    return tuple(converted), tuple(reasons)
+
+
+def _convert_laplace_nd_ops(
+    *,
+    model: Any,
+    model_index: int,
+    node_ids: dict[str, int],
+    nodes: list[RustSimNode],
+) -> tuple[Tuple[RustSimLaplaceNdOp, ...], Tuple[str, ...]]:
+    model_cls = getattr(model, "__class__", type(model))
+    raw_ops = tuple(getattr(model_cls, "_evaluate_ir_laplace_nd_ops", ()) or ())
+    if not raw_ops:
+        return (), ()
+
+    converted: list[RustSimLaplaceNdOp] = []
+    reasons: list[str] = []
+    prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
+    for op_index, raw_op in enumerate(raw_ops):
+        if len(raw_op) != 6:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:malformed_ir")
+            continue
+        target_name, reference_name, input_name, raw_n0, raw_d0, raw_d1 = raw_op
+        target_id = _add_node(_external_node(model, str(target_name)), node_ids, nodes)
+        reference_id = (
+            None
+            if reference_name is None
+            else _add_node(_external_node(model, str(reference_name)), node_ids, nodes)
+        )
+        input_id = _add_node(_external_node(model, str(input_name)), node_ids, nodes)
+
+        n0, reason = _scalar(model, raw_n0)
+        if reason is not None or n0 is None:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:num0:{reason}")
+            continue
+        d0, reason = _scalar(model, raw_d0)
+        if reason is not None or d0 is None:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:den0:{reason}")
+            continue
+        d1, reason = _scalar(model, raw_d1)
+        if reason is not None or d1 is None:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:den1:{reason}")
+            continue
+        if d0 == 0.0 or d1 == 0.0:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:zero_denominator")
+            continue
+        gain = float(n0) / float(d0)
+        tau = abs(float(d1) / float(d0))
+        if not math.isfinite(gain) or not math.isfinite(tau) or tau <= 0.0:
+            reasons.append(f"{prefix}:laplace_nd:{op_index}:invalid_gain_tau")
+            continue
+
+        converted.append(
+            RustSimLaplaceNdOp(
+                target_node_id=target_id,
+                reference_node_id=reference_id,
+                input_node_id=input_id,
+                gain=gain,
+                tau=tau,
             )
         )
 
@@ -4189,6 +4263,7 @@ def build_source_record_rust_program(
     rust_sources: list[RustSimSource] = []
     continuous_linear_ops: list[RustSimLinearOp] = []
     zi_nd_ops: list[RustSimZiNdOp] = []
+    laplace_nd_ops: list[RustSimLaplaceNdOp] = []
     branch_idt_ops: list[RustSimBranchIdtOp] = []
     branch_ddt_ops: list[RustSimBranchDdtOp] = []
     indirect_branch_ode_ops: list[RustSimIndirectBranchOdeOp] = []
@@ -4254,6 +4329,9 @@ def build_source_record_rust_program(
         sampled_zi_nd_raw_ops = tuple(
             getattr(model_cls, "_evaluate_ir_sampled_zi_nd_ops", ()) or ()
         )
+        laplace_nd_raw_ops = tuple(
+            getattr(model_cls, "_evaluate_ir_laplace_nd_ops", ()) or ()
+        )
         has_branch_current_idt_ops = _model_has_branch_current_idt_ops(model_cls)
         has_branch_current_ddt_ops = _model_has_branch_current_ddt_ops(model_cls)
         has_indirect_branch_ode_ops = _model_has_indirect_branch_ode_ops(model_cls)
@@ -4262,6 +4340,7 @@ def build_source_record_rust_program(
             and not has_branch_current_ddt_ops
             and not has_indirect_branch_ode_ops
             and not sampled_zi_nd_raw_ops
+            and not laplace_nd_raw_ops
             and _model_has_rustsim_continuous_body_candidate(model_cls)
         )
         has_event_transition_ir = bool(
@@ -4279,6 +4358,7 @@ def build_source_record_rust_program(
         has_rustsim_program_ir = bool(
             has_event_transition_ir
             or sampled_zi_nd_raw_ops
+            or laplace_nd_raw_ops
             or has_branch_current_idt_ops
             or has_branch_current_ddt_ops
             or has_indirect_branch_ode_ops
@@ -4327,6 +4407,15 @@ def build_source_record_rust_program(
         if model_zi_reasons:
             reasons.extend(model_zi_reasons)
         zi_nd_ops.extend(model_zi_nd_ops)
+        model_laplace_nd_ops, model_laplace_nd_reasons = _convert_laplace_nd_ops(
+            model=model,
+            model_index=model_index,
+            node_ids=node_ids,
+            nodes=nodes,
+        )
+        if model_laplace_nd_reasons:
+            reasons.extend(model_laplace_nd_reasons)
+        laplace_nd_ops.extend(model_laplace_nd_ops)
         model_branch_idt_ops, model_branch_idt_reasons = _convert_branch_current_idt_ops(
             model=model,
             model_index=model_index,
@@ -4420,6 +4509,7 @@ def build_source_record_rust_program(
             side_effects=tuple(side_effects),
             continuous_linear_ops=tuple(continuous_linear_ops),
             zi_nd_ops=tuple(zi_nd_ops),
+            laplace_nd_ops=tuple(laplace_nd_ops),
             branch_idt_ops=tuple(branch_idt_ops),
             branch_ddt_ops=tuple(branch_ddt_ops),
             indirect_branch_ode_ops=tuple(indirect_branch_ode_ops),
