@@ -182,6 +182,55 @@ def test_stmt_ir_encodes_ordered_state_and_output_writes_to_rust_batch():
     assert node_values.tolist() == pytest.approx([0.25, 0.6])
 
 
+def test_stmt_ir_unrolls_dynamic_state_array_read_write_to_rust_batch():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module dynamic_array_sample;
+    integer idx = 0;
+    integer src = 0;
+    integer arr[0:3];
+    integer out = 0;
+    analog begin
+        arr[idx] = src;
+        out = arr[idx];
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body)
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    idx_binding = bindings.resolve("idx")
+    src_binding = bindings.resolve("src")
+    out_binding = bindings.resolve("out")
+    arr2_binding = bindings.resolve("arr[2]")
+    assert idx_binding is not None
+    assert src_binding is not None
+    assert out_binding is not None
+    assert arr2_binding is not None
+    program = encode_body_stmt_ops(stmt_ir, bindings, {})
+    assert isinstance(program, BodyStmtProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    batch = backend.make_body_ir_batch(
+        stmt_ops=program.stmt_ops,
+        expr_ops=program.expr_ops,
+    )
+    max_slot = max(binding.slot for binding in bindings.bindings)
+    node_values = array("d")
+    state_values = array("d", [0.0] * (max_slot + 1))
+    param_values = array("d")
+
+    state_values[idx_binding.slot] = 2.0
+    state_values[src_binding.slot] = 7.0
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+
+    assert state_values[arr2_binding.slot] == pytest.approx(7.0)
+    assert state_values[out_binding.slot] == pytest.approx(7.0)
+
+
 def test_stmt_ir_encodes_reduction_unary_ops_to_rust_batch():
     _build_rust_core()
     module = parse(
