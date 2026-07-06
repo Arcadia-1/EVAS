@@ -147,7 +147,7 @@ LINT_RULE_SPECS: Dict[str, RuleSpec] = {
         _rule("EVAS-AHDL-W5013", STATIC_WARNING, "access-function-exact-equality", spectre_ids=("AHDLLINT-5013",)),
         _rule("EVAS-AHDL-W5014", STATIC_WARNING, "floor-ceil-contribution", spectre_ids=("AHDLLINT-5014",)),
         _rule("EVAS-AHDL-W5017", STATIC_WARNING, "electrical-gnd-name", spectre_ids=("AHDLLINT-5017",)),
-        _rule("EVAS-AHDL-W5018", STATIC_WARNING, "discrete-function-argument", spectre_ids=("AHDLLINT-5018",)),
+        _rule("EVAS-AHDL-W5018", STATIC_WARNING, "discrete-function-argument", spectre_ids=("AHDLLINT-5018", "AHDLLINT-8011")),
         _rule("EVAS-AHDL-W5023", STATIC_WARNING, "implicit-real-to-integer-conversion", spectre_ids=("AHDLLINT-5023",)),
         _rule("EVAS-AHDL-W5024", STATIC_WARNING, "stop-finish-in-loop", spectre_ids=("AHDLLINT-5024",)),
         _rule("EVAS-AHDL-W8007", DYNAMIC_WARNING, "conditional-timer", spectre_ids=("AHDLLINT-8007",), phase="static-scheduling"),
@@ -396,6 +396,15 @@ def _lint_module(
         diagnostics.extend(_lint_strict_spectre_module(module, filename))
     discrete_vars = set(integer_vars)
     if module.analog_block is not None:
+        discontinuous_contribution_vars: Set[str] = set()
+        for _ in range(8):
+            newly_discontinuous = _assigned_from_ahdllint_5008_expr(
+                module.analog_block.body,
+                discontinuous_contribution_vars,
+            )
+            if newly_discontinuous.issubset(discontinuous_contribution_vars):
+                break
+            discontinuous_contribution_vars.update(newly_discontinuous)
         discrete_vars.update(_assigned_in_events(module.analog_block.body))
         for _ in range(8):
             newly_discrete = _assigned_from_discrete_expr(
@@ -427,6 +436,7 @@ def _lint_module(
             user_function_names,
             genvar_names,
             symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=0,
             in_event=False,
             loop_depth=0,
@@ -444,6 +454,7 @@ def _lint_module(
             user_function_names,
             genvar_names,
             symbol_types,
+            set(),
             conditional_depth=0,
             in_event=False,
             loop_depth=0,
@@ -460,6 +471,7 @@ def _lint_module(
             user_function_names,
             genvar_names,
             symbol_types,
+            set(),
             conditional_depth=0,
             in_event=False,
             loop_depth=0,
@@ -1108,6 +1120,7 @@ def _lint_statement(
     user_function_names: Set[str],
     genvar_names: Set[str],
     symbol_types: Dict[str, va_ast.ParamType],
+    discontinuous_contribution_vars: Set[str],
     *,
     conditional_depth: int,
     in_event: bool,
@@ -1121,6 +1134,7 @@ def _lint_statement(
                 child, diagnostics, filename, module, min_transition,
                 discrete_vars, continuous_vars, user_function_names, genvar_names,
                 symbol_types,
+                discontinuous_contribution_vars,
                 conditional_depth=conditional_depth, in_event=in_event,
                 loop_depth=loop_depth,
             )
@@ -1166,7 +1180,7 @@ def _lint_statement(
             )
         if (
             not _expr_has_call(stmt.expr, "transition")
-            and _expr_has_discrete_behavior(stmt.expr, discrete_vars)
+            and _expr_triggers_ahdllint_5008(stmt.expr, discontinuous_contribution_vars)
         ):
             diagnostics.append(
                 _diag(
@@ -1255,6 +1269,7 @@ def _lint_statement(
             user_function_names,
             genvar_names,
             symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth + 1,
             in_event=False if event_is_initial_step else True,
             loop_depth=loop_depth,
@@ -1270,12 +1285,14 @@ def _lint_statement(
         _lint_statement(
             stmt.then_body, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.else_body, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth,
         )
@@ -1290,6 +1307,7 @@ def _lint_statement(
         _lint_statement(
             stmt.init, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth, in_event=in_event,
             loop_depth=loop_depth,
         )
@@ -1301,12 +1319,14 @@ def _lint_statement(
         _lint_statement(
             stmt.update, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth, in_event=in_event,
             loop_depth=loop_depth,
         )
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=body_conditional_depth, in_event=in_event,
             loop_depth=body_loop_depth,
         )
@@ -1321,6 +1341,7 @@ def _lint_statement(
         _lint_statement(
             stmt.body, diagnostics, filename, module, min_transition,
             discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+            discontinuous_contribution_vars,
             conditional_depth=conditional_depth + 1, in_event=in_event,
             loop_depth=loop_depth + 1,
         )
@@ -1353,6 +1374,7 @@ def _lint_statement(
             _lint_statement(
                 item.body, diagnostics, filename, module, min_transition,
                 discrete_vars, continuous_vars, user_function_names, genvar_names, symbol_types,
+                discontinuous_contribution_vars,
                 conditional_depth=conditional_depth + 1, in_event=in_event,
                 loop_depth=loop_depth,
             )
@@ -1601,16 +1623,16 @@ def _lint_expr(
                     node=expr,
                 )
             )
-        if name in _DISCRETE_ARGUMENT_FUNCTIONS and any(
-            _expr_has_discrete_behavior(arg, discrete_vars) for arg in expr.args
+        if name == "slew" and any(
+            _expr_has_integer_state_reference(arg, symbol_types) for arg in expr.args
         ):
             diagnostics.append(
                 _diag(
                     code="EVAS-AHDL-W5018",
                     message=(
-                        f"{expr.name}() receives a discrete-valued argument; "
-                        "Cadence AHDL lint flags discrete values inside "
-                        "continuous function expressions"
+                        f"{expr.name}() receives an integer/state argument; "
+                        "Cadence AHDL lint flags this discrete value inside "
+                        "the slew expression"
                     ),
                     file=filename,
                     module=module,
@@ -1835,6 +1857,101 @@ def _assigned_from_discrete_expr(
     elif isinstance(stmt, va_ast.CaseStatement):
         for item in stmt.items:
             names.update(_assigned_from_discrete_expr(item.body, discrete_vars))
+    return names
+
+
+def _assigned_from_ahdllint_5008_expr(
+    stmt: va_ast.Statement,
+    discontinuous_vars: Set[str],
+    *,
+    in_event: bool = False,
+) -> Set[str]:
+    names: Set[str] = set()
+    if stmt is None:
+        return names
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            names.update(
+                _assigned_from_ahdllint_5008_expr(
+                    child,
+                    discontinuous_vars,
+                    in_event=in_event,
+                )
+            )
+    elif isinstance(stmt, va_ast.EventStatement):
+        event_is_initial_step = (
+            isinstance(stmt.event, va_ast.EventExpr)
+            and stmt.event.event_type == va_ast.EventType.INITIAL_STEP
+        )
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.body,
+                discontinuous_vars,
+                in_event=False if event_is_initial_step else True,
+            )
+        )
+    elif isinstance(stmt, va_ast.Assignment):
+        target = _assignment_target_name(stmt)
+        if (
+            target
+            and not in_event
+            and _expr_triggers_ahdllint_5008(stmt.value, discontinuous_vars)
+        ):
+            names.add(target)
+    elif isinstance(stmt, va_ast.IfStatement):
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.then_body,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.else_body,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.ForStatement):
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.init,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.update,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.body,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.WhileStatement):
+        names.update(
+            _assigned_from_ahdllint_5008_expr(
+                stmt.body,
+                discontinuous_vars,
+                in_event=in_event,
+            )
+        )
+    elif isinstance(stmt, va_ast.CaseStatement):
+        for item in stmt.items:
+            names.update(
+                _assigned_from_ahdllint_5008_expr(
+                    item.body,
+                    discontinuous_vars,
+                    in_event=in_event,
+                )
+            )
     return names
 
 
@@ -2075,6 +2192,44 @@ def _expr_branch_access_equality(
     return None
 
 
+def _expr_triggers_ahdllint_5008(
+    expr: Optional[va_ast.Expr],
+    discontinuous_vars: Set[str],
+) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, va_ast.TernaryExpr):
+        return True
+    if isinstance(expr, va_ast.BinaryExpr):
+        if expr.op in {"==", "!=", ">", "<", ">=", "<=", "&&", "||", "&", "|", "^", "<<", ">>"}:
+            return True
+        return (
+            _expr_triggers_ahdllint_5008(expr.left, discontinuous_vars)
+            or _expr_triggers_ahdllint_5008(expr.right, discontinuous_vars)
+        )
+    if isinstance(expr, va_ast.UnaryExpr):
+        if expr.op in {"!", "~"}:
+            return True
+        return _expr_triggers_ahdllint_5008(expr.operand, discontinuous_vars)
+    if isinstance(expr, va_ast.Identifier):
+        return expr.name in discontinuous_vars
+    if isinstance(expr, va_ast.ArrayAccess):
+        return expr.name in discontinuous_vars
+    if isinstance(expr, va_ast.PartSelect):
+        return expr.name in discontinuous_vars
+    if isinstance(expr, va_ast.FunctionCall):
+        name = expr.name.lower()
+        if name == "transition":
+            return False
+        if name == "slew":
+            return any(
+                _expr_triggers_ahdllint_5008(arg, discontinuous_vars)
+                for arg in expr.args
+            )
+        return False
+    return False
+
+
 def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[str]) -> bool:
     if expr is None:
         return False
@@ -2100,6 +2255,25 @@ def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[
         )
     return any(
         _expr_has_discrete_behavior(child, discrete_vars)
+        for child in _expr_children(expr)
+    )
+
+
+def _expr_has_integer_state_reference(
+    expr: Optional[va_ast.Expr],
+    symbol_types: Dict[str, va_ast.ParamType],
+) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, va_ast.Identifier):
+        return symbol_types.get(expr.name) == va_ast.ParamType.INTEGER
+    if isinstance(expr, (va_ast.ArrayAccess, va_ast.PartSelect)):
+        return symbol_types.get(expr.name) == va_ast.ParamType.INTEGER or any(
+            _expr_has_integer_state_reference(child, symbol_types)
+            for child in _expr_children(expr)
+        )
+    return any(
+        _expr_has_integer_state_reference(child, symbol_types)
         for child in _expr_children(expr)
     )
 
@@ -2400,16 +2574,6 @@ def _is_abstime_expr(expr: va_ast.Expr) -> bool:
         return expr.name == "$abstime"
     return isinstance(expr, va_ast.FunctionCall) and expr.name == "$abstime"
 
-
-_DISCRETE_ARGUMENT_FUNCTIONS = {
-    "ddt", "idt", "idtmod", "slew",
-    "laplace_nd", "laplace_np", "laplace_zd", "laplace_zp",
-    "zi_nd", "zi_np", "zi_zd", "zi_zp",
-    "limexp", "ln", "log", "exp", "sqrt", "pow",
-    "sin", "cos", "tan", "tanh",
-    "$ln", "$log", "$exp", "$sqrt", "$pow",
-    "$sin", "$cos", "$tan", "$tanh",
-}
 
 _INTEGER_RETURN_FUNCTIONS = {
     "$rtoi", "floor", "$floor", "ceil", "$ceil", "$random",

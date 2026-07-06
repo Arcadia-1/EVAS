@@ -1,0 +1,11 @@
+module supply_scaled_discrete_contribution(inp, vdd, vss, out);
+    input inp, vdd, vss;
+    output out;
+    electrical inp, vdd, vss, out;
+    real target;
+
+    analog begin
+        target = (V(inp) > 0.5) ? 1.0 : 0.0;
+        V(out) <+ V(vss) + V(vdd, vss) * target;
+    end
+endmodule
