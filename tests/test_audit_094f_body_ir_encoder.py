@@ -182,6 +182,51 @@ def test_stmt_ir_encodes_ordered_state_and_output_writes_to_rust_batch():
     assert node_values.tolist() == pytest.approx([0.25, 0.6])
 
 
+def test_stmt_ir_encodes_reduction_unary_ops_to_rust_batch():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module reduction_unary_sample;
+    integer code = 0;
+    real metric = 0.0;
+    analog begin
+        metric = (^code) + (|code);
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body)
+    assert stmt_ir is not None
+    bindings = build_state_binding_ir(module)
+    code_binding = bindings.resolve("code")
+    metric_binding = bindings.resolve("metric")
+    assert code_binding is not None
+    assert metric_binding is not None
+    program = encode_body_stmt_ops(stmt_ir, bindings, {})
+    assert isinstance(program, BodyStmtProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    batch = backend.make_body_ir_batch(
+        stmt_ops=program.stmt_ops,
+        expr_ops=program.expr_ops,
+    )
+    node_values = array("d")
+    state_values = array(
+        "d",
+        [0.0] * (max(code_binding.slot, metric_binding.slot) + 1),
+    )
+    param_values = array("d")
+
+    state_values[code_binding.slot] = 5.0
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+    assert state_values[metric_binding.slot] == pytest.approx(1.0)
+
+    state_values[code_binding.slot] = 7.0
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+    assert state_values[metric_binding.slot] == pytest.approx(2.0)
+
+
 def test_stmt_ir_inlines_piecewise_user_function_to_rust_batch():
     _build_rust_core()
     module = parse(

@@ -314,6 +314,15 @@ pub(crate) fn evaluate_body_expr_segment(
                 let value = pop1(stack)?;
                 stack.push((!(value as i64)) as f64);
             }
+            BODY_EXPR_REDUCE_XOR => {
+                let value = pop1(stack)?;
+                let bits = (to_veriloga_integer_trunc(value) as u64).count_ones();
+                stack.push((bits & 1) as f64);
+            }
+            BODY_EXPR_REDUCE_OR => {
+                let value = pop1(stack)?;
+                stack.push(bool_value(to_veriloga_integer_trunc(value) != 0));
+            }
             BODY_EXPR_SELECT => {
                 let false_value = stack.pop().ok_or(-2253)?;
                 let true_value = stack.pop().ok_or(-2254)?;

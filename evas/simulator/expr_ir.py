@@ -82,6 +82,8 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
     BODY_EXPR_READ_TIME,
+    BODY_EXPR_REDUCE_OR,
+    BODY_EXPR_REDUCE_XOR,
     BODY_EXPR_SELECT,
     BODY_EXPR_SHL,
     BODY_EXPR_SHR,
@@ -213,6 +215,8 @@ _BODY_UNARY_OPS = {
     "-": BODY_EXPR_NEG,
     "!": BODY_EXPR_NOT,
     "~": BODY_EXPR_BITNOT,
+    "^": BODY_EXPR_REDUCE_XOR,
+    "|": BODY_EXPR_REDUCE_OR,
 }
 
 _BODY_FUNCTION_OPS = {
@@ -782,6 +786,10 @@ def emit_python(expr_ir: ExprIR) -> str:
             return f"(not ({operand}))"
         if expr_ir.op == "~":
             return f"(~int({operand}))"
+        if expr_ir.op == "^":
+            return f"(int({operand}).bit_count() & 1)"
+        if expr_ir.op == "|":
+            return f"(1 if int({operand}) != 0 else 0)"
         return f"({expr_ir.op}({operand}))"
 
     if isinstance(expr_ir, TernaryExprIR):
