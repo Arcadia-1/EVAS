@@ -1817,6 +1817,22 @@ fn rust_sim_transition_targets_contain_stochastic_expr(
     Ok(false)
 }
 
+fn rust_sim_clamp_internal_transition_dt(
+    time: f64,
+    current_dt: f64,
+    breakpoint: f64,
+    step_floor: f64,
+) -> Option<f64> {
+    if breakpoint <= time || breakpoint >= time + current_dt {
+        return None;
+    }
+    let raw_dt = breakpoint - time;
+    if !step_floor.is_finite() || step_floor <= 0.0 || raw_dt >= step_floor {
+        return Some(raw_dt);
+    }
+    Some(step_floor.min(current_dt))
+}
+
 fn rust_sim_expr_segment_contains_stochastic_expr(
     body_expr_ops: &[EvasRustBodyExprOp],
     start: usize,
@@ -2973,6 +2989,7 @@ pub fn rust_sim_event_transition_record_trace(
 
     crate::util::reset_rdist_draw_indices();
     let eps = 1.0e-18;
+    let internal_transition_step_floor = (tstep.min(max_step) / 64.0).max(eps);
     let use_cross_accepted_event_time = cross_acceptance_slack_factor > 0.0;
     let event_count = events.len();
     let transition_count = transitions.len();
@@ -3325,8 +3342,10 @@ pub fn rust_sim_event_transition_record_trace(
             time,
             min_ramp_time,
         )? {
-            if bp > time && bp < time + dt {
-                dt = bp - time;
+            if let Some(clamped_dt) =
+                rust_sim_clamp_internal_transition_dt(time, dt, bp, internal_transition_step_floor)
+            {
+                dt = clamped_dt;
                 force_record = true;
                 transition_breakpoints += 1;
             }
@@ -3365,8 +3384,10 @@ pub fn rust_sim_event_transition_record_trace(
             time,
             dt,
         )? {
-            if bp > time && bp < time + dt {
-                dt = bp - time;
+            if let Some(clamped_dt) =
+                rust_sim_clamp_internal_transition_dt(time, dt, bp, internal_transition_step_floor)
+            {
+                dt = clamped_dt;
                 force_record = true;
                 transition_breakpoints += 1;
             }
