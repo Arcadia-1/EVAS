@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.1] — 2026-07-06
+
+### Added — EVAS2/Rust Coverage
+- Added RustSimProgram lowering for valid continuous models that assign a
+  scaled `transition(...)` expression to a temporary real value before
+  contributing it to a voltage branch.
+
+### Changed — AHDL Lint Calibration
+- Removed the unsupported W5010 warning for direct runtime-switched potential
+  contributions when Cadence oracle evidence treats the case as clean.
+- Calibrated W5008/W5018 lint boundaries against Cadence oracle evidence,
+  including supply-scaled discontinuous contributions and `slew()` integer
+  argument diagnostics.
+- Reclassified selected current contribution, current probe, and indirect
+  branch helper diagnostics from hard compatibility errors to KCL boundary
+  warnings.
+
 ## [0.8.0] — 2026-07-06
 
 ### Added — Spectre Parity
