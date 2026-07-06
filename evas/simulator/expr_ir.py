@@ -257,13 +257,20 @@ class LoweringContext:
     allowed_system_functions: frozenset[str] = frozenset()
     allowed_methods: frozenset[str] = frozenset()
     allowed_branch_access_types: frozenset[str] = frozenset({"V", "I"})
+    user_functions: Tuple[object, ...] = ()
+    inline_stack: Tuple[str, ...] = ()
 
     @classmethod
     def pure_math(cls) -> "LoweringContext":
         return cls()
 
     @classmethod
-    def veriloga_body(cls) -> "LoweringContext":
+    def veriloga_body(
+        cls,
+        *,
+        user_functions: Iterable[object] = (),
+        inline_stack: Tuple[str, ...] = (),
+    ) -> "LoweringContext":
         return cls(
             allowed_functions=(
                 PURE_MATH_FUNCTIONS
@@ -273,6 +280,8 @@ class LoweringContext:
             ),
             allowed_system_functions=SUPPORTED_SYSTEM_FUNCTIONS,
             allowed_methods=SUPPORTED_METHODS,
+            user_functions=tuple(user_functions),
+            inline_stack=tuple(inline_stack),
         )
 
 
@@ -425,14 +434,18 @@ def lower_expr(
         return TernaryExprIR(cond, true_expr, false_expr)
 
     if isinstance(ast_expr, FunctionCall):
-        name = _normalize_function_name(str(ast_expr.name))
-        if name not in ctx.allowed_functions:
-            if str(ast_expr.name) not in ctx.allowed_system_functions:
-                return None
-            name = str(ast_expr.name)
+        source_name = str(ast_expr.name)
         args = _lower_expr_tuple(ast_expr.args, ctx)
         if args is None:
             return None
+        user_decl = _lookup_user_function(ctx, source_name)
+        if user_decl is not None:
+            return _inline_user_function_call(user_decl, args, ctx)
+        name = _normalize_function_name(source_name)
+        if name not in ctx.allowed_functions:
+            if source_name not in ctx.allowed_system_functions:
+                return None
+            name = source_name
         if name in {"ac_stim", "flicker_noise", "noise_table", "white_noise"}:
             return LiteralIR(0.0)
         if name == "analysis":
@@ -478,6 +491,249 @@ def lower_expr(
         return MethodCallIR(str(ast_expr.obj), method, args)
 
     return None
+
+
+def _lookup_user_function(ctx: LoweringContext, name: str):
+    for decl in ctx.user_functions:
+        if str(getattr(decl, "name", "")) == name:
+            return decl
+    return None
+
+
+def _context_with_inline_stack(
+    ctx: LoweringContext,
+    name: str,
+) -> LoweringContext:
+    return LoweringContext(
+        allowed_functions=ctx.allowed_functions,
+        allowed_system_functions=ctx.allowed_system_functions,
+        allowed_methods=ctx.allowed_methods,
+        allowed_branch_access_types=ctx.allowed_branch_access_types,
+        user_functions=ctx.user_functions,
+        inline_stack=(*ctx.inline_stack, name),
+    )
+
+
+def _inline_user_function_call(
+    decl: object,
+    args: Tuple[ExprIR, ...],
+    ctx: LoweringContext,
+) -> Optional[ExprIR]:
+    name = str(getattr(decl, "name", ""))
+    if not name or name in ctx.inline_stack:
+        return None
+    decl_args = tuple(getattr(decl, "args", ()) or ())
+    if len(args) != len(decl_args):
+        return None
+
+    nested_ctx = _context_with_inline_stack(ctx, name)
+    env: dict[str, ExprIR] = {
+        str(arg.name): arg_expr for arg, arg_expr in zip(decl_args, args)
+    }
+    for var in tuple(getattr(decl, "variables", ()) or ()):
+        var_name = str(var.name)
+        if var_name in env:
+            continue
+        init_values = tuple(getattr(var, "init_values", ()) or ())
+        if init_values:
+            init = _lower_user_function_expr(init_values[0], nested_ctx, env)
+            if init is None:
+                return None
+            env[var_name] = init
+        else:
+            env[var_name] = LiteralIR(0.0)
+
+    default_ret = _default_user_function_return(getattr(decl, "return_type", ParamType.REAL))
+    result = _inline_user_function_stmt(
+        getattr(decl, "body", None),
+        nested_ctx,
+        env,
+        default_ret,
+        name,
+    )
+    if result is None:
+        return None
+    _env, return_expr = result
+    return return_expr
+
+
+def _default_user_function_return(return_type: ParamType) -> ExprIR:
+    if return_type == ParamType.STRING:
+        return LiteralIR("")
+    return LiteralIR(0.0)
+
+
+def _inline_user_function_stmt(
+    stmt: object,
+    ctx: LoweringContext,
+    env: Mapping[str, ExprIR],
+    return_expr: ExprIR,
+    return_name: str,
+) -> Optional[Tuple[dict[str, ExprIR], ExprIR]]:
+    if isinstance(stmt, Block):
+        cur_env = dict(env)
+        cur_return = return_expr
+        for child in stmt.statements:
+            result = _inline_user_function_stmt(child, ctx, cur_env, cur_return, return_name)
+            if result is None:
+                return None
+            cur_env, cur_return = result
+        return cur_env, cur_return
+
+    if isinstance(stmt, Assignment):
+        if not isinstance(stmt.target, Identifier):
+            return None
+        value = _lower_user_function_expr(stmt.value, ctx, env)
+        if value is None:
+            return None
+        target_name = str(stmt.target.name)
+        if target_name == return_name:
+            return dict(env), value
+        new_env = dict(env)
+        new_env[target_name] = value
+        return new_env, return_expr
+
+    if isinstance(stmt, IfStatement):
+        cond = _lower_user_function_expr(stmt.cond, ctx, env)
+        if cond is None:
+            return None
+        then_result = _inline_user_function_stmt(
+            stmt.then_body,
+            ctx,
+            dict(env),
+            return_expr,
+            return_name,
+        )
+        if then_result is None:
+            return None
+        if stmt.else_body is None:
+            else_result = (dict(env), return_expr)
+        else:
+            else_result = _inline_user_function_stmt(
+                stmt.else_body,
+                ctx,
+                dict(env),
+                return_expr,
+                return_name,
+            )
+            if else_result is None:
+                return None
+        then_env, then_return = then_result
+        else_env, else_return = else_result
+        return _merge_user_function_branches(
+            cond,
+            env,
+            then_env,
+            then_return,
+            else_env,
+            else_return,
+        )
+
+    if stmt is None:
+        return dict(env), return_expr
+
+    return None
+
+
+def _merge_user_function_branches(
+    cond: ExprIR,
+    base_env: Mapping[str, ExprIR],
+    then_env: Mapping[str, ExprIR],
+    then_return: ExprIR,
+    else_env: Mapping[str, ExprIR],
+    else_return: ExprIR,
+) -> Tuple[dict[str, ExprIR], ExprIR]:
+    merged_env = dict(base_env)
+    names = set(base_env) | set(then_env) | set(else_env)
+    for name in names:
+        base = base_env.get(name)
+        then_value = then_env.get(name, base)
+        else_value = else_env.get(name, base)
+        if then_value is None and else_value is None:
+            continue
+        if then_value is None:
+            then_value = LiteralIR(0.0)
+        if else_value is None:
+            else_value = LiteralIR(0.0)
+        merged_env[name] = (
+            then_value if then_value == else_value else TernaryExprIR(cond, then_value, else_value)
+        )
+    merged_return = (
+        then_return
+        if then_return == else_return
+        else TernaryExprIR(cond, then_return, else_return)
+    )
+    return merged_env, merged_return
+
+
+def _lower_user_function_expr(
+    expr: Expr,
+    ctx: LoweringContext,
+    env: Mapping[str, ExprIR],
+) -> Optional[ExprIR]:
+    expr_ir = lower_expr(expr, ctx)
+    if expr_ir is None:
+        return None
+    return _substitute_expr_ir(expr_ir, env)
+
+
+def _substitute_expr_ir(expr_ir: ExprIR, env: Mapping[str, ExprIR]) -> ExprIR:
+    if isinstance(expr_ir, IdentifierIR):
+        return env.get(expr_ir.name, expr_ir)
+    if isinstance(expr_ir, ArrayAccessIR):
+        return ArrayAccessIR(expr_ir.name, _substitute_expr_ir(expr_ir.index, env))
+    if isinstance(expr_ir, BinaryExprIR):
+        return BinaryExprIR(
+            expr_ir.op,
+            _substitute_expr_ir(expr_ir.left, env),
+            _substitute_expr_ir(expr_ir.right, env),
+        )
+    if isinstance(expr_ir, UnaryExprIR):
+        return UnaryExprIR(expr_ir.op, _substitute_expr_ir(expr_ir.operand, env))
+    if isinstance(expr_ir, TernaryExprIR):
+        return TernaryExprIR(
+            _substitute_expr_ir(expr_ir.cond, env),
+            _substitute_expr_ir(expr_ir.true_expr, env),
+            _substitute_expr_ir(expr_ir.false_expr, env),
+        )
+    if isinstance(expr_ir, FunctionCallIR):
+        return FunctionCallIR(
+            expr_ir.name,
+            tuple(_substitute_expr_ir(arg, env) for arg in expr_ir.args),
+        )
+    if isinstance(expr_ir, BranchAccessIR):
+        return BranchAccessIR(
+            access_type=expr_ir.access_type,
+            node1=expr_ir.node1,
+            node2=expr_ir.node2,
+            node1_index=(
+                None
+                if expr_ir.node1_index is None
+                else _substitute_expr_ir(expr_ir.node1_index, env)
+            ),
+            node2_index=(
+                None
+                if expr_ir.node2_index is None
+                else _substitute_expr_ir(expr_ir.node2_index, env)
+            ),
+            node1_index2=(
+                None
+                if expr_ir.node1_index2 is None
+                else _substitute_expr_ir(expr_ir.node1_index2, env)
+            ),
+            node2_index2=(
+                None
+                if expr_ir.node2_index2 is None
+                else _substitute_expr_ir(expr_ir.node2_index2, env)
+            ),
+        )
+    if isinstance(expr_ir, MethodCallIR):
+        return MethodCallIR(
+            expr_ir.obj,
+            expr_ir.method,
+            tuple(_substitute_expr_ir(arg, env) for arg in expr_ir.args),
+        )
+    return expr_ir
 
 
 def emit_python(expr_ir: ExprIR) -> str:
