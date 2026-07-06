@@ -79,8 +79,9 @@ def test_diagnostics_use_registered_rule_metadata():
             integer mode;
             analog begin
                 mode = 1;
+                @(timer(0, 1n)) mode = 1 - mode;
                 case (mode)
-                    1: V(out) <+ transition(exp(mode), 100f);
+                    1: V(out) <+ transition(slew(mode, 1e9, 1e9), 100f);
                 endcase
             end
         endmodule
@@ -104,8 +105,9 @@ def test_lint_diagnostics_include_source_locations():
             integer mode;
             analog begin
                 mode = 1;
+                @(timer(0, 1n)) mode = 1 - mode;
                 case (mode)
-                    1: V(out) <+ transition(exp(mode), 100f);
+                    1: V(out) <+ transition(slew(mode, 1e9, 1e9), 100f);
                 endcase
             end
         endmodule
@@ -114,17 +116,17 @@ def test_lint_diagnostics_include_source_locations():
     diags = lint_source(source, filename="loc.va")
     by_code = {diag.code: diag for diag in diags}
 
-    assert by_code["EVAS-AHDL-W5011"].line == 7
+    assert by_code["EVAS-AHDL-W5011"].line == 8
     assert by_code["EVAS-AHDL-W5011"].column == 9
-    assert by_code["EVAS-AHDL-W5003"].line == 8
+    assert by_code["EVAS-AHDL-W5003"].line == 9
     assert by_code["EVAS-AHDL-W5003"].column == 26
-    assert by_code["EVAS-AHDL-W5018"].line == 8
+    assert by_code["EVAS-AHDL-W5018"].line == 9
     assert by_code["EVAS-AHDL-W5018"].column == 37
-    assert by_code["EVAS-AHDL-W5003"].to_dict()["line"] == 8
-    assert "loc.va:8:26" in by_code["EVAS-AHDL-W5003"].format_text()
+    assert by_code["EVAS-AHDL-W5003"].to_dict()["line"] == 9
+    assert "loc.va:9:26" in by_code["EVAS-AHDL-W5003"].format_text()
 
 
-def test_discrete_contribution_warns_like_ahdllint_5008():
+def test_timer_integer_direct_contribution_matches_oracle_negative_5008():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module discrete_drive(clk, out);
@@ -141,7 +143,7 @@ def test_discrete_contribution_warns_like_ahdllint_5008():
 
     diags = lint_source(source)
 
-    assert "EVAS-AHDL-W5008" in _codes(diags)
+    assert "EVAS-AHDL-W5008" not in _codes(diags)
     assert not has_compat_errors(diags)
 
 
@@ -163,6 +165,72 @@ def test_discrete_assignment_contribution_warns_like_ahdllint_5008():
     diags = lint_source(source)
 
     assert "EVAS-AHDL-W5008" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_supply_scaled_discrete_assignment_warns_like_ahdllint_5008():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module scaled_discrete(inp, vdd, vss, out);
+            input inp, vdd, vss;
+            output out;
+            electrical inp, vdd, vss, out;
+            real target;
+            analog begin
+                target = (V(inp) > 0.5) ? 1.0 : 0.0;
+                V(out) <+ V(vss) + V(vdd, vss) * target;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5008" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_event_real_linear_contribution_matches_oracle_negative_5008():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module event_real_linear(clk, out);
+            input clk;
+            output out;
+            electrical clk, out;
+            real target;
+            analog begin
+                @(initial_step) target = 0.25;
+                @(cross(V(clk) - 0.5, +1)) target = 0.75;
+                V(out) <+ 0.1 + 0.8 * target;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5008" not in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_abstime_phase_ramp_matches_oracle_negative_5008():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module phase_ramp(clk, out);
+            input clk;
+            output out;
+            electrical clk, out;
+            real cycle_start, phase;
+            analog begin
+                @(initial_step) cycle_start = 0.0;
+                @(cross(V(clk) - 0.5, +1)) cycle_start = $abstime;
+                phase = $abstime - cycle_start;
+                V(out) <+ phase / 2n;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5008" not in _codes(diags)
     assert not has_compat_errors(diags)
 
 
@@ -490,16 +558,18 @@ def test_electrical_gnd_name_warns_like_ahdllint_5017():
     assert not has_compat_errors(diags)
 
 
-def test_discrete_function_argument_warns_like_ahdllint_5018():
+def test_integer_slew_argument_warns_like_ahdllint_5018():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
-        module discrete_function_arg(out);
+        module discrete_function_arg(clk, out);
+            input clk;
             output out;
-            electrical out;
-            integer mode;
+            electrical clk, out;
+            integer state;
             analog begin
-                mode = 1;
-                V(out) <+ exp(mode);
+                @(initial_step) state = 0;
+                @(timer(0, 1n)) state = 1 - state;
+                V(out) <+ slew(state, 1e9, 1e9);
             end
         endmodule
     """)
@@ -507,6 +577,50 @@ def test_discrete_function_argument_warns_like_ahdllint_5018():
     diags = lint_source(source)
 
     assert "EVAS-AHDL-W5018" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_ordinary_math_integer_argument_matches_oracle_negative_5018():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module ordinary_math_arg(out);
+            output out;
+            electrical out;
+            integer code;
+            analog begin
+                code = 3;
+                V(out) <+ pow(1.8, code);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5018" not in _codes(diags)
+    assert "EVAS-AHDL-W5008" not in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_event_real_math_argument_matches_oracle_negative_5018():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module event_real_math_arg(clk, out);
+            input clk;
+            output out;
+            electrical clk, out;
+            real target;
+            analog begin
+                @(initial_step) target = 1.0;
+                @(cross(V(clk) - 0.5, +1)) target = 2.0;
+                V(out) <+ ln(target);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-AHDL-W5018" not in _codes(diags)
+    assert "EVAS-AHDL-W5008" not in _codes(diags)
     assert not has_compat_errors(diags)
 
 

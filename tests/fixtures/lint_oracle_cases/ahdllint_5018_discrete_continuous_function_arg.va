@@ -1,10 +1,12 @@
-module discrete_continuous_function_arg(out);
+module discrete_continuous_function_arg(clk, out);
+    input clk;
     output out;
-    electrical out;
-    integer mode;
+    electrical clk, out;
+    integer state;
 
     analog begin
-        mode = 1;
-        V(out) <+ exp(mode);
+        @(initial_step) state = 0;
+        @(timer(0, 1n)) state = 1 - state;
+        V(out) <+ slew(state, 1e9, 1e9);
     end
 endmodule

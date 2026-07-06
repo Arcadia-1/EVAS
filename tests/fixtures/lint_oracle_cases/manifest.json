@@ -34,8 +34,16 @@
   {
     "id": "ahdllint_5018_discrete_continuous_function_arg",
     "file": "ahdllint_5018_discrete_continuous_function_arg.va",
-    "description": "Minimal public case for feeding a discrete value to a continuous math function.",
-    "expected_codes": ["EVAS-AHDL-W5008", "EVAS-AHDL-W5018"],
+    "description": "Minimal public case for feeding an integer state value to slew().",
+    "expected_codes": ["EVAS-AHDL-W5018"],
+    "forbidden_codes": ["EVAS-COMP-EPARSE"],
+    "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
+  },
+  {
+    "id": "ahdllint_5008_supply_scaled_discrete_contribution",
+    "file": "ahdllint_5008_supply_scaled_discrete_contribution.va",
+    "description": "Minimal public case for a supply-scaled discrete target directly driving a voltage contribution.",
+    "expected_codes": ["EVAS-AHDL-W5008"],
     "forbidden_codes": ["EVAS-COMP-EPARSE"],
     "oracle_note": "Distilled from Cadence AHDL lint behavior; raw simulator output is intentionally not committed."
   },
