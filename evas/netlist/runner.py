@@ -52,7 +52,7 @@ except ImportError:  # pragma: no cover - Python < 3.8 compatibility fallback
 try:
     VERSION = _package_version("evas-sim")
 except Exception:
-    VERSION = "0.7.0"
+    VERSION = "0.8.0"
 
 PYTHON_EVAS_ENGINE = "python"
 RUST_EVAS_ENGINE = "evas-rust"

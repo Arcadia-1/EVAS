@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.0] — 2026-07-06
+
+### Added — Spectre Parity
+- Added strict Spectre compatibility checks for known EVAS/Spectre divergence
+  classes, including seeded `$rdist_*` behavior, integer select/concatenation
+  semantics, and extension syntax that should not silently pass as
+  Spectre-equivalent.
+- Added Spectre-aligned support for indirect branch current integration and
+  sampled-data `zi_nd` scheduling/lowering.
+
+### Added — EVAS2/Rust Coverage
+- Added EVAS2/Rust lowering for seeded random distributions, `$dist_uniform`
+  and `$rdist_uniform`, Cadence environment/helper calls, node/branch helper
+  semantics, simple user functions, reduction unary operators, dynamic
+  state-array reads, dynamic body operators, first-order transfer assignments,
+  `laplace_nd`, and additional release-row body IR coverage.
+- Added EVAS2/Rust execution support for dynamic text-file reads and file
+  cursor operations during events, including `$fscanf`, `$fgets`, `$ftell`,
+  `$fseek`, `$rewind`, and runtime close handling.
+- Added Python-side replay for Rust-triggered Verilog-A string side effects,
+  including `$swrite`, `$sformat`, and formatted file output.
+
+### Fixed — Rust Backend
+- Aligned Rust transition microstep recording with Python/Spectre-oriented
+  event behavior.
+- Prevented stale Rust core ABI builds from being reported as ordinary runtime
+  failures.
+- Kept Rust lowering coverage aligned with system output tasks and Cadence
+  semantic helper rows.
+
 ## [0.7.0] — 2026-07-03
 
 ### Changed — Default Engine
