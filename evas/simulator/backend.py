@@ -2379,6 +2379,9 @@ class CompiledModel:
         bp = self._next_timer_breakpoint(time)
         if bp is not None and (best is None or bp < best):
             best = bp
+        bp = self._next_zi_breakpoint(time)
+        if bp is not None and (best is None or bp < best):
+            best = bp
         for child in self._child_models:
             bp = child.next_breakpoint(time)
             if bp is not None and (best is None or bp < best):
@@ -2396,6 +2399,26 @@ class CompiledModel:
                     if best is None or candidate < best:
                         best = candidate
             self._specify_delay_pending_times[key] = kept
+        return best
+
+    def _next_zi_breakpoint(self, time: float) -> Optional[float]:
+        states = self._zi_states
+        if not states:
+            return None
+        best: Optional[float] = None
+        time_f = float(time)
+        for st in states.values():
+            try:
+                interval = float(st.get("sample_interval", 0.0))
+            except Exception:
+                continue
+            if interval <= 0.0:
+                continue
+            eps = max(1e-18, interval * 1e-9)
+            sample_index = int(math.floor((time_f + eps) / interval)) + 1
+            candidate = sample_index * interval
+            if candidate > time_f + eps and (best is None or candidate < best):
+                best = candidate
         return best
 
     def _specify_path_delay(self, key: str, value: Any, time: float, delay: float) -> float:
@@ -5063,24 +5086,46 @@ class CompiledModel:
         t = float(time)
         x_f = float(x)
         if key not in self._zi_states:
+            if interval_f > 0.0:
+                eps = max(1e-18, interval_f * 1e-9)
+                sample_index = int(math.floor((t + eps) / interval_f))
+                last_sample_t = sample_index * interval_f
+            else:
+                sample_index = 0
+                last_sample_t = t
             self._zi_states[key] = {
-                "last_sample_t": float("-inf"),
+                "last_sample_t": last_sample_t,
+                "last_sample_index": sample_index,
                 "last_eval_t": None,
                 "x_hist": [0.0] * len(num_values),
                 "y_hist": [0.0] * max(0, len(den_values) - 1),
                 "y": 0.0,
+                "sample_interval": interval_f,
             }
         st = self._zi_states[key]
+        st["sample_interval"] = interval_f
         if t == st["last_eval_t"]:
             return float(st["y"])
         if t < float(st["last_sample_t"]):
             st["last_sample_t"] = t
+            if interval_f > 0.0:
+                eps = max(1e-18, interval_f * 1e-9)
+                st["last_sample_index"] = int(math.floor((t + eps) / interval_f))
+            else:
+                st["last_sample_index"] = 0
             st["x_hist"] = [0.0] * len(num_values)
             st["y_hist"] = [0.0] * max(0, len(den_values) - 1)
             st["y"] = 0.0
-        elif interval_f > 0.0 and (t - float(st["last_sample_t"])) < (interval_f * 0.999999):
-            st["last_eval_t"] = t
-            return float(st["y"])
+        elif interval_f > 0.0:
+            eps = max(1e-18, interval_f * 1e-9)
+            sample_index = int(math.floor((t + eps) / interval_f))
+            fallback_index = math.floor((float(st["last_sample_t"]) + eps) / interval_f)
+            last_index = int(st.get("last_sample_index", fallback_index))
+            if sample_index <= last_index:
+                st["last_eval_t"] = t
+                return float(st["y"])
+            st["last_sample_index"] = sample_index
+            st["last_sample_t"] = sample_index * interval_f
 
         x_hist = [x_f] + list(st["x_hist"])[: max(0, len(num_values) - 1)]
         y = sum(b * x_hist[i] for i, b in enumerate(num_values))
@@ -5092,7 +5137,9 @@ class CompiledModel:
         st["x_hist"] = x_hist
         st["y_hist"] = y_hist
         st["y"] = y
-        st["last_sample_t"] = t
+        if interval_f <= 0.0:
+            st["last_sample_t"] = t
+            st["last_sample_index"] = 0
         st["last_eval_t"] = t
         return float(y)
 
@@ -5928,6 +5975,8 @@ class _ModuleCompiler:
         self._state_local_name_by_state: Dict[str, str] = {}
         self._state_local_fastpath_active = False
         self._state_local_fastpath_names: set[str] = set()
+        self._fresh_assigned_state_names: set[str] = set()
+        self._control_flow_depth = 0
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
         self._port_disciplines = {p.name: p.discipline for p in module.port_decls}
@@ -6249,6 +6298,7 @@ class _ModuleCompiler:
         lines.append("        self._initial_step_done = True")
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.initial_step(nv, time)")
+        self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_initial_step_statement(stmt, 2)
@@ -6330,6 +6380,7 @@ class _ModuleCompiler:
                         f"if _state_values is not None else self.state[{name!r}]"
                     )
 
+        self._fresh_assigned_state_names = set()
         if mod.analog_block:
             lines.extend(self._compile_statement(mod.analog_block.body, 2))
         for stmt in mod.continuous_assigns:
@@ -6377,6 +6428,7 @@ class _ModuleCompiler:
         lines.append("        self._event_trace_audit_phase = 'post_update'")
         lines.append("        self._event_time = time")
         lines.append("        _post_event_fired = False")
+        self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_post_update_statement(stmt, 2)
@@ -6390,6 +6442,7 @@ class _ModuleCompiler:
 
         lines.append("")
         lines.append("    def refresh_outputs(self, nv, time):")
+        self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_refresh_statement(stmt, 2)
@@ -6412,6 +6465,7 @@ class _ModuleCompiler:
         lines.append("")
         lines.append("    def final_step(self, nv, time):")
         lines.append("        self._event_trace_audit_phase = 'final_step'")
+        self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 if isinstance(stmt, EventStatement):
@@ -6593,6 +6647,14 @@ class _ModuleCompiler:
         for decl in self.module.tasks:
             lines.extend(self._compile_user_task_method(decl))
         return lines
+
+    def _compile_control_flow_body(self, stmt, indent) -> List[str]:
+        previous_depth = self._control_flow_depth
+        self._control_flow_depth = previous_depth + 1
+        try:
+            return self._compile_statement(stmt, indent)
+        finally:
+            self._control_flow_depth = previous_depth
 
     def _compile_user_function_method(self, decl: FunctionDecl) -> List[str]:
         method = f"_user_fn_{self._safe_python_suffix(decl.name)}"
@@ -11807,7 +11869,7 @@ class _ModuleCompiler:
                     return True
             return False
 
-        if self._statement_has_function_call(stmt, {"transition", "last_crossing"}):
+        if self._statement_has_function_call(stmt, {"transition", "last_crossing", "zi_nd"}):
             return True
 
         return False
@@ -12455,13 +12517,13 @@ class _ModuleCompiler:
         elif isinstance(stmt, IfStatement):
             cond = self._compile_expr(stmt.cond)
             lines.append(f"{prefix}if {cond}:")
-            body_lines = self._compile_statement(stmt.then_body, indent + 1)
+            body_lines = self._compile_control_flow_body(stmt.then_body, indent + 1)
             lines.extend(body_lines)
             if not body_lines:
                 lines.append(f"{prefix}    pass")
             if stmt.else_body:
                 lines.append(f"{prefix}else:")
-                else_lines = self._compile_statement(stmt.else_body, indent + 1)
+                else_lines = self._compile_control_flow_body(stmt.else_body, indent + 1)
                 lines.extend(else_lines)
                 if not else_lines:
                     lines.append(f"{prefix}    pass")
@@ -14437,7 +14499,17 @@ class _ModuleCompiler:
                 line = f"self._state_set_by_slot({slot}, {name!r}, {val})"
             else:
                 line = f"self._state_set({name!r}, {val})"
-            if self._should_gate_self_referential_assignment(stmt, name):
+            self_referential = self._expr_references_variable(stmt.value, name)
+            should_gate = self._should_gate_self_referential_assignment(stmt, name)
+            if should_gate and name in self._fresh_assigned_state_names:
+                should_gate = False
+            if (
+                not self_referential
+                and self._control_flow_depth == 0
+                and name in self._state_scalar_slot_by_name
+            ):
+                self._fresh_assigned_state_names.add(name)
+            if should_gate:
                 key = self._discrete_assignment_key(stmt)
                 return [
                     f"{prefix}if self._should_update_discrete_state({key!r}, time):",

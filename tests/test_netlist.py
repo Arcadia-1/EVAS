@@ -2999,6 +2999,87 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(80e-9) == pytest.approx(-5.95e-23, rel=0.02)
         assert sample_at(100e-9) == pytest.approx(-4.05e-23, rel=0.03)
 
+    def test_continuous_real_chain_updates_every_evaluation(self, tmp_path):
+        va_file = tmp_path / "offset_gain_amplifier.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module offset_gain_amplifier(sigin, sigout);
+                input sigin;
+                output sigout;
+                electrical sigin, sigout;
+                real adjusted_input;
+
+                analog begin
+                    adjusted_input = V(sigin);
+                    adjusted_input = adjusted_input - 0.2;
+                    V(sigout) <+ 3.0 * adjusted_input;
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_offset_gain_amplifier.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "offset_gain_amplifier.va"
+            Vin (sigin 0) vsource type=pwl wave=[0 0.1 10n 0.5]
+            XDUT (sigin sigout) offset_gain_amplifier
+            tran tran stop=10n maxstep=1n
+            save sigin sigout
+        """))
+
+        out_dir = tmp_path / "out_offset_gain_amplifier"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        final = rows[-1]
+        assert float(final["sigout"]) == pytest.approx(0.9, abs=1e-9)
+
+    def test_continuous_guarded_real_chain_clamps_each_evaluation(self, tmp_path):
+        va_file = tmp_path / "safe_analog_divider.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module safe_analog_divider(signumer, sigdenom, sigout);
+                input signumer, sigdenom;
+                output sigout;
+                electrical signumer, sigdenom, sigout;
+                parameter real gain = 1.0;
+                parameter real min_sigdenom = 0.2 from (0:inf);
+                real denominator;
+
+                analog begin
+                    denominator = V(sigdenom);
+                    if (abs(denominator) < min_sigdenom)
+                        denominator = (denominator >= 0.0) ? min_sigdenom : -min_sigdenom;
+                    V(sigout) <+ gain * V(signumer) / denominator;
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_safe_analog_divider.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "safe_analog_divider.va"
+            Vnum (signumer 0) vsource type=pwl wave=[0 -0.4 0.75n -0.4 0.80n 0.8 1.55n 0.8 1.60n 0.8 2.35n 0.8 2.40n -0.6 3.15n -0.6 3.20n 0.5 4.0n 0.5]
+            Vden (sigdenom 0) vsource type=pwl wave=[0 1.5 0.75n 1.5 0.80n 0 1.55n 0 1.60n 0.08 2.35n 0.08 2.40n -0.08 3.15n -0.08 3.20n -1.2 4.0n -1.2]
+            XDUT (signumer sigdenom sigout) safe_analog_divider
+            tran tran stop=3.8n maxstep=5p
+            save signumer sigdenom sigout
+        """))
+
+        out_dir = tmp_path / "out_safe_analog_divider"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["sigout"])
+
+        assert sample_at(1.0e-9) == pytest.approx(4.0, abs=1e-9)
+        assert sample_at(2.0e-9) == pytest.approx(4.0, abs=1e-9)
+        assert sample_at(2.8e-9) == pytest.approx(3.0, abs=1e-9)
+
     def test_zi_nd_sampled_data_filter_matches_spectre_samples(self, tmp_path):
         va_file = tmp_path / "continuous_zi_nd_filter.va"
         va_file.write_text(textwrap.dedent("""\
@@ -3039,6 +3120,45 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
         assert sample_at(120e-9) == pytest.approx(0.0130177, rel=1e-5)
         assert sample_at(140e-9) == pytest.approx(0.0008136, rel=1e-4)
+
+    def test_zi_nd_sampled_data_filter_anchors_samples_without_maxstep(self, tmp_path):
+        va_file = tmp_path / "continuous_zi_nd_filter.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module continuous_zi_nd_filter(in, out);
+                input in;
+                output out;
+                electrical in, out;
+                analog begin
+                    V(out) <+ zi_nd(V(in), {0.5, 0.5}, {1.0, -0.25}, 10n);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_continuous_zi_nd_filter.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "continuous_zi_nd_filter.va"
+            Vin (inp 0) vsource type=pwl wave=[0 0.0 20n 0.0 21n 1.0 80n 1.0 81n 0.0 160n 0.0]
+            XDUT (inp out) continuous_zi_nd_filter
+            tran tran stop=160n
+            save inp out
+        """))
+
+        out_dir = tmp_path / "out_continuous_zi_nd_filter_no_maxstep"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["out"])
+
+        assert sample_at(30e-9) == pytest.approx(0.5, abs=1e-9)
+        assert sample_at(40e-9) == pytest.approx(1.125, abs=1e-9)
+        assert sample_at(50e-9) == pytest.approx(1.28125, abs=1e-9)
+        assert sample_at(70e-9) == pytest.approx(1.33008, rel=1e-5)
+        assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
 
     def test_evas_rust_zi_nd_sampled_data_filter_matches_spectre_samples(
         self,
