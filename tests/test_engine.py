@@ -8987,7 +8987,7 @@ endmodule
         model.evaluate(nv1, 1.0)
         assert nv1["out"] == pytest.approx(math.exp(-1.0))
 
-    def test_zi_nd_first_order_difference_equation_advances_state(self):
+    def test_zi_nd_first_order_difference_equation_uses_anchored_samples(self):
         src = """\
 `include "disciplines.vams"
 module zi_nd_probe(vin, out);
@@ -9003,11 +9003,15 @@ endmodule
 
         nv0 = {"vin": 0.7}
         model.evaluate(nv0, 0.0)
-        assert nv0["out"] == pytest.approx(0.7)
+        assert nv0["out"] == pytest.approx(0.0)
 
         nv1 = {"vin": 0.7}
         model.evaluate(nv1, 1e-9)
-        assert nv1["out"] == pytest.approx(0.0)
+        assert nv1["out"] == pytest.approx(0.7)
+
+        nv2 = {"vin": 0.7}
+        model.evaluate(nv2, 2e-9)
+        assert nv2["out"] == pytest.approx(0.0)
 
     def test_zi_np_first_order_difference_equation_advances_state(self):
         src = """\
