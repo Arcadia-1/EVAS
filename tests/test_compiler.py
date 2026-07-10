@@ -566,6 +566,19 @@ class TestParserParameters:
         assert m.parameters[0].name == "A"
         assert m.parameters[1].name == "B"
 
+    def test_comma_separated_parameters(self):
+        m = _parse("module m(); parameter real A = 1.0, B = 2.0, T = 20p; endmodule")
+
+        assert [param.name for param in m.parameters] == ["A", "B", "T"]
+        assert [param.param_type for param in m.parameters] == [
+            ParamType.REAL,
+            ParamType.REAL,
+            ParamType.REAL,
+        ]
+        assert [param.default_value.value for param in m.parameters] == pytest.approx(
+            [1.0, 2.0, 20e-12]
+        )
+
 
 class TestParserVariables:
 
@@ -802,6 +815,23 @@ class TestParserContributions:
         assert isinstance(stmt.expr, FunctionCall)
         assert stmt.expr.name == "transition"
         assert len(stmt.expr.args) == 4
+
+    def test_same_line_consecutive_contributions(self):
+        stmts = _stmts(
+            "V(a)<+transition(1.25,0,20p,20p); "
+            "V(b)<+transition(2.5,0,20p,20p);"
+        )
+
+        assert len(stmts) == 2
+        first, second = stmts
+        assert isinstance(first, Contribution)
+        assert isinstance(second, Contribution)
+        assert first.branch.node1 == "a"
+        assert second.branch.node1 == "b"
+        assert isinstance(first.expr, FunctionCall)
+        assert isinstance(second.expr, FunctionCall)
+        assert first.expr.name == "transition"
+        assert second.expr.name == "transition"
 
 
 class TestParserAssignments:

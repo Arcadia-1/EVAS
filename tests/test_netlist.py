@@ -1339,6 +1339,54 @@ class TestNetlistRegressions:
         ]
         assert netlist.save_formats["vin_i"] == "3f"
 
+    def test_save_square_bracket_ranges_are_expanded_across_lines(self, tmp_path):
+        scs = tmp_path / "tb_square_bus_save.scs"
+        scs.write_text(textwrap.dedent(r"""\
+            save en b[1:0] \
+                th[3:0]
+            save aout
+        """))
+
+        netlist = parse_spectre(str(scs))
+
+        assert netlist.save_signals == [
+            "en", "b1", "b0", "th3", "th2", "th1", "th0", "aout",
+        ]
+
+    def test_required_trace_preserves_explicit_save_columns(self, tmp_path, monkeypatch):
+        va_file = tmp_path / "scalar_out.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module scalar_out(en, aout);
+                input en;
+                output aout;
+                electrical en, aout;
+
+                analog begin
+                    V(aout) <+ V(en);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_scalar_out.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            Ven (en 0) vsource dc=0.9 type=dc
+            X0 (en aout) scalar_out
+            tran tran stop=1n maxstep=1n
+            save en aout
+            ahdl_include "scalar_out.va"
+        """))
+        monkeypatch.setenv("EVAS_REQUIRED_TRACE_SIGNALS", "en")
+
+        out_dir = tmp_path / "out_scalar_out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        with (out_dir / "tran.csv").open(newline="") as f:
+            header = next(csv.reader(f))
+
+        assert header == ["time", "en", "aout"]
+
     def test_implicit_multiline_pwl_wave_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_multiline_pwl.scs"
         scs.write_text(textwrap.dedent("""\
@@ -1900,6 +1948,55 @@ class TestIndexedMigrationHarness:
         assert "evas_rust_full_model_required = true" in log
         assert "rust_sim_program_enabled = 1" in log
         assert (out_dir / "tran.csv").exists()
+
+    def test_evas_rust_accepts_same_line_consecutive_contributions(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", "evas2")
+        va_file = tmp_path / "same_line_contrib.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module same_line_contrib(a, b);
+                output a, b;
+                electrical a, b;
+                parameter real x = 1.25, y = 2.5, tr = 20p;
+
+                analog begin
+                    V(a)<+transition(x,0,tr,tr); V(b)<+transition(y,0,tr,tr);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_same_line_contrib.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "same_line_contrib.va"
+            XDUT (a b) same_line_contrib
+            simulatorOptions options evas_engine=evas2 evas_skip_source_error_control=true
+            tran tran stop=1n maxstep=10p
+            save a b
+        """))
+        out_dir = tmp_path / "out_same_line_contrib"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs_file), log_path=str(log_path), output_dir=str(out_dir))
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas-rust" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "rust_full_model_required_failures = 0" in log
+        assert "rust_sim_program_enabled = 1" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert "rust_sim_program_record_count = 2" in log
+        assert "continuous_contribution_not_lowered" not in log
+
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+        assert rows
+        assert float(rows[-1]["a"]) == pytest.approx(1.25)
+        assert float(rows[-1]["b"]) == pytest.approx(2.5)
 
     def test_python_engine_is_manual_fallback_when_rust_backend_is_missing(
         self,

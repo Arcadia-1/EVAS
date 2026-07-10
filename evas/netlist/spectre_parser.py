@@ -678,6 +678,14 @@ def _expand_save_signal(token: str) -> List[Tuple[str, Optional[str]]]:
     if not token or token.startswith('options'):
         return []
 
+    angle_inner_range = re.fullmatch(r'(.+?<)(-?\d+):(-?\d+)(>)', token)
+    if angle_inner_range:
+        prefix, hi_s, lo_s, suffix = angle_inner_range.groups()
+        hi = int(hi_s)
+        lo = int(lo_s)
+        step = -1 if hi >= lo else 1
+        return [(f"{prefix}{idx}{suffix}", None) for idx in range(hi, lo + step, step)]
+
     bus_range = re.fullmatch(r'(.+?<)(-?\d+)(>):(-?\d+)', token)
     if bus_range:
         prefix, hi_s, suffix, lo_s = bus_range.groups()
@@ -685,6 +693,19 @@ def _expand_save_signal(token: str) -> List[Tuple[str, Optional[str]]]:
         lo = int(lo_s)
         step = -1 if hi >= lo else 1
         return [(f"{prefix}{idx}{suffix}", None) for idx in range(hi, lo + step, step)]
+
+    square_range = re.fullmatch(r'(.+?)\[(-?\d+):(-?\d+)\]', token)
+    if square_range:
+        prefix, hi_s, lo_s = square_range.groups()
+        hi = int(hi_s)
+        lo = int(lo_s)
+        step = -1 if hi >= lo else 1
+        return [(f"{prefix}{idx}", None) for idx in range(hi, lo + step, step)]
+
+    square_bit = re.fullmatch(r'(.+?)\[(-?\d+)\]', token)
+    if square_bit:
+        prefix, idx_s = square_bit.groups()
+        return [(f"{prefix}{int(idx_s)}", None)]
 
     if ':' in token:
         name, fmt = token.split(':', 1)
