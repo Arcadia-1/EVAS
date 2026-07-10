@@ -1288,6 +1288,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in {'"', "'"}:
                     v = v[1:-1]
             model.params[model_key] = v
+        model._refresh_child_param_overrides()
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
 

@@ -2118,6 +2118,11 @@ class CompiledModel:
             return
         child.params[name] = value
 
+    def _refresh_child_param_overrides(self) -> None:
+        """Refresh descendant bindings after this model's params are finalized."""
+        for child in self._child_models:
+            child._refresh_child_param_overrides()
+
     def _resolve_external_node_uncached(self, node: str) -> str:
         """Resolve a local model node through node_map and one parent indirection."""
         local = self._resolve_oomr_node(node)
@@ -5968,6 +5973,7 @@ class _ModuleCompiler:
         self._stateful_func_key_cache: Dict[tuple, str] = {}
         self._discrete_assignment_key_cache: Dict[int, str] = {}
         self._discrete_assignment_counter = 0
+        self._reinitialized_self_ref_assignment_ids: set[int] = set()
         self._static_branch_read_slot_by_node: Dict[str, int] = {}
         self._static_branch_write_slot_by_node: Dict[str, int] = {}
         self._state_scalar_slot_by_name: Dict[str, int] = {}
@@ -5996,6 +6002,10 @@ class _ModuleCompiler:
         mod = self.module
 
         self._validate_spectre_operator_rules()
+        if mod.analog_block:
+            self._reinitialized_self_ref_assignment_ids = (
+                self._collect_reinitialized_self_ref_assignments(mod.analog_block.body)
+            )
 
         static_param_values: Dict[str, Any] = {}
         static_param_env: Dict[str, Any] = {}
@@ -6286,6 +6296,37 @@ class _ModuleCompiler:
                 lines.append("                _mapped = f'@parent:{_target}'")
                 lines.append(f"                {child_var}.node_map[_pname] = _mapped")
             lines.append(f"            self._child_models.append({child_var})")
+
+        # A Spectre instance overrides the parent model parameters after the
+        # generated constructor has created its children. Re-evaluate child
+        # parameter expressions once those parent parameters are finalized.
+        lines.append("")
+        lines.append("    def _refresh_child_param_overrides(self):")
+        lines.append("        _child_index = 0")
+        lines.append("        _primitive_index = 0")
+        for inst in mod.instances:
+            lines.append(f"        _entry = self._module_registry.get({inst.module_name!r})")
+            lines.append("        if _entry is None:")
+            lines.append(f"            if {inst.module_name!r} in {{'resistor', 'isource', 'vsource', 'capacitor', 'inductor'}}:")
+            lines.append("                _primitive = self._analog_primitives[_primitive_index]")
+            for override in inst.parameter_overrides:
+                value = self._compile_expr(override.expr)
+                lines.append(
+                    f"                _primitive['parameters'][{override.param_name!r}] = {value}"
+                )
+            lines.append("                _primitive_index += 1")
+            lines.append("        else:")
+            lines.append("            _child_mod = _entry[1]")
+            lines.append("            _child = self._child_models[_child_index]")
+            for override in inst.parameter_overrides:
+                value = self._compile_expr(override.expr)
+                lines.append(
+                    f"            self._apply_child_param_override("
+                    f"_child, _child_mod, {override.param_name!r}, {value})"
+                )
+            lines.append("            _child._refresh_child_param_overrides()")
+            lines.append("            _child_index += 1")
+        lines.append("        pass")
 
         lines.extend(self._compile_user_subprogram_methods())
 
@@ -14686,7 +14727,61 @@ class _ModuleCompiler:
     def _should_gate_self_referential_assignment(self, stmt: Assignment, name: str) -> bool:
         if self._is_integer_variable(name):
             return False
+        if id(stmt) in self._reinitialized_self_ref_assignment_ids:
+            return False
         return self._expr_references_variable(stmt.value, name)
+
+    def _collect_reinitialized_self_ref_assignments(self, stmt) -> set[int]:
+        """Find self-references that are combinationally reset earlier in a block."""
+        marked: set[int] = set()
+
+        def walk(node, definitely_assigned: set[str], *, in_event: bool = False) -> set[str]:
+            assigned = set(definitely_assigned)
+            if node is None:
+                return assigned
+            if isinstance(node, Block):
+                for child in node.statements:
+                    assigned = walk(child, assigned, in_event=in_event)
+                return assigned
+            if isinstance(node, Assignment):
+                target = node.target
+                if isinstance(target, Identifier):
+                    name = target.name
+                    self_referential = self._expr_references_variable(node.value, name)
+                    if not self_referential:
+                        assigned.add(name)
+                    elif not in_event and name in assigned:
+                        marked.add(id(node))
+                return assigned
+            if isinstance(node, EventStatement):
+                walk(node.body, set(), in_event=True)
+                return assigned
+            if isinstance(node, IfStatement):
+                then_assigned = walk(node.then_body, assigned, in_event=in_event)
+                else_assigned = (
+                    walk(node.else_body, assigned, in_event=in_event)
+                    if node.else_body is not None
+                    else assigned
+                )
+                return assigned | (then_assigned & else_assigned)
+            if isinstance(node, CaseStatement):
+                branch_sets = [
+                    walk(item.body, assigned, in_event=in_event)
+                    for item in node.items
+                ]
+                if not branch_sets:
+                    return assigned
+                if not any(not item.values for item in node.items):
+                    branch_sets.append(set(assigned))
+                common = set.intersection(*branch_sets)
+                return assigned | common
+            if isinstance(node, (ForStatement, WhileStatement)):
+                walk(node.body, assigned, in_event=in_event)
+                return assigned
+            return assigned
+
+        walk(stmt, set())
+        return marked
 
     def _expr_references_variable(self, expr: Expr, name: str) -> bool:
         if isinstance(expr, Identifier):

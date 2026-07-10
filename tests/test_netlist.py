@@ -912,6 +912,112 @@ class TestAhdlIncludePathFallback:
         data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
         assert data["out"][-1] == pytest.approx(0.4, abs=1e-9)
 
+    @pytest.mark.parametrize("engine", ["python", "evas-rust"])
+    def test_parent_instance_override_refreshes_child_parameter_expression(
+        self, tmp_path, monkeypatch, engine
+    ):
+        if engine == "evas-rust":
+            _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", engine)
+        va_file = tmp_path / "parent_child_param.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module parent(input electrical vin, output electrical out);
+                parameter real scale = 2.0;
+                child #(.gain(1.5 * scale)) u_child (.vin(vin), .out(out));
+            endmodule
+
+            module child(input electrical vin, output electrical out);
+                parameter real gain = 1.0;
+                analog begin
+                    V(out) <+ gain * V(vin);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_parent_child_param.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "parent_child_param.va"
+
+            Vin (vin 0) vsource type=dc dc=0.1
+            XDUT (vin out) parent scale=4.0
+
+            tran tran stop=1n maxstep=100p
+            save vin out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(0.6, abs=1e-9)
+
+    @pytest.mark.parametrize("engine", ["python", "evas-rust"])
+    def test_sibling_submodules_share_parent_internal_electrical_node(
+        self, tmp_path, monkeypatch, engine
+    ):
+        if engine == "evas-rust":
+            _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", engine)
+        va_file = tmp_path / "sibling_internal_node.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module parent(input electrical vin,
+                          input electrical clk,
+                          output electrical out);
+                electrical shared;
+
+                writer u_writer (.vin(vin), .shared(shared));
+                reader u_reader (.clk(clk), .shared(shared), .out(out));
+            endmodule
+
+            module writer(input electrical vin, output electrical shared);
+                real code;
+                real target;
+                analog begin
+                    code = 0.0;
+                    if (V(vin) > 0.45) code = code + 3.0;
+                    target = code * 0.2666666666666667;
+                    V(shared) <+ transition(target, 0, 200p, 200p);
+                end
+            endmodule
+
+            module reader(input electrical clk,
+                          input electrical shared,
+                          output electrical out);
+                real sampled;
+                analog begin
+                    @(initial_step) sampled = 0.0;
+                    @(cross(V(clk) - 0.45, +1)) sampled = V(shared);
+                    V(out) <+ transition(sampled, 0, 10p, 10p);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_sibling_internal_node.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "sibling_internal_node.va"
+
+            Vin (vin 0) vsource type=pwl wave=[0 0 1n 0 1.1n 0.8 4n 0.8]
+            Vclk (clk 0) vsource type=pulse val0=0 val1=0.9 delay=2n \
+                rise=10p fall=10p width=500p period=2n
+            XDUT (vin clk out) parent
+
+            tran tran stop=4n maxstep=20p
+            save vin clk out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        sample = int(np.argmin(np.abs(data["time"] - 3e-9)))
+        assert data["out"][sample] == pytest.approx(0.8, abs=0.02)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance

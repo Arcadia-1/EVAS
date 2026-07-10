@@ -7719,6 +7719,40 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(0.8, abs=0.11)
 
+    def test_case_without_default_does_not_fake_reinitialization(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module case_reinit_probe(out);
+    output voltage out;
+    integer sel;
+    real env;
+    analog begin
+        @(initial_step) begin
+            sel = 2;
+            env = 1.0;
+        end
+        case (sel)
+            0: env = 0.0;
+            1: env = 0.0;
+        endcase
+        env = env - 0.1;
+        V(out) <+ env;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=1e-9, refine_factor=32, refine_steps=32)
+
+        assert result.signals["out"][-1] == pytest.approx(0.7, abs=0.11)
+
     def test_cross_event_body_samples_other_nodes_at_crossing_time(self):
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module
@@ -12327,3 +12361,19 @@ endmodule
                 "connections": [(None, "n"), (None, "p")],
             }
         ]
+
+    def test_primitive_parameter_expression_refreshes_after_parent_override(self):
+        src = """\
+`include "disciplines.vams"
+module primitive_wrapper(inout electrical p, inout electrical n);
+    parameter real rload = 1000.0;
+    resistor #(.r(2.0 * rload)) r1 (p, n);
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        model.params["rload"] = 2500.0
+        model._refresh_child_param_overrides()
+
+        assert model._analog_primitives[0]["parameters"]["r"] == pytest.approx(5000.0)
