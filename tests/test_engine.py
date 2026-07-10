@@ -7705,6 +7705,8 @@ endmodule
 """
         mod = parse(src)
         ModelCls = compile_module(mod)
+        evaluate_code = ModelCls._generated_code.split("    def post_update_events", 1)[0]
+        assert "self._should_update_discrete_state" in evaluate_code
         model = ModelCls()
 
         sim = Simulator()

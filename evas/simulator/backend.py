@@ -13110,7 +13110,7 @@ class _ModuleCompiler:
         lines.append(f"{prefix}if self._rust_event_write_production({key!r}, nv):")
         lines.append(f"{prefix}    pass")
         lines.append(f"{prefix}else:")
-        body_lines = self._compile_statement(body, indent + 1)
+        body_lines = self._compile_control_flow_body(body, indent + 1)
         if body_lines:
             lines.extend(body_lines)
         else:
@@ -13138,7 +13138,7 @@ class _ModuleCompiler:
         else:
             lines.append(f"{prefix}    pass")
         lines.append(f"{prefix}else:")
-        body_lines = self._compile_statement(body, indent + 1)
+        body_lines = self._compile_control_flow_body(body, indent + 1)
         if body_lines:
             lines.extend(body_lines)
         else:
@@ -13216,7 +13216,7 @@ class _ModuleCompiler:
                 self._event_body_static_linear_state_names(tuple(raw_ops)),
             )
 
-        return self._compile_statement(body, indent)
+        return self._compile_control_flow_body(body, indent)
 
     def _timer_expr_is_constant_or_param(self, expr: Expr) -> bool:
         if isinstance(expr, NumberLiteral):
