@@ -2667,6 +2667,95 @@ endmodule
         assert rust._perf_stats["rust_event_transition_production_requested"] == 0
         assert rust._perf_stats["generic_executor_runs"] == 0
 
+    def test_rust_sim_program_cross_transition_keeps_post_cross_rail_sample(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module hysteresis_transition_sample(vinn, vinp, out_n, out_p, vss, vdd);
+    input voltage vinn, vinp, vss, vdd;
+    output voltage out_n, out_p;
+    parameter real vhys = 10m;
+    parameter real tedge = 50p;
+    integer out_state;
+    real diff, vh, vl;
+    analog begin
+        vh = V(vdd);
+        vl = V(vss);
+        diff = V(vinp) - V(vinn);
+        @(initial_step) out_state = (diff > 0.5 * vhys);
+        @(cross(diff - 0.5 * vhys, +1)) out_state = 1;
+        @(cross(diff + 0.5 * vhys, -1)) out_state = 0;
+        V(out_p) <+ vl + (vh - vl) * transition(out_state ? 1.0 : 0.0, 0.0, tedge, tedge);
+        V(out_n) <+ vl + (vh - vl) * transition(out_state ? 0.0 : 1.0, 0.0, tedge, tedge);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {
+            "vinn": "VINN",
+            "vinp": "VINP",
+            "out_n": "OUTN",
+            "out_p": "OUTP",
+            "vss": "VSS",
+            "vdd": "VDD",
+        }
+        sim = Simulator()
+        sim.add_source("VDD", dc(0.9))
+        sim.add_source("VSS", dc(0.1))
+        sim.add_source("VINP", pwl([0.0, 40e-9, 80e-9], [0.54, 0.56, 0.54]))
+        sim.add_source("VINN", dc(0.55))
+        sim.add_model(model)
+        sim.record("OUTP")
+        sim.record("OUTN")
+
+        result = sim.run(
+            tstop=80e-9,
+            tstep=100e-12,
+            record_step=100e-12,
+            max_step=100e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_transition_count"] == 2
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 2
+        assert sim._perf_stats["generic_executor_runs"] == 0
+
+        post_fall_indices = [
+            index
+            for index, t in enumerate(result.time)
+            if 70e-9 < float(t) < 70e-9 + 2e-12
+        ]
+        assert post_fall_indices
+        first_post_fall = post_fall_indices[0]
+        assert result.signals["OUTP"][first_post_fall] > 0.85
+        assert result.signals["OUTN"][first_post_fall] < 0.15
+
+        stride = max(1, len(result.time) // 160)
+        rail_errors = []
+        for index in range(0, len(result.time), stride):
+            t = float(result.time[index])
+            if t < 0.5e-9:
+                continue
+            out_p = float(result.signals["OUTP"][index])
+            out_n = float(result.signals["OUTN"][index])
+            out_p_high = out_p > 0.5
+            out_n_high = out_n > 0.5
+            if out_p_high == out_n_high:
+                rail_errors.append((t, out_p, out_n))
+            elif out_p_high and (abs(out_p - 0.9) > 0.10 or abs(out_n - 0.1) > 0.10):
+                rail_errors.append((t, out_p, out_n))
+            elif out_n_high and (abs(out_p - 0.1) > 0.10 or abs(out_n - 0.9) > 0.10):
+                rail_errors.append((t, out_p, out_n))
+
+        assert rail_errors == []
+
     def test_rust_sim_program_post_update_cross_refreshes_outputs(self):
         _build_rust_core_or_skip()
         src = """\
@@ -2981,10 +3070,28 @@ endmodule
         assert rust._perf_stats["rust_sim_program_enabled"] == 1
         assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
         assert rust._perf_stats["generic_executor_runs"] == 0
-        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
-        assert list(rust_result.signals["OUT"]) == pytest.approx(
-            list(ref_result.signals["OUT"]), abs=5e-4
-        )
+
+        def sample_at(times, values, target_time):
+            target_time = float(target_time)
+            for index in range(1, len(times)):
+                left_t = float(times[index - 1])
+                right_t = float(times[index])
+                if target_time <= right_t:
+                    left_v = float(values[index - 1])
+                    right_v = float(values[index])
+                    if right_t == left_t:
+                        return right_v
+                    frac = (target_time - left_t) / (right_t - left_t)
+                    return left_v + frac * (right_v - left_v)
+            return float(values[-1])
+
+        signal_deltas = []
+        for ref_t, ref_v in zip(ref_result.time, ref_result.signals["OUT"]):
+            rust_v = sample_at(rust_result.time, rust_result.signals["OUT"], ref_t)
+            signal_deltas.append(abs(float(rust_v) - float(ref_v)))
+
+        assert len(rust_result.time) >= len(ref_result.time)
+        assert max(signal_deltas) <= 5e-4
         assert any(
             math.isclose(float(t), 530e-12, abs_tol=1.0e-15)
             and math.isclose(float(v), 1.0, abs_tol=1.0e-12)

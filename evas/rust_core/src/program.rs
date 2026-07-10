@@ -3106,6 +3106,7 @@ pub fn rust_sim_event_transition_record_trace(
     };
     let mut pre_cross_candidates = Vec::<RustSimCrossCandidate>::with_capacity(event_count);
     let mut post_cross_candidates = Vec::<RustSimCrossCandidate>::with_capacity(event_count);
+    let mut pending_post_cross_refine_time: Option<f64> = None;
 
     let mut cross_prev_values = vec![0.0_f64; event_count];
     let mut cross_prev_times = vec![0.0_f64; event_count];
@@ -3455,6 +3456,14 @@ pub fn rust_sim_event_transition_record_trace(
                 transition_breakpoints += 1;
             }
         }
+        if let Some(bp) = pending_post_cross_refine_time {
+            if bp <= time + eps {
+                pending_post_cross_refine_time = None;
+            } else if bp < time + dt {
+                dt = bp - time;
+                force_record = true;
+            }
+        }
         if use_record_step && next_record_time > time && next_record_time < time + dt {
             dt = next_record_time - time;
             force_record = true;
@@ -3580,6 +3589,16 @@ pub fn rust_sim_event_transition_record_trace(
                 transition_breakpoints += pre_cross_transition_bps;
                 force_record = true;
                 rust_sim_write_sources(sources, source_data, node_values, time)?;
+                if pre_cross_fires > 0 && transition_count > 0 && time < tstop {
+                    let refine_time = (time + internal_transition_step_floor).min(tstop);
+                    if refine_time > time + eps {
+                        pending_post_cross_refine_time =
+                            Some(match pending_post_cross_refine_time {
+                                Some(existing) if existing < refine_time => existing,
+                                _ => refine_time,
+                            });
+                    }
+                }
             }
         }
         if has_pre_step_runtime_events {
@@ -3735,6 +3754,16 @@ pub fn rust_sim_event_transition_record_trace(
                 transition_breakpoints += post_cross_transition_bps;
                 force_record = true;
                 rust_sim_write_sources(sources, source_data, node_values, time)?;
+                if post_cross_fires > 0 && transition_count > 0 && time < tstop {
+                    let refine_time = (time + internal_transition_step_floor).min(tstop);
+                    if refine_time > time + eps {
+                        pending_post_cross_refine_time =
+                            Some(match pending_post_cross_refine_time {
+                                Some(existing) if existing < refine_time => existing,
+                                _ => refine_time,
+                            });
+                    }
+                }
                 evaluate_static_linear_ops(
                     linear_ops,
                     linear_terms,
