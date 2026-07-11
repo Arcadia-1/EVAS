@@ -160,7 +160,10 @@ from evas.simulator.stmt_ir import (
     transfer_hidden_state_names,
     unroll_static_for_statement,
 )
-from evas.simulator.transition_runtime import encode_transition_contribution_program
+from evas.simulator.transition_runtime import (
+    encode_transition_assignment_program,
+    encode_transition_contribution_program,
+)
 
 SOURCE_DC = "dc"
 SOURCE_PULSE = "pulse"
@@ -375,6 +378,7 @@ class RustSimTransition:
     output_scale_expr_start: int = 0
     output_scale_expr_count: int = 0
     default_transition: float = 1.0e-12
+    target_kind: int = BODY_TARGET_NODE
 
 
 @dataclass(frozen=True)
@@ -4018,6 +4022,7 @@ def _convert_event_transition_ops(
                         getattr(model, "default_transition", 1.0e-12)
                         or 1.0e-12
                     ),
+                    target_kind=BODY_TARGET_NODE,
                 )
             )
             converted_transitions += 1
@@ -4037,6 +4042,59 @@ def _convert_event_transition_ops(
                 reasons.append(f"{prefix}:transition_temp_contribution_not_lowered")
                 continue
             append_transition_program(transition_program)
+            continue
+        transition_assignment = encode_transition_assignment_program(
+            stmt,
+            bindings,
+            local_node_slots,
+        )
+        if transition_assignment is not None:
+            flush_continuous_body()
+            if len(transition_assignment.expr_segments) != 6:
+                reasons.append(f"{prefix}:transition_assignment_expr_segment_mismatch")
+                continue
+            segments = []
+            for expr_segment in transition_assignment.expr_segments:
+                segments.append(
+                    _append_expr_segment(
+                        body_expr_ops,
+                        expr_segment,
+                        node_slot_to_global=node_slot_to_global,
+                        state_slot_to_global=state_slot_to_global,
+                        param_slot_to_global=param_slot_to_global,
+                    )
+                )
+            transitions.append(
+                RustSimTransition(
+                    transition_id=len(transitions),
+                    output_node_id=int(
+                        state_slot_to_global.get(
+                            int(transition_assignment.state_slot),
+                            int(transition_assignment.state_slot),
+                        )
+                    ),
+                    reference_node_id=None,
+                    target_expr_start=segments[0][0],
+                    target_expr_count=segments[0][1],
+                    delay_expr_start=segments[1][0],
+                    delay_expr_count=segments[1][1],
+                    rise_expr_start=segments[2][0],
+                    rise_expr_count=segments[2][1],
+                    fall_expr_start=segments[3][0],
+                    fall_expr_count=segments[3][1],
+                    output_bias_expr_start=segments[4][0],
+                    output_bias_expr_count=segments[4][1],
+                    output_scale_expr_start=segments[5][0],
+                    output_scale_expr_count=segments[5][1],
+                    default_transition=float(
+                        getattr(model, "default_transition", 1.0e-12)
+                        or 1.0e-12
+                    ),
+                    target_kind=BODY_TARGET_STATE,
+                )
+            )
+            converted_transitions += 1
+            seen_transition = True
             continue
         if _is_continuous_body_stmt(stmt):
             if seen_transition:

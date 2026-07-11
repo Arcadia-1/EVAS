@@ -1082,6 +1082,15 @@ pub(crate) struct RustSimCrossCandidate {
     pub(crate) trigger_direction: i32,
 }
 
+fn rust_sim_cross_body_time(event: &EvasRustSimEventSpec, event_time: f64) -> f64 {
+    if event.kind == RUST_SIM_EVENT_CROSS && event.phase == RUST_SIM_EVENT_PHASE_POST {
+        let post_side_epsilon = 1.0e-18_f64.max(event_time.abs() * f64::EPSILON * 8.0);
+        event_time + post_side_epsilon
+    } else {
+        event_time
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_collect_cross_events_into(
     events: &[EvasRustSimEventSpec],
@@ -1279,8 +1288,10 @@ fn rust_sim_execute_cross_event_body(
                 if sensitivity == 0.0 {
                     continue;
                 }
-                let nudge_direction = (related.trigger_direction as f64) * sensitivity.signum();
-                node_values[op.index] = original + nudge_direction * delta;
+                let post_side_expr = (related.trigger_direction as f64)
+                    * 1.0e-12_f64.max(baseline_expr.abs() * 1.0e-6);
+                let node_shift = (post_side_expr - baseline_expr) * delta / sensitivity;
+                node_values[op.index] = original + node_shift;
                 restored_nodes.push((op.index, original));
             }
         }
@@ -2187,7 +2198,7 @@ pub(crate) fn rust_sim_apply_transitions(
     transitions: &[EvasRustSimTransitionSpec],
     body_expr_ops: &[EvasRustBodyExprOp],
     node_values: &mut [f64],
-    state_values: &[f64],
+    state_values: &mut [f64],
     param_values: &[f64],
     current_values: &mut [f64],
     target_values: &mut [f64],
@@ -2302,17 +2313,6 @@ pub(crate) fn rust_sim_apply_transitions(
 
     for idx in 0..count {
         let spec = transitions[idx];
-        if spec.output_node_id >= node_values.len() {
-            return Err(-972);
-        }
-        let reference = if spec.reference_node_id == CONDITION_NONE {
-            0.0
-        } else {
-            if spec.reference_node_id >= node_values.len() {
-                return Err(-973);
-            }
-            node_values[spec.reference_node_id]
-        };
         let output_bias = rust_sim_eval_expr_segment(
             body_expr_ops,
             spec.output_bias_expr_start,
@@ -2333,8 +2333,30 @@ pub(crate) fn rust_sim_apply_transitions(
             time,
             1.0,
         )?;
-        node_values[spec.output_node_id] =
-            reference + output_bias + output_scale * output_values[idx];
+        let output_value = output_bias + output_scale * output_values[idx];
+        match spec.target_kind {
+            TARGET_NODE => {
+                if spec.output_node_id >= node_values.len() {
+                    return Err(-972);
+                }
+                let reference = if spec.reference_node_id == CONDITION_NONE {
+                    0.0
+                } else {
+                    if spec.reference_node_id >= node_values.len() {
+                        return Err(-973);
+                    }
+                    node_values[spec.reference_node_id]
+                };
+                node_values[spec.output_node_id] = reference + output_value;
+            }
+            TARGET_STATE => {
+                if spec.output_node_id >= state_values.len() {
+                    return Err(-974);
+                }
+                state_values[spec.output_node_id] = output_value;
+            }
+            _ => return Err(-975),
+        }
     }
     Ok(())
 }
@@ -2619,10 +2641,11 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     return Err(-990);
                 }
                 let event_time = bp;
+                let body_time = rust_sim_cross_body_time(&events[candidate.event_idx], event_time);
                 if event_time < *cursor_time - eps || event_time > bp + eps {
                     continue;
                 }
-                rust_sim_write_sources(sources, source_data, node_values, event_time)?;
+                rust_sim_write_sources(sources, source_data, node_values, body_time)?;
                 evaluate_static_linear_ops(
                     linear_ops,
                     linear_terms,
@@ -2646,7 +2669,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     transition_active_flags,
                     transition_initialized_flags,
                     transition_output_values,
-                    event_time,
+                    body_time,
                     default_transition,
                     false,
                 )?;
@@ -2660,7 +2683,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     node_values,
                     state_values,
                     param_values,
-                    event_time,
+                    body_time,
                     bound_step_limit,
                     file_io.as_deref_mut(),
                     Some(&mut *side_effect_log),
@@ -2688,7 +2711,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     transition_active_flags,
                     transition_initialized_flags,
                     transition_output_values,
-                    event_time,
+                    body_time,
                     default_transition,
                     false,
                 )?;
@@ -2873,7 +2896,8 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             }
         }
 
-        rust_sim_write_sources(sources, source_data, node_values, event_time)?;
+        let body_time = rust_sim_cross_body_time(&events[candidate.event_idx], event_time);
+        rust_sim_write_sources(sources, source_data, node_values, body_time)?;
         evaluate_static_linear_ops(
             linear_ops,
             linear_terms,
@@ -2897,7 +2921,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             transition_active_flags,
             transition_initialized_flags,
             transition_output_values,
-            event_time,
+            body_time,
             default_transition,
             false,
         )?;
@@ -2918,7 +2942,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             node_values,
             state_values,
             param_values,
-            event_time,
+            body_time,
             bound_step_limit,
             file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
@@ -2933,7 +2957,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             bound_step_limit,
             side_effect_log,
             file_io.as_deref_mut(),
-            event_time,
+            body_time,
             RUST_SIM_EVENT_PHASE_PRE,
             candidate.event_idx.saturating_add(1),
             events.len(),
@@ -2961,7 +2985,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             transition_active_flags,
             transition_initialized_flags,
             transition_output_values,
-            event_time,
+            body_time,
             default_transition,
             false,
         )?;

@@ -16,7 +16,7 @@ class RustBackendError(RuntimeError):
     """Raised when an opt-in Rust backend call fails."""
 
 
-EXPECTED_RUST_CORE_ABI_VERSION = 20260706
+EXPECTED_RUST_CORE_ABI_VERSION = 20260711
 
 
 def _usize_max() -> int:
@@ -207,6 +207,7 @@ class RustSimEventSpec(ctypes.Structure):
 
 class RustSimTransitionSpec(ctypes.Structure):
     _fields_ = [
+        ("target_kind", ctypes.c_uint8),
         ("output_node_id", ctypes.c_size_t),
         ("reference_node_id", ctypes.c_size_t),
         ("target_expr_start", ctypes.c_size_t),
@@ -475,6 +476,7 @@ class RustSimSourceRecordProgram:
             reference_node_id = getattr(transition, "reference_node_id", None)
             transition_specs.append(
                 RustSimTransitionSpec(
+                    int(getattr(transition, "target_kind", BODY_TARGET_NODE)),
                     int(getattr(transition, "output_node_id", 0)),
                     _usize_max() if reference_node_id is None else int(reference_node_id),
                     int(getattr(transition, "target_expr_start", 0)),

@@ -7,7 +7,7 @@ use crate::transition::*;
 use crate::util::*;
 
 // C ABI entry points consumed by the Python rust_backend bridge.
-pub const EVAS_RUST_CORE_ABI_VERSION: u32 = 20260706;
+pub const EVAS_RUST_CORE_ABI_VERSION: u32 = 20260711;
 
 #[no_mangle]
 pub extern "C" fn evas_rust_core_abi_version() -> u32 {

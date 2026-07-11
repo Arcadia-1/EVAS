@@ -306,6 +306,7 @@ pub struct EvasRustSimEventSpec {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvasRustSimTransitionSpec {
+    pub target_kind: u8,
     pub output_node_id: usize,
     pub reference_node_id: usize,
     pub target_expr_start: usize,
