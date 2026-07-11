@@ -415,6 +415,27 @@ def _preprocess_lines(raw_lines: List[str]) -> List[str]:
     return result
 
 
+def strict_spectre_netlist_diagnostics(path: str) -> List[str]:
+    """Return strict Spectre compatibility diagnostics for netlist syntax.
+
+    EVAS accepts a few convenience spellings in ordinary mode.  Strict mode
+    must reject spellings that Spectre itself does not accept so a local EVAS
+    pass cannot hide a later Spectre parse failure.
+    """
+    raw_lines = Path(path).read_text(encoding="utf-8").splitlines()
+    diagnostics: List[str] = []
+    for line in _preprocess_lines(raw_lines):
+        if not line.lower().startswith("save"):
+            continue
+        for match in re.finditer(r"(?i)\b[vi]\s*\([^)]*\)", line):
+            token = match.group(0)
+            diagnostics.append(
+                "EVAS-NETLIST-ESPECTRESTRICT: strict Spectre save syntax "
+                f"expects a raw node or branch name; found `save {token}`"
+            )
+    return diagnostics
+
+
 # ---------------------------------------------------------------------------
 # Source parameter parsing
 # ---------------------------------------------------------------------------
@@ -675,7 +696,7 @@ def _normalize_node_name(name: str) -> str:
 def _expand_save_signal(token: str) -> List[Tuple[str, Optional[str]]]:
     """Expand one save token into [(signal, format), ...]."""
     token = _normalize_node_name(token.strip())
-    if not token or token.startswith('options'):
+    if not token or token.startswith('options') or token.lower() == 'time':
         return []
 
     angle_inner_range = re.fullmatch(r'(.+?<)(-?\d+):(-?\d+)(>)', token)

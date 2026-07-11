@@ -576,6 +576,41 @@ class TestAhdlIncludePathFallback:
         assert "ERROR: Spectre strict lint rejected this input." in log
         assert "evas completes with 1 errors" in log
 
+    def test_evas_simulate_spectre_strict_rejects_function_style_save(self, tmp_path):
+        va_file = tmp_path / "strict_save.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module strict_save(out);
+                output out;
+                electrical out;
+                analog V(out) <+ 0.25;
+            endmodule
+        """), encoding="utf-8")
+        scs_file = tmp_path / "tb_strict_save.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "strict_save.va"
+            XDUT (out) strict_save
+            simulatorOptions options spectre_strict=true
+            tran tran stop=1n maxstep=100p
+            save V(out)
+        """), encoding="utf-8")
+        log_path = tmp_path / "evas.log"
+
+        ok = evas_simulate(
+            str(scs_file),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        assert not ok
+        log = log_path.read_text(encoding="utf-8")
+        assert "Spectre strict netlist diagnostics:" in log
+        assert "EVAS-NETLIST-ESPECTRESTRICT" in log
+        assert "save V(out)" in log
+
     def test_evas_simulate_spectre_strict_env_rejects_seeded_rdist_gap(
         self,
         tmp_path,
@@ -1445,6 +1480,44 @@ class TestNetlistRegressions:
         ]
         assert netlist.save_formats["vin_i"] == "3f"
 
+    def test_save_time_is_implicit_and_not_recorded_as_a_signal(self, tmp_path):
+        scs = tmp_path / "tb_save_time.scs"
+        scs.write_text("save clk out time\n", encoding="utf-8")
+
+        netlist = parse_spectre(str(scs))
+
+        assert netlist.save_signals == ["clk", "out"]
+
+    def test_rust_backend_save_time_keeps_one_real_time_column(self, tmp_path, monkeypatch):
+        _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+        va_file = tmp_path / "save_time_out.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module save_time_out(out);
+                output out;
+                electrical out;
+                analog V(out) <+ 0.25;
+            endmodule
+        """), encoding="utf-8")
+        scs_file = tmp_path / "tb_save_time_out.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "save_time_out.va"
+            XDUT (out) save_time_out
+            tran tran stop=1n maxstep=100p
+            save out time
+        """), encoding="utf-8")
+        out_dir = tmp_path / "out"
+
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+
+        with (out_dir / "tran.csv").open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+        assert rows[0] == ["time", "out"]
+        assert float(rows[-1][0]) == pytest.approx(1e-9)
+
     def test_save_square_bracket_ranges_are_expanded_across_lines(self, tmp_path):
         scs = tmp_path / "tb_square_bus_save.scs"
         scs.write_text(textwrap.dedent(r"""\
@@ -1507,6 +1580,42 @@ class TestNetlistRegressions:
 
 
 class TestCsvWriter:
+
+    def test_write_csv_never_duplicates_the_time_column(self, tmp_path):
+        result = SimResult(
+            time=np.array([0.0, 1e-9]),
+            signals={
+                "time": np.array([0.0, 0.0]),
+                "out": np.array([0.1, 0.2]),
+            },
+            step_sizes=np.array([0.0, 1e-9]),
+        )
+        csv_path = tmp_path / "tran.csv"
+
+        _write_csv(csv_path, result, ["out", "time"])
+
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+        assert rows[0] == ["time", "out"]
+        assert [float(row[0]) for row in rows[1:]] == pytest.approx([0.0, 1e-9])
+
+    def test_write_csv_default_analog_precision_preserves_threshold_side(self, tmp_path):
+        just_above_threshold = np.nextafter(0.45, np.inf)
+        result = SimResult(
+            time=np.array([0.0]),
+            signals={
+                "vin": np.array([just_above_threshold]),
+                "out": np.array([1.0]),
+            },
+            step_sizes=np.array([0.0]),
+        )
+        csv_path = tmp_path / "tran.csv"
+
+        _write_csv(csv_path, result, ["vin", "out"])
+
+        row = next(csv.DictReader(csv_path.open(newline="", encoding="utf-8")))
+        assert float(row["vin"]) > 0.45
+        assert float(row["out"]) == pytest.approx(1.0)
 
     def test_write_csv_preserves_formats_and_rounds_integer_columns(self, tmp_path):
         result = SimResult(
