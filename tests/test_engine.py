@@ -2972,6 +2972,99 @@ endmodule
         assert accepted_result.signals["SEEN_T"][2] == pytest.approx(510.25e-12, abs=5e-15)
         assert accepted_result.time[1] == pytest.approx(500.25e-12, abs=5e-15)
 
+    def test_rust_sim_program_off_grid_cross_refine_uses_event_time(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module off_grid_refine_driver(clk, out);
+    input voltage clk;
+    output voltage out;
+    integer q;
+    analog begin
+        @(initial_step) q = 0;
+        @(cross(V(clk)-0.5, +1)) q = 1;
+        V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 100p, 100p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("CLK", pwl([0.0, 1.0e-9], [0.0, 1.0]))
+        sim.add_model(model)
+        sim.record("OUT")
+
+        result = sim.run(
+            tstop=1.1e-9,
+            tstep=1.0e-9,
+            record_step=1.0e-9,
+            max_step=1.0e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        stale_step_end_refine = 1.0e-9 + 1.0e-9 / 64.0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 1
+        assert model.state["q"] == pytest.approx(1.0)
+        assert not any(
+            math.isclose(float(t), stale_step_end_refine, abs_tol=1.0e-15)
+            for t in result.time
+        )
+
+    def test_rust_sim_program_unrelated_cross_does_not_refine_existing_transition(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module unrelated_cross_existing_transition(clk, out, seen_out);
+    input voltage clk;
+    output voltage out, seen_out;
+    integer q, seen;
+    analog begin
+        @(initial_step) begin
+            q = 1;
+            seen = 0;
+        end
+        @(cross(V(clk)-0.5, +1)) seen = 1;
+        V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 1n);
+        V(seen_out) <+ seen;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT", "seen_out": "SEEN"}
+        sim = Simulator()
+        sim.add_source("CLK", pwl([0.0, 1.0e-9], [0.0, 1.0]))
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.record("SEEN")
+
+        result = sim.run(
+            tstop=1.1e-9,
+            tstep=1.0e-9,
+            record_step=1.0e-9,
+            max_step=1.0e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        stale_step_end_refine = 1.0e-9 + 1.0e-9 / 64.0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 1
+        assert model.state["seen"] == pytest.approx(1.0)
+        assert not any(
+            math.isclose(float(t), stale_step_end_refine, abs_tol=1.0e-15)
+            for t in result.time
+        )
+
     def test_rust_sim_program_rdist_event_body_preserves_transition_ramp(self):
         _build_rust_core_or_skip()
         src = """\
