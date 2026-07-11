@@ -1907,6 +1907,22 @@ fn rust_sim_clamp_internal_transition_dt(
     Some(step_floor.min(current_dt))
 }
 
+fn rust_sim_event_time_on_record_grid(
+    event_time: f64,
+    record_step: f64,
+    use_record_step: bool,
+) -> bool {
+    if !use_record_step || !event_time.is_finite() || !record_step.is_finite() || record_step <= 0.0
+    {
+        return false;
+    }
+    if event_time.abs() <= 1.0e-18 {
+        return true;
+    }
+    let nearest = (event_time / record_step).round() * record_step;
+    (event_time - nearest).abs() <= 1.0e-18_f64.max(record_step.abs() * 1.0e-9)
+}
+
 fn rust_sim_expr_segment_contains_stochastic_expr(
     body_expr_ops: &[EvasRustBodyExprOp],
     start: usize,
@@ -2645,6 +2661,20 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                 if event_time < *cursor_time - eps || event_time > bp + eps {
                     continue;
                 }
+                let restore_transition_state = if body_time != event_time {
+                    Some((
+                        transition_current_values.to_vec(),
+                        transition_target_values.to_vec(),
+                        transition_start_times.to_vec(),
+                        transition_start_values.to_vec(),
+                        transition_delays.to_vec(),
+                        transition_rise_times.to_vec(),
+                        transition_fall_times.to_vec(),
+                        transition_active_flags.to_vec(),
+                    ))
+                } else {
+                    None
+                };
                 rust_sim_write_sources(sources, source_data, node_values, body_time)?;
                 evaluate_static_linear_ops(
                     linear_ops,
@@ -2673,6 +2703,26 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     default_transition,
                     false,
                 )?;
+                if let Some((
+                    saved_current_values,
+                    saved_target_values,
+                    saved_start_times,
+                    saved_start_values,
+                    saved_delays,
+                    saved_rise_times,
+                    saved_fall_times,
+                    saved_active_flags,
+                )) = restore_transition_state
+                {
+                    transition_current_values.copy_from_slice(&saved_current_values);
+                    transition_target_values.copy_from_slice(&saved_target_values);
+                    transition_start_times.copy_from_slice(&saved_start_times);
+                    transition_start_values.copy_from_slice(&saved_start_values);
+                    transition_delays.copy_from_slice(&saved_delays);
+                    transition_rise_times.copy_from_slice(&saved_rise_times);
+                    transition_fall_times.copy_from_slice(&saved_fall_times);
+                    transition_active_flags.copy_from_slice(&saved_active_flags);
+                }
                 rust_sim_execute_cross_event_body(
                     sources,
                     events,
@@ -2683,7 +2733,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     node_values,
                     state_values,
                     param_values,
-                    body_time,
+                    event_time,
                     bound_step_limit,
                     file_io.as_deref_mut(),
                     Some(&mut *side_effect_log),
@@ -2711,7 +2761,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     transition_active_flags,
                     transition_initialized_flags,
                     transition_output_values,
-                    body_time,
+                    event_time,
                     default_transition,
                     false,
                 )?;
@@ -2897,6 +2947,20 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
         }
 
         let body_time = rust_sim_cross_body_time(&events[candidate.event_idx], event_time);
+        let restore_transition_state = if body_time != event_time {
+            Some((
+                transition_current_values.to_vec(),
+                transition_target_values.to_vec(),
+                transition_start_times.to_vec(),
+                transition_start_values.to_vec(),
+                transition_delays.to_vec(),
+                transition_rise_times.to_vec(),
+                transition_fall_times.to_vec(),
+                transition_active_flags.to_vec(),
+            ))
+        } else {
+            None
+        };
         rust_sim_write_sources(sources, source_data, node_values, body_time)?;
         evaluate_static_linear_ops(
             linear_ops,
@@ -2925,6 +2989,26 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             default_transition,
             false,
         )?;
+        if let Some((
+            saved_current_values,
+            saved_target_values,
+            saved_start_times,
+            saved_start_values,
+            saved_delays,
+            saved_rise_times,
+            saved_fall_times,
+            saved_active_flags,
+        )) = restore_transition_state
+        {
+            transition_current_values.copy_from_slice(&saved_current_values);
+            transition_target_values.copy_from_slice(&saved_target_values);
+            transition_start_times.copy_from_slice(&saved_start_times);
+            transition_start_values.copy_from_slice(&saved_start_values);
+            transition_delays.copy_from_slice(&saved_delays);
+            transition_rise_times.copy_from_slice(&saved_rise_times);
+            transition_fall_times.copy_from_slice(&saved_fall_times);
+            transition_active_flags.copy_from_slice(&saved_active_flags);
+        }
         let before_target_values = transition_target_values.to_vec();
         let before_start_times = transition_start_times.to_vec();
         let before_start_values = transition_start_values.to_vec();
@@ -2942,7 +3026,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             node_values,
             state_values,
             param_values,
-            body_time,
+            event_time,
             bound_step_limit,
             file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
@@ -2957,7 +3041,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             bound_step_limit,
             side_effect_log,
             file_io.as_deref_mut(),
-            body_time,
+            event_time,
             RUST_SIM_EVENT_PHASE_PRE,
             candidate.event_idx.saturating_add(1),
             events.len(),
@@ -2985,7 +3069,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             transition_active_flags,
             transition_initialized_flags,
             transition_output_values,
-            body_time,
+            event_time,
             default_transition,
             false,
         )?;
@@ -3673,13 +3757,16 @@ pub fn rust_sim_event_transition_record_trace(
                 force_record = true;
                 rust_sim_write_sources(sources, source_data, node_values, time)?;
                 if let Some(event_time) = pre_cross_transition_refine_time {
-                    let refine_time = (event_time + internal_transition_step_floor).min(tstop);
-                    if refine_time > event_time + eps {
-                        pending_post_cross_refine_time =
-                            Some(match pending_post_cross_refine_time {
-                                Some(existing) if existing < refine_time => existing,
-                                _ => refine_time,
-                            });
+                    if rust_sim_event_time_on_record_grid(event_time, record_step, use_record_step)
+                    {
+                        let refine_time = (event_time + internal_transition_step_floor).min(tstop);
+                        if refine_time > event_time + eps {
+                            pending_post_cross_refine_time =
+                                Some(match pending_post_cross_refine_time {
+                                    Some(existing) if existing < refine_time => existing,
+                                    _ => refine_time,
+                                });
+                        }
                     }
                 }
             }
@@ -3838,13 +3925,16 @@ pub fn rust_sim_event_transition_record_trace(
                 force_record = true;
                 rust_sim_write_sources(sources, source_data, node_values, time)?;
                 if let Some(event_time) = post_cross_transition_refine_time {
-                    let refine_time = (event_time + internal_transition_step_floor).min(tstop);
-                    if refine_time > event_time + eps {
-                        pending_post_cross_refine_time =
-                            Some(match pending_post_cross_refine_time {
-                                Some(existing) if existing < refine_time => existing,
-                                _ => refine_time,
-                            });
+                    if rust_sim_event_time_on_record_grid(event_time, record_step, use_record_step)
+                    {
+                        let refine_time = (event_time + internal_transition_step_floor).min(tstop);
+                        if refine_time > event_time + eps {
+                            pending_post_cross_refine_time =
+                                Some(match pending_post_cross_refine_time {
+                                    Some(existing) if existing < refine_time => existing,
+                                    _ => refine_time,
+                                });
+                        }
                     }
                 }
                 evaluate_static_linear_ops(
