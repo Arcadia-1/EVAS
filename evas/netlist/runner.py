@@ -42,6 +42,7 @@ from .spectre_parser import (
     _parse_suffix_number,
     has_transistors,
     parse_spectre,
+    strict_spectre_netlist_diagnostics,
 )
 
 try:
@@ -964,10 +965,13 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
     if save_formats is None:
         save_formats = {}
     signal_names = save_signals if save_signals else sorted(result.signals.keys())
-    valid_signals = [s for s in signal_names if s in result.signals]
+    valid_signals = [
+        s for s in signal_names
+        if s.lower() != "time" and s in result.signals
+    ]
     signal_arrays = [result.signals[s] for s in valid_signals]
     signal_formats = [
-        save_formats.get(sig, 'd' if sig.endswith('_code') else '6e')
+        save_formats.get(sig, 'd' if sig.endswith('_code') else '17e')
         for sig in valid_signals
     ]
 
@@ -1119,6 +1123,18 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             "enabled",
         }
     )
+    if spectre_strict_enabled:
+        netlist_diagnostics = strict_spectre_netlist_diagnostics(str(scs_path))
+        if netlist_diagnostics:
+            log.write("Spectre strict netlist diagnostics:")
+            for diagnostic in netlist_diagnostics:
+                log.write(f"    {diagnostic}")
+            errors += len(netlist_diagnostics)
+            log.write("ERROR: Spectre strict netlist validation rejected this input.")
+            log.write(f"evas completes with {errors} errors, {warnings} warnings.")
+            if log_file:
+                log_file.close()
+            return False
     if ahdllint_enabled or spectre_strict_enabled:
         lint_count, lint_has_errors = _log_ahdllint_diagnostics(
             scs_path,

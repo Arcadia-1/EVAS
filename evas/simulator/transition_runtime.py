@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import MutableSequence, Optional, Tuple
 
 from evas.simulator.expr_ir import (
+    SYMBOL_STATE_SCALAR,
     BinaryExprIR,
     BindingTableIR,
     BodyExprOp,
@@ -47,6 +48,43 @@ class TransitionContributionProgram:
     @property
     def contribution_count(self) -> int:
         return len(self.output_node_slots)
+
+
+@dataclass(frozen=True)
+class TransitionAssignmentProgram:
+    """One transition expression assigned to a scalar model-state slot."""
+
+    state_slot: int
+    expr_segments: Tuple[Tuple[BodyExprOp, ...], ...]
+
+
+def encode_transition_assignment_program(
+    stmt_ir: StmtIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+) -> Optional[TransitionAssignmentProgram]:
+    """Encode ``state = transition(...)`` for the strict Rust simulator."""
+
+    if not isinstance(stmt_ir, AssignmentIR) or not isinstance(
+        stmt_ir.target, IdentifierIR
+    ):
+        return None
+    binding = bindings.resolve(stmt_ir.target.name)
+    if binding is None or binding.kind != SYMBOL_STATE_SCALAR:
+        return None
+    transition_args = _transition_call_args(stmt_ir.value)
+    if transition_args is None:
+        return None
+    expr_segments = []
+    for expr in transition_args:
+        encoded = encode_body_expr_ops(expr, bindings, node_slots)
+        if encoded is None:
+            return None
+        expr_segments.append(encoded)
+    return TransitionAssignmentProgram(
+        state_slot=int(binding.slot),
+        expr_segments=tuple(expr_segments),
+    )
 
 
 def encode_transition_contribution_program(

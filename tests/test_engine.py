@@ -2667,6 +2667,195 @@ endmodule
         assert rust._perf_stats["rust_event_transition_production_requested"] == 0
         assert rust._perf_stats["generic_executor_runs"] == 0
 
+    def test_rust_sim_program_transition_assignment_reused_by_continuous_body(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module transition_state_reuse(lo, vin, out, direct);
+    input voltage lo, vin;
+    output voltage out, direct;
+    parameter real vcm = 0.45;
+    parameter real vth = 0.45;
+    parameter real tr = 200p;
+    integer lo_state;
+    real sign_value;
+    real mixed_value;
+    analog begin
+        @(initial_step) lo_state = -1;
+        @(cross(V(lo)-vth, +1) or cross(V(lo)-vth, -1))
+            lo_state = (V(lo) > vth) ? 1 : -1;
+        sign_value = transition((lo_state > 0) ? 1.0 : -1.0, 0.0, tr, tr);
+        mixed_value = vcm + (V(vin) - vcm) * sign_value;
+        V(out) <+ mixed_value;
+        V(direct) <+ transition((lo_state > 0) ? 1.0 : -1.0, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {
+                "lo": "LO",
+                "vin": "VIN",
+                "out": "OUT",
+                "direct": "DIRECT",
+            }
+            sim = Simulator()
+            sim.add_source(
+                "LO",
+                pulse(
+                    0.0,
+                    0.9,
+                    period=2e-9,
+                    width=1e-9,
+                    rise=50e-12,
+                    fall=50e-12,
+                    delay=0.5e-9,
+                ),
+            )
+            sim.add_source("VIN", dc(0.65))
+            sim.add_model(model)
+            sim.record("OUT")
+            sim.record("DIRECT")
+            return sim
+
+        ref = build_sim()
+        ref_result = ref.run(
+            tstop=4e-9,
+            tstep=100e-12,
+            record_step=50e-12,
+            max_step=50e-12,
+            skip_source_error_control=True,
+        )
+
+        rust = build_sim()
+        rust_result = rust.run(
+            tstop=4e-9,
+            tstep=100e-12,
+            record_step=50e-12,
+            max_step=50e-12,
+            skip_source_error_control=True,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+        )
+
+        def sample_at(times, values, target_time):
+            for index in range(1, len(times)):
+                left_t = float(times[index - 1])
+                right_t = float(times[index])
+                if target_time <= right_t:
+                    left_v = float(values[index - 1])
+                    right_v = float(values[index])
+                    if right_t == left_t:
+                        return right_v
+                    frac = (target_time - left_t) / (right_t - left_t)
+                    return left_v + frac * (right_v - left_v)
+            return float(values[-1])
+
+        for signal in ("OUT", "DIRECT"):
+            deltas = []
+            for ref_t, ref_v in zip(ref_result.time, ref_result.signals[signal]):
+                rust_v = sample_at(rust_result.time, rust_result.signals[signal], ref_t)
+                deltas.append(abs(float(ref_v) - rust_v))
+            assert max(deltas) <= 2.0e-3
+
+        assert max(rust_result.signals["OUT"]) > 0.6
+        assert min(rust_result.signals["OUT"]) < 0.3
+        assert rust._perf_stats["rust_full_model_required_failures"] == 0
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 2
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_cross_transition_keeps_post_cross_rail_sample(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module hysteresis_transition_sample(vinn, vinp, out_n, out_p, vss, vdd);
+    input voltage vinn, vinp, vss, vdd;
+    output voltage out_n, out_p;
+    parameter real vhys = 10m;
+    parameter real tedge = 50p;
+    integer out_state;
+    real diff, vh, vl;
+    analog begin
+        vh = V(vdd);
+        vl = V(vss);
+        diff = V(vinp) - V(vinn);
+        @(initial_step) out_state = (diff > 0.5 * vhys);
+        @(cross(diff - 0.5 * vhys, +1)) out_state = 1;
+        @(cross(diff + 0.5 * vhys, -1)) out_state = 0;
+        V(out_p) <+ vl + (vh - vl) * transition(out_state ? 1.0 : 0.0, 0.0, tedge, tedge);
+        V(out_n) <+ vl + (vh - vl) * transition(out_state ? 0.0 : 1.0, 0.0, tedge, tedge);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {
+            "vinn": "VINN",
+            "vinp": "VINP",
+            "out_n": "OUTN",
+            "out_p": "OUTP",
+            "vss": "VSS",
+            "vdd": "VDD",
+        }
+        sim = Simulator()
+        sim.add_source("VDD", dc(0.9))
+        sim.add_source("VSS", dc(0.1))
+        sim.add_source("VINP", pwl([0.0, 40e-9, 80e-9], [0.54, 0.56, 0.54]))
+        sim.add_source("VINN", dc(0.55))
+        sim.add_model(model)
+        sim.record("OUTP")
+        sim.record("OUTN")
+
+        result = sim.run(
+            tstop=80e-9,
+            tstep=100e-12,
+            record_step=100e-12,
+            max_step=100e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_transition_count"] == 2
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 2
+        assert sim._perf_stats["generic_executor_runs"] == 0
+
+        post_fall_indices = [
+            index
+            for index, t in enumerate(result.time)
+            if 70e-9 < float(t) < 70e-9 + 2e-12
+        ]
+        assert post_fall_indices
+        first_post_fall = post_fall_indices[0]
+        assert result.signals["OUTP"][first_post_fall] > 0.85
+        assert result.signals["OUTN"][first_post_fall] < 0.15
+
+        stride = max(1, len(result.time) // 160)
+        rail_errors = []
+        for index in range(0, len(result.time), stride):
+            t = float(result.time[index])
+            if t < 0.5e-9:
+                continue
+            out_p = float(result.signals["OUTP"][index])
+            out_n = float(result.signals["OUTN"][index])
+            out_p_high = out_p > 0.5
+            out_n_high = out_n > 0.5
+            if out_p_high == out_n_high:
+                rail_errors.append((t, out_p, out_n))
+            elif out_p_high and (abs(out_p - 0.9) > 0.10 or abs(out_n - 0.1) > 0.10):
+                rail_errors.append((t, out_p, out_n))
+            elif out_n_high and (abs(out_p - 0.1) > 0.10 or abs(out_n - 0.9) > 0.10):
+                rail_errors.append((t, out_p, out_n))
+
+        assert rail_errors == []
+
     def test_rust_sim_program_post_update_cross_refreshes_outputs(self):
         _build_rust_core_or_skip()
         src = """\
@@ -2883,6 +3072,99 @@ endmodule
         assert accepted_result.signals["SEEN_T"][2] == pytest.approx(510.25e-12, abs=5e-15)
         assert accepted_result.time[1] == pytest.approx(500.25e-12, abs=5e-15)
 
+    def test_rust_sim_program_off_grid_cross_refine_uses_event_time(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module off_grid_refine_driver(clk, out);
+    input voltage clk;
+    output voltage out;
+    integer q;
+    analog begin
+        @(initial_step) q = 0;
+        @(cross(V(clk)-0.5, +1)) q = 1;
+        V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 100p, 100p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("CLK", pwl([0.0, 1.0e-9], [0.0, 1.0]))
+        sim.add_model(model)
+        sim.record("OUT")
+
+        result = sim.run(
+            tstop=1.1e-9,
+            tstep=1.0e-9,
+            record_step=1.0e-9,
+            max_step=1.0e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        stale_step_end_refine = 1.0e-9 + 1.0e-9 / 64.0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 1
+        assert model.state["q"] == pytest.approx(1.0)
+        assert not any(
+            math.isclose(float(t), stale_step_end_refine, abs_tol=1.0e-15)
+            for t in result.time
+        )
+
+    def test_rust_sim_program_unrelated_cross_does_not_refine_existing_transition(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module unrelated_cross_existing_transition(clk, out, seen_out);
+    input voltage clk;
+    output voltage out, seen_out;
+    integer q, seen;
+    analog begin
+        @(initial_step) begin
+            q = 1;
+            seen = 0;
+        end
+        @(cross(V(clk)-0.5, +1)) seen = 1;
+        V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 1n);
+        V(seen_out) <+ seen;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT", "seen_out": "SEEN"}
+        sim = Simulator()
+        sim.add_source("CLK", pwl([0.0, 1.0e-9], [0.0, 1.0]))
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.record("SEEN")
+
+        result = sim.run(
+            tstop=1.1e-9,
+            tstep=1.0e-9,
+            record_step=1.0e-9,
+            max_step=1.0e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        stale_step_end_refine = 1.0e-9 + 1.0e-9 / 64.0
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_fires"] >= 1
+        assert model.state["seen"] == pytest.approx(1.0)
+        assert not any(
+            math.isclose(float(t), stale_step_end_refine, abs_tol=1.0e-15)
+            for t in result.time
+        )
+
     def test_rust_sim_program_rdist_event_body_preserves_transition_ramp(self):
         _build_rust_core_or_skip()
         src = """\
@@ -2981,10 +3263,28 @@ endmodule
         assert rust._perf_stats["rust_sim_program_enabled"] == 1
         assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
         assert rust._perf_stats["generic_executor_runs"] == 0
-        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
-        assert list(rust_result.signals["OUT"]) == pytest.approx(
-            list(ref_result.signals["OUT"]), abs=5e-4
-        )
+
+        def sample_at(times, values, target_time):
+            target_time = float(target_time)
+            for index in range(1, len(times)):
+                left_t = float(times[index - 1])
+                right_t = float(times[index])
+                if target_time <= right_t:
+                    left_v = float(values[index - 1])
+                    right_v = float(values[index])
+                    if right_t == left_t:
+                        return right_v
+                    frac = (target_time - left_t) / (right_t - left_t)
+                    return left_v + frac * (right_v - left_v)
+            return float(values[-1])
+
+        signal_deltas = []
+        for ref_t, ref_v in zip(ref_result.time, ref_result.signals["OUT"]):
+            rust_v = sample_at(rust_result.time, rust_result.signals["OUT"], ref_t)
+            signal_deltas.append(abs(float(rust_v) - float(ref_v)))
+
+        assert len(rust_result.time) >= len(ref_result.time)
+        assert max(signal_deltas) <= 5e-4
         assert any(
             math.isclose(float(t), 530e-12, abs_tol=1.0e-15)
             and math.isclose(float(v), 1.0, abs_tol=1.0e-12)
@@ -4153,6 +4453,150 @@ endmodule
         assert rust._perf_stats["rust_sim_program_transition_count"] == 2
         assert rust._perf_stats["generic_executor_runs"] == 0
 
+    def test_rust_sim_program_combined_cross_disable_clears_while_clock_high(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module combined_cross_disable_clear(clk, enable, out);
+    input voltage clk, enable;
+    output voltage out;
+    integer state;
+    analog begin
+        @(initial_step) begin
+            state = 0;
+        end
+        @(cross(V(clk) - 0.45, +1) or cross(V(enable) - 0.45, -1)) begin
+            if (V(enable) < 0.45)
+                state = 0;
+            else
+                state = 2;
+        end
+        V(out) <+ transition(0.45 * state, 0.0, 200p, 200p);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "enable": "ENABLE", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("CLK", pwl([0.0, 71.2e-9, 71.26e-9, 73e-9], [0.0, 0.0, 0.9, 0.9]))
+            sim.add_source("ENABLE", pwl([0.0, 72e-9, 72.1e-9, 73e-9], [0.9, 0.9, 0.0, 0.0]))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim
+
+        reference = build_sim()
+        reference_result = reference.run(
+            tstop=73e-9,
+            tstep=80e-12,
+            record_step=80e-12,
+            max_step=80e-12,
+            skip_source_error_control=True,
+        )
+
+        rust = build_sim()
+        rust_result = rust.run(
+            tstop=73e-9,
+            tstep=80e-12,
+            record_step=80e-12,
+            max_step=80e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert reference_result.signals["OUT"][-1] == pytest.approx(0.0, abs=1e-12)
+        assert rust_result.signals["OUT"][-1] == pytest.approx(0.0, abs=1e-12)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+
+    def test_rust_sim_program_post_cross_observes_simultaneous_transition_post_side(self):
+        _build_rust_core_or_skip()
+        driver_src = """\
+`include "disciplines.vams"
+module simultaneous_post_cross_driver(vin, decision_clk, late);
+    input voltage vin;
+    output voltage decision_clk, late;
+    real level;
+    real late_level;
+    analog begin
+        level = (V(vin) > 0.45) ? 0.9 : 0.0;
+        late_level = (V(vin) > 0.45) ? 0.89999999999998 : 0.0;
+        V(decision_clk) <+ transition(level, 0.0, 200p, 200p);
+        V(late) <+ transition(late_level, 0.0, 200p, 200p);
+    end
+endmodule
+"""
+        observer_src = """\
+`include "disciplines.vams"
+module simultaneous_post_cross_observer(decision_clk, late, out);
+    input voltage decision_clk, late;
+    output voltage out;
+    integer state;
+    analog begin
+        @(initial_step) state = 0;
+        @(cross(V(decision_clk) - 0.45, +1)) begin
+            if (V(late) > 0.45)
+                state = 1;
+            else
+                state = 0;
+        end
+        V(out) <+ state;
+    end
+endmodule
+"""
+        DriverCls = compile_module(parse(driver_src))
+        ObserverCls = compile_module(parse(observer_src))
+
+        def build_sim():
+            driver = DriverCls()
+            driver.node_map = {
+                "vin": "VIN",
+                "decision_clk": "DECISION_CLK",
+                "late": "LATE",
+            }
+            observer = ObserverCls()
+            observer.node_map = {
+                "decision_clk": "DECISION_CLK",
+                "late": "LATE",
+                "out": "OUT",
+            }
+            sim = Simulator()
+            sim.add_source("VIN", pwl([0.0, 2e-9, 2.1e-9, 4e-9], [0.0, 0.0, 0.9, 0.9]))
+            sim.add_model(driver)
+            sim.add_model(observer)
+            sim.record("OUT")
+            return sim
+
+        reference = build_sim()
+        reference_result = reference.run(
+            tstop=4e-9,
+            tstep=50e-12,
+            record_step=50e-12,
+            max_step=50e-12,
+            skip_source_error_control=True,
+        )
+
+        rust = build_sim()
+        rust_result = rust.run(
+            tstop=4e-9,
+            tstep=50e-12,
+            record_step=50e-12,
+            max_step=50e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert reference_result.signals["OUT"][-1] == pytest.approx(1.0, abs=1e-12)
+        assert rust_result.signals["OUT"][-1] == pytest.approx(1.0, abs=1e-12)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
     def test_rust_sim_program_state_owned_timer_rearms_with_abstime(self):
         _build_rust_core_or_skip()
         src = """\

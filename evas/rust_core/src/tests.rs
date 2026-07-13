@@ -677,6 +677,7 @@ fn detects_transition_target_change_after_pre_always_state_update() {
         body_stmt_count: body_stmt_ops.len(),
     }];
     let transitions = [EvasRustSimTransitionSpec {
+        target_kind: TARGET_NODE,
         output_node_id: 2,
         reference_node_id: CONDITION_NONE,
         target_expr_start: 32,
