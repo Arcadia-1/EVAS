@@ -1195,8 +1195,9 @@ def _reject_model_dynamic_semantics(model: Any, model_index: int) -> Tuple[str, 
     model_cls = getattr(model, "__class__", type(model))
     prefix = f"model:{model_index}:{getattr(model_cls, '__name__', 'unknown')}"
     reasons: list[str] = []
-    has_dynamic = getattr(model, "_has_dynamic_breakpoints_tree", None)
-    if has_dynamic is not None and bool(has_dynamic()):
+    # The caller already flattened hierarchy child-first. Inspect only this
+    # model's own semantics so child events are not rejected again at parents.
+    if bool(getattr(model_cls, "_has_dynamic_breakpoints", True)):
         reasons.append(f"{prefix}:event_breakpoints_not_lowered")
     if bool(getattr(model_cls, "_has_post_update_events", True)):
         reasons.append(f"{prefix}:post_update_not_lowered")

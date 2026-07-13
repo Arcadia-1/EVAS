@@ -1288,6 +1288,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in {'"', "'"}:
                     v = v[1:-1]
             model.params[model_key] = v
+        model._refresh_child_param_overrides()
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
 
@@ -1303,10 +1304,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     # 5. Record signals
     required_trace_signals = _parse_required_trace_signals(simopt)
     required_trace_nodes = _trace_nodes_for_signals(required_trace_signals, all_nodes)
-    if required_trace_nodes:
+    explicit_save_signals = list(netlist.save_signals)
+    if required_trace_nodes and explicit_save_signals:
+        record_nodes = set(explicit_save_signals) | set(required_trace_nodes)
+    elif required_trace_nodes:
         record_nodes = set(required_trace_nodes)
     else:
-        record_nodes = set(netlist.save_signals) if netlist.save_signals else all_nodes
+        record_nodes = set(explicit_save_signals) if explicit_save_signals else all_nodes
     if record_nodes:
         sim.record(*sorted(record_nodes))
     if required_trace_signals:
@@ -1732,13 +1736,21 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     derived = _derive_bus_signals(result)
     derive_elapsed = time.time() - t_derive_start
     result.signals.update(derived)
-    if required_trace_signals:
+    if required_trace_signals and explicit_save_signals:
+        required_outputs = _trace_output_signals_for_request(
+            required_trace_signals,
+            set(result.signals.keys()),
+        )
+        save_with_derived = _dedupe_signal_names(
+            explicit_save_signals + required_outputs + list(derived.keys())
+        )
+    elif required_trace_signals:
         save_with_derived = _trace_output_signals_for_request(
             required_trace_signals,
             set(result.signals.keys()),
         )
     else:
-        save_with_derived = list(netlist.save_signals) + list(derived.keys())
+        save_with_derived = explicit_save_signals + list(derived.keys())
 
     if indexed_parity:
         report = check_indexed_trace_round_trip(

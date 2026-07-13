@@ -912,6 +912,112 @@ class TestAhdlIncludePathFallback:
         data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
         assert data["out"][-1] == pytest.approx(0.4, abs=1e-9)
 
+    @pytest.mark.parametrize("engine", ["python", "evas-rust"])
+    def test_parent_instance_override_refreshes_child_parameter_expression(
+        self, tmp_path, monkeypatch, engine
+    ):
+        if engine == "evas-rust":
+            _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", engine)
+        va_file = tmp_path / "parent_child_param.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module parent(input electrical vin, output electrical out);
+                parameter real scale = 2.0;
+                child #(.gain(1.5 * scale)) u_child (.vin(vin), .out(out));
+            endmodule
+
+            module child(input electrical vin, output electrical out);
+                parameter real gain = 1.0;
+                analog begin
+                    V(out) <+ gain * V(vin);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_parent_child_param.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "parent_child_param.va"
+
+            Vin (vin 0) vsource type=dc dc=0.1
+            XDUT (vin out) parent scale=4.0
+
+            tran tran stop=1n maxstep=100p
+            save vin out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        assert data["out"][-1] == pytest.approx(0.6, abs=1e-9)
+
+    @pytest.mark.parametrize("engine", ["python", "evas-rust"])
+    def test_sibling_submodules_share_parent_internal_electrical_node(
+        self, tmp_path, monkeypatch, engine
+    ):
+        if engine == "evas-rust":
+            _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", engine)
+        va_file = tmp_path / "sibling_internal_node.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module parent(input electrical vin,
+                          input electrical clk,
+                          output electrical out);
+                electrical shared;
+
+                writer u_writer (.vin(vin), .shared(shared));
+                reader u_reader (.clk(clk), .shared(shared), .out(out));
+            endmodule
+
+            module writer(input electrical vin, output electrical shared);
+                real code;
+                real target;
+                analog begin
+                    code = 0.0;
+                    if (V(vin) > 0.45) code = code + 3.0;
+                    target = code * 0.2666666666666667;
+                    V(shared) <+ transition(target, 0, 200p, 200p);
+                end
+            endmodule
+
+            module reader(input electrical clk,
+                          input electrical shared,
+                          output electrical out);
+                real sampled;
+                analog begin
+                    @(initial_step) sampled = 0.0;
+                    @(cross(V(clk) - 0.45, +1)) sampled = V(shared);
+                    V(out) <+ transition(sampled, 0, 10p, 10p);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb_sibling_internal_node.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "sibling_internal_node.va"
+
+            Vin (vin 0) vsource type=pwl wave=[0 0 1n 0 1.1n 0.8 4n 0.8]
+            Vclk (clk 0) vsource type=pulse val0=0 val1=0.9 delay=2n \
+                rise=10p fall=10p width=500p period=2n
+            XDUT (vin clk out) parent
+
+            tran tran stop=4n maxstep=20p
+            save vin clk out
+        """))
+
+        out_dir = tmp_path / "out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+        sample = int(np.argmin(np.abs(data["time"] - 3e-9)))
+        assert data["out"][sample] == pytest.approx(0.8, abs=0.02)
+
 
 # ===========================================================================
 # EVAS/Spectre startup conformance
@@ -1338,6 +1444,54 @@ class TestNetlistRegressions:
             "DOUT<4>", "DOUT<3>", "DOUT<2>", "DOUT<1>", "DOUT<0>",
         ]
         assert netlist.save_formats["vin_i"] == "3f"
+
+    def test_save_square_bracket_ranges_are_expanded_across_lines(self, tmp_path):
+        scs = tmp_path / "tb_square_bus_save.scs"
+        scs.write_text(textwrap.dedent(r"""\
+            save en b[1:0] \
+                th[3:0]
+            save aout
+        """))
+
+        netlist = parse_spectre(str(scs))
+
+        assert netlist.save_signals == [
+            "en", "b1", "b0", "th3", "th2", "th1", "th0", "aout",
+        ]
+
+    def test_required_trace_preserves_explicit_save_columns(self, tmp_path, monkeypatch):
+        va_file = tmp_path / "scalar_out.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module scalar_out(en, aout);
+                input en;
+                output aout;
+                electrical en, aout;
+
+                analog begin
+                    V(aout) <+ V(en);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_scalar_out.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            Ven (en 0) vsource dc=0.9 type=dc
+            X0 (en aout) scalar_out
+            tran tran stop=1n maxstep=1n
+            save en aout
+            ahdl_include "scalar_out.va"
+        """))
+        monkeypatch.setenv("EVAS_REQUIRED_TRACE_SIGNALS", "en")
+
+        out_dir = tmp_path / "out_scalar_out"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        with (out_dir / "tran.csv").open(newline="") as f:
+            header = next(csv.reader(f))
+
+        assert header == ["time", "en", "aout"]
 
     def test_implicit_multiline_pwl_wave_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_multiline_pwl.scs"
@@ -1900,6 +2054,55 @@ class TestIndexedMigrationHarness:
         assert "evas_rust_full_model_required = true" in log
         assert "rust_sim_program_enabled = 1" in log
         assert (out_dir / "tran.csv").exists()
+
+    def test_evas_rust_accepts_same_line_consecutive_contributions(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        monkeypatch.setenv("EVAS_ENGINE", "evas2")
+        va_file = tmp_path / "same_line_contrib.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module same_line_contrib(a, b);
+                output a, b;
+                electrical a, b;
+                parameter real x = 1.25, y = 2.5, tr = 20p;
+
+                analog begin
+                    V(a)<+transition(x,0,tr,tr); V(b)<+transition(y,0,tr,tr);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_same_line_contrib.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "same_line_contrib.va"
+            XDUT (a b) same_line_contrib
+            simulatorOptions options evas_engine=evas2 evas_skip_source_error_control=true
+            tran tran stop=1n maxstep=10p
+            save a b
+        """))
+        out_dir = tmp_path / "out_same_line_contrib"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs_file), log_path=str(log_path), output_dir=str(out_dir))
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas-rust" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "rust_full_model_required_failures = 0" in log
+        assert "rust_sim_program_enabled = 1" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert "rust_sim_program_record_count = 2" in log
+        assert "continuous_contribution_not_lowered" not in log
+
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+        assert rows
+        assert float(rows[-1]["a"]) == pytest.approx(1.25)
+        assert float(rows[-1]["b"]) == pytest.approx(2.5)
 
     def test_python_engine_is_manual_fallback_when_rust_backend_is_missing(
         self,
@@ -2999,6 +3202,87 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(80e-9) == pytest.approx(-5.95e-23, rel=0.02)
         assert sample_at(100e-9) == pytest.approx(-4.05e-23, rel=0.03)
 
+    def test_continuous_real_chain_updates_every_evaluation(self, tmp_path):
+        va_file = tmp_path / "offset_gain_amplifier.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module offset_gain_amplifier(sigin, sigout);
+                input sigin;
+                output sigout;
+                electrical sigin, sigout;
+                real adjusted_input;
+
+                analog begin
+                    adjusted_input = V(sigin);
+                    adjusted_input = adjusted_input - 0.2;
+                    V(sigout) <+ 3.0 * adjusted_input;
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_offset_gain_amplifier.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "offset_gain_amplifier.va"
+            Vin (sigin 0) vsource type=pwl wave=[0 0.1 10n 0.5]
+            XDUT (sigin sigout) offset_gain_amplifier
+            tran tran stop=10n maxstep=1n
+            save sigin sigout
+        """))
+
+        out_dir = tmp_path / "out_offset_gain_amplifier"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        final = rows[-1]
+        assert float(final["sigout"]) == pytest.approx(0.9, abs=1e-9)
+
+    def test_continuous_guarded_real_chain_clamps_each_evaluation(self, tmp_path):
+        va_file = tmp_path / "safe_analog_divider.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module safe_analog_divider(signumer, sigdenom, sigout);
+                input signumer, sigdenom;
+                output sigout;
+                electrical signumer, sigdenom, sigout;
+                parameter real gain = 1.0;
+                parameter real min_sigdenom = 0.2 from (0:inf);
+                real denominator;
+
+                analog begin
+                    denominator = V(sigdenom);
+                    if (abs(denominator) < min_sigdenom)
+                        denominator = (denominator >= 0.0) ? min_sigdenom : -min_sigdenom;
+                    V(sigout) <+ gain * V(signumer) / denominator;
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_safe_analog_divider.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "safe_analog_divider.va"
+            Vnum (signumer 0) vsource type=pwl wave=[0 -0.4 0.75n -0.4 0.80n 0.8 1.55n 0.8 1.60n 0.8 2.35n 0.8 2.40n -0.6 3.15n -0.6 3.20n 0.5 4.0n 0.5]
+            Vden (sigdenom 0) vsource type=pwl wave=[0 1.5 0.75n 1.5 0.80n 0 1.55n 0 1.60n 0.08 2.35n 0.08 2.40n -0.08 3.15n -0.08 3.20n -1.2 4.0n -1.2]
+            XDUT (signumer sigdenom sigout) safe_analog_divider
+            tran tran stop=3.8n maxstep=5p
+            save signumer sigdenom sigout
+        """))
+
+        out_dir = tmp_path / "out_safe_analog_divider"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["sigout"])
+
+        assert sample_at(1.0e-9) == pytest.approx(4.0, abs=1e-9)
+        assert sample_at(2.0e-9) == pytest.approx(4.0, abs=1e-9)
+        assert sample_at(2.8e-9) == pytest.approx(3.0, abs=1e-9)
+
     def test_zi_nd_sampled_data_filter_matches_spectre_samples(self, tmp_path):
         va_file = tmp_path / "continuous_zi_nd_filter.va"
         va_file.write_text(textwrap.dedent("""\
@@ -3039,6 +3323,45 @@ class TestCadenceLrmGapFillRunnerAllowlist:
         assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
         assert sample_at(120e-9) == pytest.approx(0.0130177, rel=1e-5)
         assert sample_at(140e-9) == pytest.approx(0.0008136, rel=1e-4)
+
+    def test_zi_nd_sampled_data_filter_anchors_samples_without_maxstep(self, tmp_path):
+        va_file = tmp_path / "continuous_zi_nd_filter.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module continuous_zi_nd_filter(in, out);
+                input in;
+                output out;
+                electrical in, out;
+                analog begin
+                    V(out) <+ zi_nd(V(in), {0.5, 0.5}, {1.0, -0.25}, 10n);
+                end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_continuous_zi_nd_filter.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "continuous_zi_nd_filter.va"
+            Vin (inp 0) vsource type=pwl wave=[0 0.0 20n 0.0 21n 1.0 80n 1.0 81n 0.0 160n 0.0]
+            XDUT (inp out) continuous_zi_nd_filter
+            tran tran stop=160n
+            save inp out
+        """))
+
+        out_dir = tmp_path / "out_continuous_zi_nd_filter_no_maxstep"
+        assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+
+        def sample_at(time_s):
+            row = min(rows, key=lambda item: abs(float(item["time"]) - time_s))
+            return float(row["out"])
+
+        assert sample_at(30e-9) == pytest.approx(0.5, abs=1e-9)
+        assert sample_at(40e-9) == pytest.approx(1.125, abs=1e-9)
+        assert sample_at(50e-9) == pytest.approx(1.28125, abs=1e-9)
+        assert sample_at(70e-9) == pytest.approx(1.33008, rel=1e-5)
+        assert sample_at(100e-9) == pytest.approx(0.208282, rel=1e-5)
 
     def test_evas_rust_zi_nd_sampled_data_filter_matches_spectre_samples(
         self,

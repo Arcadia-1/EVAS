@@ -1008,59 +1008,64 @@ class Parser:
         self.match(TokenType.SEMI)
 
     def _parse_parameter_decl(self, module: Module):
-        """Parse: parameter [real|integer|string] name = value [from range] ;"""
+        """Parse one or more comma-separated parameter declarators."""
         self.expect(TokenType.PARAMETER)
 
-        param_type = ParamType.REAL
+        declared_type = ParamType.REAL
         if self.match(TokenType.REAL):
-            param_type = ParamType.REAL
+            declared_type = ParamType.REAL
         elif self.match(TokenType.INTEGER):
-            param_type = ParamType.INTEGER
+            declared_type = ParamType.INTEGER
         elif self.at(TokenType.IDENT) and self.peek().value == 'string':
             self.advance()
-            param_type = ParamType.STRING
+            declared_type = ParamType.STRING
 
-        name = self._expect_identifier_name("parameter declaration")
+        while True:
+            name = self._expect_identifier_name("parameter declaration")
 
-        default_val = NumberLiteral(0)
-        if self.match(TokenType.ASSIGN):
-            default_val = self._parse_expression()
+            default_val = NumberLiteral(0)
+            if self.match(TokenType.ASSIGN):
+                default_val = self._parse_expression()
 
-        # Optional range: from [lo:hi) or from (lo:hi]
-        range_lo = None
-        range_hi = None
-        range_lo_incl = True
-        range_hi_incl = True
-        if self.at(TokenType.IDENT) and self.peek().value == 'from':
-            self.advance()
-            if self.match(TokenType.LBRACKET):
-                range_lo_incl = True
-            elif self.match(TokenType.LPAREN):
-                range_lo_incl = False
-            range_lo = self._parse_expression()
-            self.expect(TokenType.COLON)
-            range_hi = self._parse_expression()
-            if self.match(TokenType.RBRACKET):
-                range_hi_incl = True
-            elif self.match(TokenType.RPAREN):
-                range_hi_incl = False
+            # Optional range: from [lo:hi) or from (lo:hi]
+            range_lo = None
+            range_hi = None
+            range_lo_incl = True
+            range_hi_incl = True
+            if self.at(TokenType.IDENT) and self.peek().value == 'from':
+                self.advance()
+                if self.match(TokenType.LBRACKET):
+                    range_lo_incl = True
+                elif self.match(TokenType.LPAREN):
+                    range_lo_incl = False
+                range_lo = self._parse_expression()
+                self.expect(TokenType.COLON)
+                range_hi = self._parse_expression()
+                if self.match(TokenType.RBRACKET):
+                    range_hi_incl = True
+                elif self.match(TokenType.RPAREN):
+                    range_hi_incl = False
+
+            param_type = (
+                ParamType.STRING
+                if isinstance(default_val, StringLiteral)
+                else declared_type
+            )
+            module.parameters.append(ParameterDecl(
+                name=name, param_type=param_type, default_value=default_val,
+                range_lo=range_lo, range_hi=range_hi,
+                range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
+            ))
+            if param_type != ParamType.STRING:
+                try:
+                    self._range_param_values[name] = self._eval_range_const_expr(default_val)
+                except (ArithmeticError, ParseError):
+                    pass
+
+            if not self.match(TokenType.COMMA):
+                break
 
         self.match(TokenType.SEMI)
-
-        # Detect string type
-        if isinstance(default_val, StringLiteral):
-            param_type = ParamType.STRING
-
-        module.parameters.append(ParameterDecl(
-            name=name, param_type=param_type, default_value=default_val,
-            range_lo=range_lo, range_hi=range_hi,
-            range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
-        ))
-        if param_type != ParamType.STRING:
-            try:
-                self._range_param_values[name] = self._eval_range_const_expr(default_val)
-            except (ArithmeticError, ParseError):
-                pass
 
     def _parse_decl_type(self, default: ParamType = ParamType.REAL) -> Tuple[ParamType, bool]:
         """Parse an optional scalar declaration type.
