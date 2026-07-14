@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.2] — 2026-07-14
+
+### Fixed — Spectre-Aligned Event Scheduling
+- Aligned Rust event scheduling with Spectre-oriented cross-event semantics,
+  including preserved cross event times while sampling post-side nodes.
+- Preserved post-cross transition samples and scheduled post-cross refinement
+  when transition events change downstream sampled values.
+- Preserved nominal-step gating after event updates so transition/event traces
+  remain stable across refined time points.
+
+### Fixed — Evaluator Parity
+- Preserved Spectre-compatible trace semantics at evaluator boundaries.
+- Kept hierarchical Verilog-A behavior aligned across evaluator backends.
+- Made the v4 evaluator runtime reproducible and kept the legacy Python engine
+  aligned with v3 behavioral checks.
+- Tightened `zi_nd` unit coverage around anchored sampled-data points.
+
 ## [0.8.1] — 2026-07-06
 
 ### Added — EVAS2/Rust Coverage
