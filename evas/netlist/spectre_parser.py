@@ -607,6 +607,17 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             idx += 1
             continue
 
+        # A source-like line without a parenthesized terminal list is not a
+        # valid Spectre instance.  Do not silently drop it and simulate an
+        # undriven circuit, which turns a netlist error into a misleading
+        # behavioral mismatch.
+        if '(' not in line and re.search(r'(?i)\b[vi]source\b', line):
+            source_name = line.split(maxsplit=1)[0]
+            raise ValueError(
+                f"Spectre source {source_name!r} requires a parenthesized "
+                "terminal list, for example `V1 (out 0) vsource dc=1`."
+            )
+
         # Voltage source: Vname (node node) vsource ...
         if line[0] in ('V', 'v') and '(' in line:
             _parse_vsource(line, netlist, evaluator_vars)

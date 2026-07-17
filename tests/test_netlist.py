@@ -224,6 +224,18 @@ class TestExtractNodes:
             _extract_nodes("ramp_gen dut (clk rst code_0) param=1")
 
 
+def test_source_without_parenthesized_terminals_fails_loudly(tmp_path):
+    netlist = tmp_path / "missing_source_parentheses.scs"
+    netlist.write_text(
+        "Vstim in 0 vsource type=pwl wave=[0 0 1n 0.9]\n"
+        "tran tran stop=2n\n"
+        "save in\n"
+    )
+
+    with pytest.raises(ValueError, match="requires a parenthesized terminal list"):
+        parse_spectre(str(netlist))
+
+
 # ===========================================================================
 # parse_spectre — Virtuoso-exported netlist
 # ===========================================================================
