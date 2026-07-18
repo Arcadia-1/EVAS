@@ -13,6 +13,11 @@ from typing import Dict, List, Optional, TextIO
 
 import numpy as np
 
+from evas.build_identity import (
+    collect_build_identity,
+    package_version,
+    write_build_identity,
+)
 from evas.compiler import ast_nodes as va_ast
 from evas.compiler.parser import (
     SpectreReservedIdentifierError,
@@ -45,20 +50,13 @@ from .spectre_parser import (
     strict_spectre_netlist_diagnostics,
 )
 
-try:
-    from importlib.metadata import version as _package_version
-except ImportError:  # pragma: no cover - Python < 3.8 compatibility fallback
-    from importlib_metadata import version as _package_version
-
-try:
-    VERSION = _package_version("evas-sim")
-except Exception:
-    VERSION = "0.8.2"
+VERSION = package_version()
 
 PYTHON_EVAS_ENGINE = "python"
 RUST_EVAS_ENGINE = "evas-rust"
 DEFAULT_EVAS_ENGINE = RUST_EVAS_ENGINE
 _RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
+_DEVELOPER_ENGINE_OVERRIDE: Optional[str] = None
 
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
@@ -104,21 +102,34 @@ def _simopt_bool(simopt: Dict[str, object], key: str, default: bool = False) -> 
     return default
 
 
-def _configured_evas_engine(simopt: Dict[str, object]) -> str:
+def _configured_evas_engine(
+    simopt: Dict[str, object],
+    *,
+    developer_engine: Optional[str] = None,
+) -> str:
     """Resolve EVAS engine selection.
 
-    EVAS2/Rust is the default execution engine. Select the Python compatibility
-    engine explicitly with simulatorOptions, EVAS_ENGINE, or the CLI when a
-    manual fallback is needed. Legacy evas2/rust2 selectors are accepted as
-    compatibility aliases for evas-rust.
+    EVAS2/Rust is the only production execution engine. Legacy evas2/rust2
+    selectors are accepted as compatibility aliases for evas-rust. The private
+    developer override keeps internal parity tests available without exposing a
+    production fallback through the CLI, environment, or netlist.
     """
 
     explicit = str(simopt.get("evas_engine", "")).strip().lower()
     if explicit:
+        if explicit == PYTHON_EVAS_ENGINE and developer_engine == PYTHON_EVAS_ENGINE:
+            return PYTHON_EVAS_ENGINE
         return _normalize_evas_engine(explicit)
     env_engine = os.environ.get("EVAS_ENGINE", "").strip().lower()
     if env_engine:
+        if env_engine == PYTHON_EVAS_ENGINE and developer_engine == PYTHON_EVAS_ENGINE:
+            return PYTHON_EVAS_ENGINE
         return _normalize_evas_engine(env_engine)
+    if developer_engine is not None:
+        text = developer_engine.strip().lower()
+        if text == PYTHON_EVAS_ENGINE:
+            return PYTHON_EVAS_ENGINE
+        return _normalize_evas_engine(text)
     return DEFAULT_EVAS_ENGINE
 
 
@@ -126,7 +137,14 @@ def _normalize_evas_engine(engine: str) -> str:
     text = engine.strip().lower()
     if text in _RUST_ENGINE_ALIASES:
         return RUST_EVAS_ENGINE
-    return text
+    if text == PYTHON_EVAS_ENGINE:
+        raise ValueError(
+            "the Python simulation engine is not a supported production engine; "
+            "install a compatible evas-rust core"
+        )
+    raise ValueError(
+        f"unsupported EVAS engine {engine!r}; expected {RUST_EVAS_ENGINE!r}"
+    )
 
 
 def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
@@ -1052,7 +1070,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                 strobe_log_path: Optional[str] = None,
                 ahdllint: bool = False,
                 ahdllint_min_transition: float = 1e-12,
-                spectre_strict: bool = False) -> bool:
+                spectre_strict: bool = False,
+                _developer_engine: Optional[str] = None) -> bool:
     """Run an EVAS .scs netlist. Returns True on success.
 
     Args:
@@ -1065,6 +1084,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                          Minimum transition rise/fall time for lint warnings.
         spectre_strict:  Reject EVAS extension syntax outside strict standalone
                          Spectre Verilog-A before compiling models.
+        _developer_engine:
+                         Private parity-test hook. Production callers must use
+                         the fail-closed evas-rust engine.
     """
     scs_path = Path(scs_file).resolve()
     out_dir = Path(output_dir)
@@ -1106,6 +1128,48 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         return False
 
     simopt = netlist.simulator_options or {}
+    try:
+        developer_engine = (
+            _developer_engine
+            if _developer_engine is not None
+            else _DEVELOPER_ENGINE_OVERRIDE
+        )
+        evas_engine = _configured_evas_engine(
+            simopt,
+            developer_engine=developer_engine,
+        )
+    except ValueError as exc:
+        log.write(f"ERROR: Invalid EVAS engine selection: {exc}")
+        if log_file:
+            log_file.close()
+        return False
+
+    identity = collect_build_identity()
+    identity["engine"] = evas_engine
+    write_build_identity(out_dir / "evas_identity.json", identity)
+    log.write("Build identity:")
+    log.write(f"    package_version = {identity['package_version']}")
+    log.write(f"    engine = {evas_engine}")
+    log.write(f"    rust_core_version = {identity['rust_core_version'] or 'unknown'}")
+    log.write(
+        "    rust_core_abi_version = "
+        f"{identity['rust_core_abi_version'] if identity['rust_core_abi_version'] is not None else 'unknown'}"
+    )
+    log.write(f"    build_revision = {identity['build_revision'] or 'unknown'}")
+    log.write(f"    rust_core_present = {str(identity['rust_core_present']).lower()}")
+    log.write(f"    rust_core_loadable = {str(identity['rust_core_loadable']).lower()}")
+    log.write("")
+    if evas_engine == RUST_EVAS_ENGINE and not identity["rust_core_loadable"]:
+        diagnostic = identity.get("rust_core_error", "unknown Rust core load error")
+        log.write(
+            "ERROR: EVAS Rust core is required and could not be loaded: "
+            f"{diagnostic}"
+        )
+        log.write("ERROR: EVAS does not fall back to the Python simulation engine.")
+        if log_file:
+            log_file.close()
+        return False
+
     ahdllint_enabled = (
         ahdllint
         or _simopt_bool(simopt, 'ahdllint', False)
@@ -1518,7 +1582,6 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_FULL_MODEL_FASTPATH", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    evas_engine = _configured_evas_engine(simopt)
     evas_rust_engine = (
         evas_engine == RUST_EVAS_ENGINE
         or _simopt_bool(simopt, "evas2", False)
@@ -1639,34 +1702,42 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write("")
 
     t_sim_start = time.time()
-    result = sim.run(tstop, tstep=tstep,
-                     refine_factor=refine_factor,
-                     refine_steps=refine_steps,
-                     reltol=reltol,
-                     vabstol=vabstol,
-                     record_step=tstep,
-                     skip_source_error_control=skip_source_error_control,
-                     profile_sections=profile_sections,
-                     profile_model_eval=profile_model_eval,
-                     profile_model_io=profile_model_io,
-                     indexed_snapshot_profile=indexed_snapshot_profile,
-                     indexed_arrays=indexed_arrays_effective,
-                     indexed_state_storage=indexed_state_storage,
-                     static_branch_fastpath=static_branch_fastpath,
-                     static_lifecycle_fastpath=static_lifecycle_fastpath,
-                     transition_unchanged_fastpath=transition_unchanged_fastpath,
-                     rust_static_eval=rust_static_eval,
-                     rust_static_fast_sync=rust_static_fast_sync,
-                     rust_transition_shadow=rust_transition_shadow,
-                     rust_event_due_shadow=rust_event_due_shadow,
-                     rust_timer_event=rust_timer_event,
-                     rust_event_write_shadow=rust_event_write_shadow,
-                     rust_event_write_production=rust_event_write_production,
-                     rust_full_model_fastpath=rust_full_model_fastpath,
-                     rust_full_model_required=rust_full_model_required,
-                     event_trace_audit=event_trace_audit,
-                     cross_acceptance_slack_factor=cross_acceptance_slack_factor,
-                     rust_required=rust_required)
+    try:
+        result = sim.run(tstop, tstep=tstep,
+                         refine_factor=refine_factor,
+                         refine_steps=refine_steps,
+                         reltol=reltol,
+                         vabstol=vabstol,
+                         record_step=tstep,
+                         skip_source_error_control=skip_source_error_control,
+                         profile_sections=profile_sections,
+                         profile_model_eval=profile_model_eval,
+                         profile_model_io=profile_model_io,
+                         indexed_snapshot_profile=indexed_snapshot_profile,
+                         indexed_arrays=indexed_arrays_effective,
+                         indexed_state_storage=indexed_state_storage,
+                         static_branch_fastpath=static_branch_fastpath,
+                         static_lifecycle_fastpath=static_lifecycle_fastpath,
+                         transition_unchanged_fastpath=transition_unchanged_fastpath,
+                         rust_static_eval=rust_static_eval,
+                         rust_static_fast_sync=rust_static_fast_sync,
+                         rust_transition_shadow=rust_transition_shadow,
+                         rust_event_due_shadow=rust_event_due_shadow,
+                         rust_timer_event=rust_timer_event,
+                         rust_event_write_shadow=rust_event_write_shadow,
+                         rust_event_write_production=rust_event_write_production,
+                         rust_full_model_fastpath=rust_full_model_fastpath,
+                         rust_full_model_required=rust_full_model_required,
+                         event_trace_audit=event_trace_audit,
+                         cross_acceptance_slack_factor=cross_acceptance_slack_factor,
+                         rust_required=rust_required)
+    except RuntimeError as exc:
+        log.write(f"ERROR: EVAS Rust simulation failed: {exc}")
+        log.write("ERROR: EVAS does not fall back to the Python simulation engine.")
+        log.write(f"evas completes with {errors + 1} errors, {warnings} warnings.")
+        if log_file:
+            log_file.close()
+        return False
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0

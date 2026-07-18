@@ -16,7 +16,7 @@ class RustBackendError(RuntimeError):
     """Raised when an opt-in Rust backend call fails."""
 
 
-EXPECTED_RUST_CORE_ABI_VERSION = 20260711
+EXPECTED_RUST_CORE_ABI_VERSION = 20260718
 
 
 def _usize_max() -> int:
@@ -1374,6 +1374,23 @@ class RustBodyExprBatch:
 class RustBackend:
     """Loaded Rust dynamic library wrapper."""
 
+    def _read_identity_string(self, symbol: str, *, required: bool) -> Optional[str]:
+        try:
+            identity_fn = getattr(self._lib, symbol)
+        except AttributeError as exc:
+            if required:
+                raise RustBackendError(
+                    f"Rust backend library does not export {symbol}; rebuild "
+                    "evas/rust_core with `cargo build --release`."
+                ) from exc
+            return None
+        identity_fn.argtypes = []
+        identity_fn.restype = ctypes.c_char_p
+        value = identity_fn()
+        if not value:
+            return None
+        return value.decode("utf-8", errors="replace")
+
     def __init__(self, library_path: Path):
         self.library_path = Path(library_path)
         self._lib = ctypes.CDLL(str(self.library_path))
@@ -1395,6 +1412,15 @@ class RustBackend:
                 "Rebuild evas/rust_core with `cargo build --release`."
             )
         self.abi_version = abi_version
+        self.core_version = self._read_identity_string(
+            "evas_rust_core_version",
+            required=True,
+        )
+        revision = self._read_identity_string(
+            "evas_rust_core_build_revision",
+            required=False,
+        )
+        self.build_revision = revision if revision not in {None, "", "unknown"} else None
         fn = self._lib.evas_rust_evaluate_static_affine
         fn.argtypes = [
             ctypes.POINTER(RustStaticAffineOp),

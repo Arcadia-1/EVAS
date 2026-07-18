@@ -1,4 +1,4 @@
-"""Setuptools command hooks for the optional evas-rust shared library."""
+"""Setuptools command hooks for the production evas-rust shared library."""
 
 from __future__ import annotations
 
@@ -45,8 +45,26 @@ def _rust_wheel_platform_tag(default: str) -> str:
     return os.environ.get("EVAS_RUST_WHEEL_PLATFORM_TAG", default).strip() or default
 
 
+def _build_revision() -> str:
+    explicit = os.environ.get("EVAS_BUILD_REVISION", "").strip()
+    if explicit:
+        return explicit
+    github_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if github_sha:
+        return github_sha
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
 class build_rust_core(Command):
-    description = "build the optional evas-rust shared library with cargo"
+    description = "build the production evas-rust shared library with cargo"
     user_options = []
 
     def initialize_options(self) -> None:
@@ -59,10 +77,18 @@ class build_rust_core(Command):
         cargo = shutil.which("cargo")
         if cargo is None:
             raise RuntimeError(
-                "cargo is required to build the evas-rust wheel. "
-                "Set EVAS_SKIP_RUST_CORE_BUILD=1 to build the pure Python wheel."
+                "cargo is required to build a production evas-rust wheel. "
+                "EVAS_SKIP_RUST_CORE_BUILD=1 is reserved for source-only "
+                "developer artifacts and must not be published."
             )
-        subprocess.run([cargo, "build", "--release"], cwd=RUST_CORE_DIR, check=True)
+        env = os.environ.copy()
+        env["EVAS_BUILD_REVISION"] = _build_revision()
+        subprocess.run(
+            [cargo, "build", "--release"],
+            cwd=RUST_CORE_DIR,
+            check=True,
+            env=env,
+        )
         library = RUST_CORE_DIR / "target" / "release" / _rust_library_filename()
         if not library.exists():
             raise RuntimeError(f"cargo build did not produce {library}")

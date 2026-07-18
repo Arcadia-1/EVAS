@@ -10,6 +10,7 @@ Covers:
       degenerate sine (no freq, ampl=0)
 """
 import csv
+import json
 import shutil
 import subprocess
 import textwrap
@@ -18,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import evas.netlist.runner as netlist_runner
 from evas.netlist.runner import (
     SpectreSource,
     _add_spectre_source,
@@ -48,20 +50,26 @@ def _build_rust_core_or_skip():
 
 @pytest.fixture(autouse=True)
 def _use_python_engine_for_legacy_runner_tests(monkeypatch):
-    """Most runner tests target parser/Python compatibility behavior explicitly."""
-    monkeypatch.setenv("EVAS_ENGINE", "python")
+    """Keep the internal Python parity path available only to runner tests."""
+    monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", "python")
 
 
 def test_configured_evas_engine_normalizes_rust_aliases(monkeypatch):
     monkeypatch.delenv("EVAS_ENGINE", raising=False)
     assert _configured_evas_engine({}) == "evas-rust"
-    assert _configured_evas_engine({"evas_engine": "python"}) == "python"
+    with pytest.raises(ValueError, match="not a supported production engine"):
+        _configured_evas_engine({"evas_engine": "python"})
+    assert _configured_evas_engine(
+        {"evas_engine": "python"},
+        developer_engine="python",
+    ) == "python"
     assert _configured_evas_engine({"evas_engine": "evas-rust"}) == "evas-rust"
     assert _configured_evas_engine({"evas_engine": "evas2"}) == "evas-rust"
     assert _configured_evas_engine({"evas_engine": "rust2"}) == "evas-rust"
 
     monkeypatch.setenv("EVAS_ENGINE", "python")
-    assert _configured_evas_engine({}) == "python"
+    with pytest.raises(ValueError, match="not a supported production engine"):
+        _configured_evas_engine({})
     monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
     assert _configured_evas_engine({}) == "evas-rust"
     monkeypatch.setenv("EVAS_ENGINE", "evas2")
@@ -2085,6 +2093,7 @@ class TestIndexedMigrationHarness:
 
     def test_evas_simulate_defaults_to_evas_rust_engine(self, tmp_path, monkeypatch):
         _build_rust_core_or_skip()
+        monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
         monkeypatch.delenv("EVAS_ENGINE", raising=False)
         scs = tmp_path / "tb_default_evas_rust_source.scs"
         scs.write_text(textwrap.dedent("""\
@@ -2104,6 +2113,12 @@ class TestIndexedMigrationHarness:
         assert "evas_rust_full_model_required = true" in log
         assert "evas_rust_required = true" in log
         assert "rust_sim_program_enabled = 1" in log
+        identity = json.loads(
+            (out_dir / "evas_identity.json").read_text(encoding="utf-8")
+        )
+        assert identity["engine"] == "evas-rust"
+        assert identity["rust_core_loadable"] is True
+        assert identity["rust_core_abi_version"] is not None
         assert (out_dir / "tran.csv").exists()
 
     def test_evas_simulate_default_evas_rust_fails_when_backend_is_missing(
@@ -2111,10 +2126,12 @@ class TestIndexedMigrationHarness:
         tmp_path,
         monkeypatch,
     ):
-        import evas.simulator.engine as sim_engine
-
+        monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
         monkeypatch.delenv("EVAS_ENGINE", raising=False)
-        monkeypatch.setattr(sim_engine, "load_optional_rust_backend", lambda: None)
+        monkeypatch.setenv(
+            "EVAS_RUST_CORE_LIB",
+            str(tmp_path / "missing-libevas-rust-core.so"),
+        )
         scs = tmp_path / "tb_default_missing_rust_source.scs"
         scs.write_text(textwrap.dedent("""\
             simulator lang=spectre
@@ -2123,12 +2140,49 @@ class TestIndexedMigrationHarness:
             save vdd:3f
         """))
 
-        with pytest.raises(RuntimeError, match="EVAS Rust backend was required"):
-            evas_simulate(
-                str(scs),
-                log_path=str(tmp_path / "evas.log"),
-                output_dir=str(tmp_path / "out"),
-            )
+        log_path = tmp_path / "evas.log"
+        assert not evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        log = log_path.read_text(encoding="utf-8")
+        assert "EVAS Rust core is required and could not be loaded" in log
+        assert "does not fall back to the Python simulation engine" in log
+
+    def test_evas_simulate_reports_runtime_failure_without_python_fallback(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
+        monkeypatch.delenv("EVAS_ENGINE", raising=False)
+        monkeypatch.setattr(
+            Simulator,
+            "run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("native capability unavailable")
+            ),
+        )
+        scs = tmp_path / "tb_runtime_failure.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            VDD (vdd 0) vsource type=dc dc=1.8
+            tran tran stop=2n step=1n
+            save vdd:3f
+        """))
+        log_path = tmp_path / "evas.log"
+
+        assert not evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "EVAS Rust simulation failed: native capability unavailable" in log
+        assert "does not fall back to the Python simulation engine" in log
 
     def test_evas_simulate_evas_rust_option_requires_rust_full_model(self, tmp_path):
         _build_rust_core_or_skip()
@@ -2225,15 +2279,13 @@ class TestIndexedMigrationHarness:
         assert float(rows[-1]["a"]) == pytest.approx(1.25)
         assert float(rows[-1]["b"]) == pytest.approx(2.5)
 
-    def test_python_engine_is_manual_fallback_when_rust_backend_is_missing(
+    def test_python_engine_selection_is_rejected_in_production(
         self,
         tmp_path,
         monkeypatch,
     ):
-        import evas.simulator.engine as sim_engine
-
+        monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
         monkeypatch.delenv("EVAS_ENGINE", raising=False)
-        monkeypatch.setattr(sim_engine, "load_optional_rust_backend", lambda: None)
         scs = tmp_path / "tb_python_missing_rust_source.scs"
         scs.write_text(textwrap.dedent("""\
             simulator lang=spectre
@@ -2245,14 +2297,15 @@ class TestIndexedMigrationHarness:
         out_dir = tmp_path / "out"
         log_path = tmp_path / "evas.log"
 
-        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+        assert not evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(out_dir),
+        )
 
         log = log_path.read_text(encoding="utf-8")
-        assert "evas_engine = python" in log
-        assert "evas_rust_unavailable_fallback = true" not in log
-        assert "evas_rust_required = true" not in log
-        assert "evas_rust_full_model_required = true" not in log
-        assert (out_dir / "tran.csv").exists()
+        assert "Python simulation engine is not a supported production engine" in log
+        assert not (out_dir / "tran.csv").exists()
 
     def test_evas_simulate_logs_rust_transition_shadow_when_opted_in(
         self,

@@ -6,7 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A lightweight behavioral simulator for digital/mixed-signal Verilog-A models.
-EVAS runs supported event-driven designs through the EVAS2/Rust backend by default, with an explicit Python compatibility fallback. No ngspice, no KCL/KVL solver.
+EVAS runs supported event-driven designs through the fail-closed EVAS2/Rust
+backend. No ngspice, no KCL/KVL solver.
 
 
 ---
@@ -42,24 +43,35 @@ evas list        # verify install — prints bundled example groups
 
 If `evas` is not on PATH, use `python -m evas`.
 
-The packaged default is EVAS2/Rust. Compatible Linux wheels include the
-`evas-rust` shared library, and source installs build it with cargo unless
-`EVAS_SKIP_RUST_CORE_BUILD=1` is set. If your platform installed the pure Python
-wheel or the Rust backend is unavailable, select the Python compatibility engine
-explicitly with `--engine python`, `EVAS_ENGINE=python`, or
-`simulatorOptions options evas_engine=python`. The legacy `evas2` and `rust2`
-selectors remain accepted as compatibility aliases for `evas-rust`.
+The production engine is EVAS2/Rust. Compatible Linux wheels include the
+`evas-rust` shared library, and source installs build it with cargo. A missing,
+unloadable, or ABI-incompatible Rust core is a hard error; EVAS never falls back
+to the Python simulation engine. The legacy `evas2` and `rust2` selectors remain
+accepted as time-bounded input aliases and are recorded as canonical
+`evas-rust` in run metadata.
+
+Verify an installation and capture its machine-readable build identity:
+
+```bash
+evas --version
+evas --version --format json > evas-identity.json
+```
+
+The JSON includes the package/CLI version, Rust core version and ABI, build
+revision when available, and whether the native core is present and loadable.
+Benchmark images should capture this output alongside the image digest. Every
+simulation also writes the same provenance to `<output>/evas_identity.json`.
 
 ## Simulating your own design
 
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
-evas simulate path/to/tb.scs -o output/mydesign --engine python
 evas simulate path/to/tb.scs -o output/mydesign --ahdllint
 evas simulate path/to/tb.scs -o output/mydesign --spectre-strict
 ```
 
-Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.
+Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages),
+`evas_identity.json` (build provenance), and `.png` plots.
 `--ahdllint` runs EVAS lint as a non-blocking simulation preflight and writes
 diagnostics into the simulation log before model compilation. Netlists may also
 request this with `simulatorOptions options ahdllint=true`.

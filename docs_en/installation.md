@@ -23,30 +23,29 @@ pip install -e ".[dev]"
 
 ```bash
 evas list
+evas --version
+evas --version --format json
 ```
 
 You should see the 5 bundled example groups printed.
 
 ## Engine Selection
 
-The packaged default is EVAS2/Rust. Compatible Linux wheels include the
-evas-rust shared library, and source installs build it with cargo unless
-`EVAS_SKIP_RUST_CORE_BUILD=1` is set.
+The production engine is EVAS2/Rust. Compatible Linux wheels include the
+evas-rust shared library, and source installs build it with cargo.
 
-If your platform installed the pure Python wheel, build the Rust core from
-source before using the default engine:
+If the Rust core is missing, unloadable, or ABI-incompatible, EVAS exits with a
+specific error and does not fall back to Python. Build the core from source:
 
 ```bash
 cargo build --manifest-path evas/rust_core/Cargo.toml --release
 evas simulate path/to/tb.scs
 ```
 
-Use the Python compatibility engine as an explicit fallback:
+The legacy `evas2` and `rust2` selectors remain accepted as time-bounded input
+aliases for `evas-rust`; logs and metadata always use the canonical identity.
 
-```bash
-evas simulate path/to/tb.scs --engine python
-```
-
-You can also select the engine with `EVAS_ENGINE=python` or
-`simulatorOptions options evas_engine=python`. The legacy `evas2` and `rust2`
-selectors remain accepted as compatibility aliases for `evas-rust`.
+For benchmark provenance, capture `evas --version --format json` in image
+metadata alongside the image digest. Simulation output directories also contain
+`evas_identity.json` with the same package, Rust core, ABI, revision, and core
+loadability fields.
