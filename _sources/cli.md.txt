@@ -1,6 +1,18 @@
 # CLI Reference
 
-EVAS provides four subcommands:
+EVAS provides build identity options and four subcommands:
+
+## `evas --version`
+
+Print the package, Rust core, ABI, build revision, and native-core loadability.
+
+```bash
+evas --version
+evas --version --format json
+```
+
+Use the JSON form in benchmark image and run metadata. Each simulation also
+writes the same fields to `<output>/evas_identity.json`.
 
 ## `evas list`
 
@@ -18,7 +30,6 @@ Copy a bundled example to the current directory and simulate it.
 evas run clk_div
 evas run digital_basics
 evas run noise_gen
-evas run clk_div --engine python
 ```
 
 Multi-testbench examples (e.g. `adc_dac_ideal_4b`, `digital_basics`) use
@@ -34,10 +45,9 @@ script is present) are saved there as well.
 
 Analysis scripts receive the output directory directly from `evas run`.
 
-The default engine is `evas-rust`. Use `--engine python` as an explicit
-compatibility fallback when the Rust backend is unavailable or a design is not
-covered by the EVAS2/Rust lowering yet. The legacy `evas2` and `rust2`
-selectors remain accepted as compatibility aliases for `evas-rust`.
+The only production engine is `evas-rust`. Missing or incompatible native
+components fail explicitly. The legacy `evas2` and `rust2` selectors remain
+accepted as time-bounded aliases and are normalized to `evas-rust` in metadata.
 
 ## `evas simulate <file.scs>`
 
@@ -45,7 +55,6 @@ Simulate an arbitrary Spectre netlist file directly.
 
 ```bash
 evas simulate path/to/tb_mydesign.scs -o output/mydesign -log sim.log
-evas simulate path/to/tb_mydesign.scs --engine python
 evas simulate path/to/tb_mydesign.scs --ahdllint
 evas simulate path/to/tb_mydesign.scs --spectre-strict
 ```
@@ -54,7 +63,7 @@ evas simulate path/to/tb_mydesign.scs --spectre-strict
 |--------|---------|-------------|
 | `-o / --output` | `./output` | Output directory |
 | `-log` | *(none)* | Path for a log file |
-| `--engine` | `evas-rust` | Engine override: `python`, `evas-rust`, `evas2`, or `rust2` |
+| `--engine` | `evas-rust` | Compatibility selector: `evas-rust`, `evas2`, or `rust2`; all use the Rust engine |
 | `--ahdllint` | off | Run EVAS AHDL-style lint as a non-blocking simulation preflight |
 | `--ahdllint-min-transition` | `1e-12` | Minimum transition rise/fall time used by `--ahdllint` |
 | `--spectre-strict` | off | Reject EVAS extension syntax outside strict standalone Spectre Verilog-A before compilation |
