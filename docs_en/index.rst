@@ -2,9 +2,8 @@ EVAS — Event-driven Verilog-A Simulator
 ========================================
 
 EVAS is a lightweight behavioral simulator for digital and mixed-signal
-Verilog-A models. It uses the EVAS2/Rust execution path by default for
-supported event-driven designs, with an explicit Python compatibility
-fallback and no external EDA simulator dependency.
+Verilog-A models. It uses a fail-closed EVAS2/Rust execution path for
+supported event-driven designs, with no external EDA simulator dependency.
 
 .. toctree::
    :maxdepth: 2

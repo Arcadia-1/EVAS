@@ -34,3 +34,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v --tb=short
+
+  installed-wheel:
+    name: Installed wheel identity
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build wheel
+      - run: python -m build --wheel --outdir dist-ci
+      - run: python -m venv /tmp/evas-wheel-test
+      - run: /tmp/evas-wheel-test/bin/pip install dist-ci/*.whl
+      - run: /tmp/evas-wheel-test/bin/python tests/verify_installed_wheel.py

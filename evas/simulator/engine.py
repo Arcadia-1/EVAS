@@ -5111,8 +5111,8 @@ class Simulator:
                 raise RuntimeError(
                     "evas-rust full-model path was required but no "
                     "supported whole-segment Rust runtime matched this design. "
-                    "Use the python engine for fallback or extend the evas-rust "
-                    "Rust lowering coverage. "
+                    "Extend the evas-rust lowering coverage; production runs "
+                    "do not fall back to the Python simulation engine. "
                     f"RustSimProgram rejection: {rejection}"
                 )
         transition_breakpoint_min_ramp = 0.15 * max_step

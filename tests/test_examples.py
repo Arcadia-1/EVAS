@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import evas.netlist.runner as netlist_runner
 from evas.cli import _list_examples
 from evas.netlist.runner import evas_simulate
 
@@ -24,8 +25,8 @@ EXPECTED_EXAMPLES = [
 
 @pytest.fixture(autouse=True)
 def _use_legacy_python_engine(monkeypatch):
-    """Bundled examples exercise the EVAS1.0 compatibility suite."""
-    monkeypatch.setenv("EVAS_ENGINE", "python")
+    """Bundled examples retain an internal Python parity baseline."""
+    monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", "python")
 
 
 # ---------------------------------------------------------------------------

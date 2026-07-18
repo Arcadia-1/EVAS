@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
+
+from evas.build_identity import collect_build_identity, format_build_identity
 
 
 def _get_examples_root() -> Path:
@@ -115,8 +118,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(resolved, target)
 
-    # Simulate directly. The packaged default engine is evas-rust; callers can
-    # request the Python compatibility engine explicitly as a fallback.
+    # Simulate directly through the fail-closed evas-rust production engine.
     output_dir = Path.cwd() / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +158,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
-    import json
-
     from evas.compiler.linter import has_compat_errors, lint_file
 
     diagnostics = lint_file(
@@ -181,8 +181,19 @@ def main() -> None:
         prog="evas",
         description="EVAS — Event-driven Verilog-A Simulator",
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show EVAS package, Rust core, ABI, and build identity",
+    )
+    parser.add_argument(
+        "--format",
+        dest="version_format",
+        choices=["text", "json"],
+        default="text",
+        help="Version output format used with --version (default: text)",
+    )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
-    sub.required = True
 
     # evas simulate
     p_sim = sub.add_parser("simulate", help="Simulate a Spectre .scs netlist")
@@ -192,8 +203,8 @@ def main() -> None:
     p_sim.add_argument("-log", help="Log file path")
     p_sim.add_argument(
         "--engine",
-        choices=["python", "evas-rust", "evas2", "rust2"],
-        help="Engine override. The default is evas-rust; use python for manual fallback.",
+        choices=["evas-rust", "evas2", "rust2"],
+        help="Engine compatibility selector; all accepted values use evas-rust.",
     )
     p_sim.add_argument(
         "--ahdllint",
@@ -220,8 +231,8 @@ def main() -> None:
                        help="Testbench filename override (default: tb_<name>.scs)")
     p_run.add_argument(
         "--engine",
-        choices=["python", "evas-rust", "evas2", "rust2"],
-        help="Engine override. The default is evas-rust; use python for manual fallback.",
+        choices=["evas-rust", "evas2", "rust2"],
+        help="Engine compatibility selector; all accepted values use evas-rust.",
     )
     p_run.set_defaults(func=cmd_run)
 
@@ -255,6 +266,17 @@ def main() -> None:
     p_lint.set_defaults(func=cmd_lint)
 
     args = parser.parse_args()
+    if args.version:
+        if args.command is not None:
+            parser.error("--version cannot be combined with a command")
+        identity = collect_build_identity()
+        if args.version_format == "json":
+            print(json.dumps(identity, indent=2, sort_keys=True))
+        else:
+            print(format_build_identity(identity))
+        sys.exit(0)
+    if args.command is None:
+        parser.error("the following arguments are required: <command>")
     sys.exit(args.func(args))
 
 

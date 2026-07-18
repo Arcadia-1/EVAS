@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import csv
-import os
 import shutil
 import subprocess
-from contextlib import contextmanager, redirect_stdout
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -54,23 +53,14 @@ def built_rust_core():
     return RUST_CORE
 
 
-@contextmanager
-def _evas_engine(name: str):
-    old_engine = os.environ.get("EVAS_ENGINE")
-    os.environ["EVAS_ENGINE"] = name
-    try:
-        yield
-    finally:
-        if old_engine is None:
-            os.environ.pop("EVAS_ENGINE", None)
-        else:
-            os.environ["EVAS_ENGINE"] = old_engine
-
-
 def _run_example(scs: Path, engine: str, out_dir: Path, log_path: Path) -> None:
-    with _evas_engine(engine):
-        with redirect_stdout(StringIO()):
-            assert evas_simulate(str(scs), output_dir=str(out_dir), log_path=str(log_path))
+    with redirect_stdout(StringIO()):
+        assert evas_simulate(
+            str(scs),
+            output_dir=str(out_dir),
+            log_path=str(log_path),
+            _developer_engine=engine,
+        )
     assert (out_dir / "tran.csv").exists()
 
 

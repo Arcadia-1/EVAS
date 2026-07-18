@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.3] — 2026-07-18
+
+### Added — Build Identity
+- Added `evas --version` and `evas --version --format json` with package,
+  Rust core, ABI, build revision, presence, and loadability metadata.
+- Write the same machine-readable provenance to `evas_identity.json` for every
+  simulation run so benchmark artifacts can retain evaluator identity.
+- Added installed-wheel checks for both human-readable and JSON version output.
+
+### Changed — Fail-Closed Production Engine
+- Removed Python from the public CLI, environment, and netlist engine contract;
+  `evas-rust` is now the only supported production simulation engine.
+- Kept `evas2` and `rust2` as time-bounded input aliases while recording the
+  canonical `evas-rust` identity in logs and run metadata.
+- Fail with an explicit diagnostic when the Rust core is missing, unloadable,
+  or ABI-incompatible instead of running the Python compatibility engine.
+- Stopped publishing pure Python wheels; release wheels now always contain the
+  production Rust core.
+
+### Fixed — Spectre Netlist Validation
+- Reject source instances without a parenthesized terminal list instead of
+  silently simulating an undriven circuit.
+
 ## [0.8.2] — 2026-07-14
 
 ### Fixed — Spectre-Aligned Event Scheduling

@@ -3,8 +3,8 @@ name: evas
 description: |
   Use when working with EVAS/evas-sim: installing or running the EVAS
   Verilog-A behavioral simulator, checking whether a voltage-domain
-  Verilog-A/Spectre testbench can run in EVAS, selecting the Python versus
-  evas-rust engine, building the optional Rust backend, or interpreting EVAS
+  Verilog-A/Spectre testbench can run in EVAS, verifying or building the
+  required evas-rust core, or interpreting EVAS
   outputs such as tran.csv and strobe.txt.
 ---
 
@@ -30,31 +30,33 @@ Stop or reroute to a SPICE/Spectre/Xyce-style flow when the design relies on:
 
 EVAS acceptance is not the same as Spectre portability. If Cadence/Spectre legality matters and Spectre was not run, say explicitly that the design is not Spectre-compiled.
 
-## Install And Engine Selection
+## Install And Engine Identity
 
-Default EVAS uses the EVAS2/Rust engine. Use the Python compatibility engine only as an explicit fallback:
+Production EVAS uses the fail-closed EVAS2/Rust engine:
 
 ```bash
 pip install evas-sim
 evas list
+evas --version
+evas --version --format json
 evas simulate path/to/tb.scs -o WORK/evas-run
-evas simulate path/to/tb.scs -o WORK/evas-run --engine python
 ```
 
 Use `python -m evas` if `evas` is not on `PATH`.
 
-The Rust backend must be present for the default engine. Compatible Linux wheels include it; source installs build it with cargo unless `EVAS_SKIP_RUST_CORE_BUILD=1` is set. If needed, build it from the EVAS source repo:
+The Rust backend must be present and ABI-compatible. Compatible Linux wheels
+include it, and source installs build it with cargo. A missing or incompatible
+core is a hard error; EVAS does not fall back to the Python simulation engine.
+If needed, build it from the EVAS source repo:
 
 ```bash
 cargo build --manifest-path evas/rust_core/Cargo.toml --release
 evas simulate path/to/tb.scs -o WORK/evas-run
 ```
 
-Engine selectors:
-- CLI: `--engine python` or `--engine evas-rust`
-- Environment: `EVAS_ENGINE=python` or `EVAS_ENGINE=evas-rust`
-- Testbench: `simulatorOptions options evas_engine=python` or `simulatorOptions options evas_engine=evas-rust`
-- Compatibility aliases for Rust: `evas2` and `rust2`
+The canonical engine identity is `evas-rust`. The legacy `evas2` and `rust2`
+selectors are time-bounded input aliases only; logs and `evas_identity.json`
+always record `evas-rust`.
 
 If the user needs the default `evas-rust` engine and `cargo` is missing, install a minimal Rust toolchain only with user approval or when the user has already authorized global Rust installation. Keep build artifacts local by setting `CARGO_TARGET_DIR` to the active project's `WORK/` directory when the build is only needed for that project.
 

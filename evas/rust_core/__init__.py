@@ -1,1 +1,1 @@
-"""Package marker for the optional evas-rust shared library."""
+"""Package marker for the production evas-rust shared library."""

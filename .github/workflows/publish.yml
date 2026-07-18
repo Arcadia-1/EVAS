@@ -18,8 +18,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build wheel
-      - name: Build pure Python distribution
-        run: EVAS_SKIP_RUST_CORE_BUILD=1 python -m build --sdist --wheel --outdir dist
+      - name: Build source distribution
+        run: EVAS_SKIP_RUST_CORE_BUILD=1 python -m build --sdist --outdir dist
       - name: Build manylinux evas-rust wheel
         run: |
           docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux2014_x86_64 /bin/bash -lc '
@@ -29,6 +29,11 @@ jobs:
             /opt/python/cp312-cp312/bin/python -m pip install build wheel
             EVAS_RUST_WHEEL_PLATFORM_TAG=manylinux2014_x86_64 /opt/python/cp312-cp312/bin/python -m build --wheel --outdir dist
           '
+      - name: Verify installed wheel identity
+        run: |
+          python -m venv /tmp/evas-wheel-test
+          /tmp/evas-wheel-test/bin/pip install dist/*.whl
+          /tmp/evas-wheel-test/bin/python tests/verify_installed_wheel.py
       - uses: actions/upload-artifact@v4
         with:
           name: dist

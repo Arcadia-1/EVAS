@@ -5,13 +5,35 @@ use crate::program::*;
 use crate::specialized::*;
 use crate::transition::*;
 use crate::util::*;
+use std::ffi::{c_char, CString};
+use std::sync::OnceLock;
 
 // C ABI entry points consumed by the Python rust_backend bridge.
-pub const EVAS_RUST_CORE_ABI_VERSION: u32 = 20260711;
+pub const EVAS_RUST_CORE_ABI_VERSION: u32 = 20260718;
+
+static CORE_VERSION: OnceLock<CString> = OnceLock::new();
+static BUILD_REVISION: OnceLock<CString> = OnceLock::new();
 
 #[no_mangle]
 pub extern "C" fn evas_rust_core_abi_version() -> u32 {
     EVAS_RUST_CORE_ABI_VERSION
+}
+
+#[no_mangle]
+pub extern "C" fn evas_rust_core_version() -> *const c_char {
+    CORE_VERSION
+        .get_or_init(|| CString::new(env!("CARGO_PKG_VERSION")).expect("valid core version"))
+        .as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn evas_rust_core_build_revision() -> *const c_char {
+    BUILD_REVISION
+        .get_or_init(|| {
+            CString::new(option_env!("EVAS_BUILD_REVISION").unwrap_or("unknown"))
+                .expect("valid build revision")
+        })
+        .as_ptr()
 }
 
 #[no_mangle]
