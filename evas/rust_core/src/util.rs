@@ -64,11 +64,13 @@ fn uniform01_from_u64(value: u64) -> f64 {
 }
 
 thread_local! {
-    // Per-seed draw counters for $rdist_normal. Hashing the draw index
+    // Per-stream, per-seed draw counters for $rdist_normal. The stream id is
+    // the flattened instance-local seed-state slot when one is available.
+    // Hashing the draw index
     // instead of wall-clock time keeps the sequence identical to the python
     // engine even when event times differ at sub-ps level. Reset at the start
     // of every full-program simulation so runs are reproducible.
-    static RDIST_DRAW_INDICES: std::cell::RefCell<Vec<(u64, u64)>> =
+    static RDIST_DRAW_INDICES: std::cell::RefCell<Vec<((usize, u64), u64)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -76,24 +78,24 @@ pub(crate) fn reset_rdist_draw_indices() {
     RDIST_DRAW_INDICES.with(|cell| cell.borrow_mut().clear());
 }
 
-fn next_rdist_draw_index(seed_bits: u64) -> u64 {
+fn next_rdist_draw_index(stream_id: usize, seed_bits: u64) -> u64 {
     RDIST_DRAW_INDICES.with(|cell| {
         let mut counts = cell.borrow_mut();
         for entry in counts.iter_mut() {
-            if entry.0 == seed_bits {
+            if entry.0 == (stream_id, seed_bits) {
                 let index = entry.1;
                 entry.1 = entry.1.wrapping_add(1);
                 return index;
             }
         }
-        counts.push((seed_bits, 1));
+        counts.push(((stream_id, seed_bits), 1));
         0
     })
 }
 
-fn rdist_stream(seed: f64, salt: u64) -> u64 {
+fn rdist_stream(stream_id: usize, seed: f64, salt: u64) -> u64 {
     let seed_bits = seed.to_bits();
-    let index = next_rdist_draw_index(seed_bits);
+    let index = next_rdist_draw_index(stream_id, seed_bits);
     seed_bits ^ index.rotate_left(17) ^ salt
 }
 
@@ -105,12 +107,16 @@ fn normal_from_stream(stream: u64, mean: f64, std: f64) -> f64 {
     mean + std * radius * angle.cos()
 }
 
-fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
-    normal_from_stream(rdist_stream(seed, 0xd1b5_4a32_d192_ed03_u64), mean, std)
+fn deterministic_normal(stream_id: usize, seed: f64, mean: f64, std: f64) -> f64 {
+    normal_from_stream(
+        rdist_stream(stream_id, seed, 0xd1b5_4a32_d192_ed03_u64),
+        mean,
+        std,
+    )
 }
 
 fn deterministic_random_int32(seed: f64) -> f64 {
-    let stream = rdist_stream(seed, 0x91e1_0da5_c79e_7b1d_u64);
+    let stream = rdist_stream(0, seed, 0x91e1_0da5_c79e_7b1d_u64);
     (splitmix64(stream) as u32 as i32) as f64
 }
 
@@ -119,7 +125,7 @@ fn deterministic_exponential(seed: f64, mean: f64) -> f64 {
     if mean == 0.0 {
         return 0.0;
     }
-    let stream = rdist_stream(seed, 0x94d0_49bb_1331_11eb_u64);
+    let stream = rdist_stream(0, seed, 0x94d0_49bb_1331_11eb_u64);
     let u = uniform01_from_u64(splitmix64(stream));
     -mean * u.ln()
 }
@@ -129,7 +135,7 @@ fn deterministic_poisson(seed: f64, mean: f64) -> f64 {
     if lambda == 0.0 {
         return 0.0;
     }
-    let stream = rdist_stream(seed, 0xbf58_476d_1ce4_e5b9_u64);
+    let stream = rdist_stream(0, seed, 0xbf58_476d_1ce4_e5b9_u64);
     if lambda < 50.0 {
         let limit = (-lambda).exp();
         let mut product = 1.0;
@@ -149,7 +155,7 @@ fn deterministic_poisson(seed: f64, mean: f64) -> f64 {
 }
 
 fn deterministic_uniform(seed: f64, lo: f64, hi: f64) -> f64 {
-    let stream = rdist_stream(seed, 0xa24b_aed4_963e_e407_u64);
+    let stream = rdist_stream(0, seed, 0xa24b_aed4_963e_e407_u64);
     let u = uniform01_from_u64(splitmix64(stream));
     lo + (hi - lo) * u
 }
@@ -160,7 +166,7 @@ fn deterministic_erlang(seed: f64, stages: f64, mean: f64) -> f64 {
     if mean == 0.0 {
         return 0.0;
     }
-    let stream = rdist_stream(seed, 0xe703_7ed1_a0b4_28db_u64);
+    let stream = rdist_stream(0, seed, 0xe703_7ed1_a0b4_28db_u64);
     let scale = mean / stage_count as f64;
     let mut total = 0.0;
     for stage in 0..stage_count.min(100_000) {
@@ -371,7 +377,7 @@ pub(crate) fn evaluate_body_expr_segment(
             }
             BODY_EXPR_RDIST_NORMAL => {
                 let (seed, mean, std) = pop3(stack)?;
-                stack.push(deterministic_normal(seed, mean, std));
+                stack.push(deterministic_normal(op.index, seed, mean, std));
             }
             BODY_EXPR_RANDOM_INT32 => {
                 let seed = pop1(stack)?;

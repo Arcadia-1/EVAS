@@ -1328,7 +1328,15 @@ def _append_body_expr_ops(
         for arg in expr_ir.args:
             if not _append_body_expr_ops(arg, bindings, node_slots, ops):
                 return False
-        ops.append(BodyExprOp(op_kind))
+        stream_slot = 0
+        if expr_ir.name == "$rdist_normal" and isinstance(expr_ir.args[0], IdentifierIR):
+            seed_binding = bindings.resolve(expr_ir.args[0].name)
+            if seed_binding is not None and seed_binding.kind == SYMBOL_STATE_SCALAR:
+                # Zero means that no writable seed identity is available.  A
+                # positive value encodes local state slot + 1; rust_program
+                # remaps it to the flattened per-instance state slot.
+                stream_slot = int(seed_binding.slot) + 1
+        ops.append(BodyExprOp(op_kind, index=stream_slot))
         return True
 
     return False

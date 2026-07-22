@@ -112,6 +112,7 @@ from evas.simulator.expr_ir import (
     static_node_ref_name,
 )
 from evas.simulator.rust_backend import (
+    BODY_EXPR_RDIST_NORMAL,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
@@ -1454,6 +1455,9 @@ def _remap_body_expr_ops(
             index = int(state_slot_to_global.get(index, index))
         elif op.op_kind == BODY_EXPR_READ_PARAM:
             index = int(param_slot_to_global.get(index, index))
+        elif op.op_kind == BODY_EXPR_RDIST_NORMAL and index > 0:
+            local_seed_slot = index - 1
+            index = int(state_slot_to_global.get(local_seed_slot, local_seed_slot)) + 1
         remapped.append(
             BodyExprOp(
                 op_kind=int(op.op_kind),
