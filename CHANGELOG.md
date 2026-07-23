@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.4] — 2026-07-23
+
+### Fixed — Seeded Random Streams
+- Preserve inout random seed state through EVAS2 event-expression lowering.
+- Isolate seeded random streams by module instance so sibling instances with
+  the same local seed reproduce the same deterministic sequence without
+  sharing stream progress.
+
 ## [0.8.3] — 2026-07-18
 
 ### Added — Build Identity

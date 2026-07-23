@@ -34,7 +34,7 @@ def test_build_identity_reports_loaded_core_metadata():
     assert identity["cli_version"] == package_version()
     assert identity["package_version"] == package_version()
     assert identity["engine"] == "evas-rust"
-    assert identity["rust_core_version"] == "0.2.0"
+    assert identity["rust_core_version"] == "0.2.1"
     assert identity["rust_core_abi_version"] == EXPECTED_RUST_CORE_ABI_VERSION
     assert identity["rust_core_present"] is True
     assert identity["rust_core_loadable"] is True
