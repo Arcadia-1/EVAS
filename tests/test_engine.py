@@ -1867,6 +1867,60 @@ endmodule
         assert sim._perf_stats["rust_sim_program_enabled"] == 1
         assert sim._perf_stats["rust_full_model_required_failures"] == 0
 
+    def test_rust_sim_program_rdist_normal_stream_is_instance_local(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_seeded_normal(clk, out);
+    input voltage clk;
+    output voltage out;
+    parameter integer SEED = 17;
+    integer seed_q;
+    real out_q;
+    analog begin
+        @(initial_step) begin
+            seed_q = SEED;
+            out_q = 0.0;
+        end
+        @(cross(V(clk) - 0.45, +1)) begin
+            out_q = $rdist_normal(seed_q, 0.0, 1.0);
+        end
+        V(out) <+ out_q;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model_a = ModelCls()
+        model_a.node_map = {"clk": "CLK", "out": "OUT_A"}
+        model_b = ModelCls()
+        model_b.node_map = {"clk": "CLK", "out": "OUT_B"}
+
+        sim = Simulator()
+        sim.add_source(
+            "CLK",
+            pulse(0.0, 1.0, delay=1e-9, period=2e-9, width=0.8e-9),
+        )
+        sim.add_model(model_a)
+        sim.add_model(model_b)
+        sim.record("OUT_A")
+        sim.record("OUT_B")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=0.25e-9,
+            record_step=0.25e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["OUT_A"].tolist() == pytest.approx(
+            result.signals["OUT_B"].tolist(),
+            abs=1e-12,
+        )
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_extra_rdist_event_body_lowers(self):
         _build_rust_core_or_skip()
         src = """\
