@@ -55,7 +55,7 @@ def test_rust_backend_abi_version_matches_python_loader():
     backend = load_rust_backend()
 
     assert backend.abi_version == EXPECTED_RUST_CORE_ABI_VERSION
-    assert backend.core_version == "0.2.0"
+    assert backend.core_version == "0.2.1"
     assert backend.build_revision is None or len(backend.build_revision) >= 7
 
 
