@@ -4731,6 +4731,77 @@ endmodule
         assert rust._perf_stats["rust_sim_program_event_fires"] >= 4
         assert rust._perf_stats["generic_executor_runs"] == 0
 
+    def test_rust_sim_program_dynamic_zero_period_timer_rearms(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module dynamic_zero_period_timer(clk, out);
+    input voltage clk;
+    output voltage out;
+    parameter real delay = 400p;
+    real fire_at = 1.0;
+    integer fired = 0;
+    analog begin
+        @(initial_step) begin
+            fire_at = 1.0;
+            fired = 0;
+        end
+        @(cross(V(clk) - 0.5, +1))
+            fire_at = $abstime + delay;
+        @(timer(fire_at, 0))
+            fired = fired + 1;
+        V(out) <+ fired;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source(
+                "CLK",
+                pulse(
+                    0.0,
+                    1.0,
+                    delay=0.5e-9,
+                    period=2.0e-9,
+                    width=0.8e-9,
+                    rise=20e-12,
+                    fall=20e-12,
+                ),
+            )
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        reference, reference_model = build_sim()
+        reference_result = reference.run(
+            tstop=4.0e-9,
+            tstep=250e-12,
+            max_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        sim, model = build_sim()
+        result = sim.run(
+            tstop=4.0e-9,
+            tstep=250e-12,
+            max_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert reference_result.signals["OUT"][-1] == pytest.approx(2.0)
+        assert reference_model.state["fired"] == pytest.approx(2.0)
+        assert result.signals["OUT"][-1] == pytest.approx(2.0)
+        assert model.state["fired"] == pytest.approx(2.0)
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["generic_executor_runs"] == 0
+
     def test_rust_body_ir_production_matches_python_evaluate_and_counts_calls(self):
         _build_rust_core_or_skip()
         src = """\
@@ -8687,6 +8758,38 @@ endmodule
         result = sim.run(tstop=50e-9, tstep=1e-9)
         final_val = result.signals["out"][-1]
         assert final_val == pytest.approx(5.0, abs=1.0)
+
+    def test_combined_zero_period_timer_rearms_after_cross_body(self):
+        src = """\
+`include "disciplines.vams"
+module combined_zero_period_timer(clk, out);
+    input voltage clk;
+    output voltage out;
+    real fire_at = 10n;
+    integer count = 0;
+    analog begin
+        @(cross(V(clk) - 0.5, +1) or timer(fire_at, 0)) begin
+            count = count + 1;
+            fire_at = $abstime + 1n;
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT"}
+        node_values = {"CLK": 0.0, "OUT": 0.0}
+
+        model.evaluate(node_values, 0.0)
+        node_values["CLK"] = 1.0
+        model.evaluate(node_values, 1.0e-9)
+
+        assert model.state["count"] == 1
+        assert model.state["fire_at"] == pytest.approx(1.5e-9)
+        assert model.timer_states["timer_0"] == pytest.approx(
+            model.state["fire_at"]
+        )
 
     VA_SRC_DIVISION_TYPES = """\
 `include "disciplines.vams"

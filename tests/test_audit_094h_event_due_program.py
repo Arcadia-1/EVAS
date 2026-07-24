@@ -156,6 +156,69 @@ endmodule
     assert values == pytest.approx((1.0e-9, 2.0e-9))
 
 
+def test_event_due_program_encodes_dynamic_zero_period_timer_as_absolute():
+    module = parse(
+        """\
+`include "disciplines.vams"
+module dynamic_zero_period_timer_sample();
+    real fire_at = 1n;
+    integer q = 0;
+    analog begin
+        @(timer(fire_at, 0)) q = q + 1;
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body.statements[0])
+    assert isinstance(stmt_ir, EventStatementIR)
+    bindings = build_state_binding_ir(module)
+
+    program = encode_event_due_program(stmt_ir.event, bindings, {})
+
+    assert isinstance(program, EventDueProgram)
+    assert [trigger.kind for trigger in program.triggers] == [EVENT_DUE_TIMER]
+    assert program.triggers[0].timer_start_ops
+    assert not program.triggers[0].timer_period_ops
+
+
+def test_event_due_runtime_refreshes_dynamic_zero_period_timer_target():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module dynamic_zero_period_timer_runtime_sample();
+    real fire_at = 2n;
+    integer q = 0;
+    analog begin
+        @(timer(fire_at, 0)) q = q + 1;
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body.statements[0])
+    assert isinstance(stmt_ir, EventStatementIR)
+    bindings = build_state_binding_ir(module)
+    program = encode_event_due_program(stmt_ir.event, bindings, {})
+    assert isinstance(program, EventDueProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    runtime = RustEventDueRuntime(program, backend)
+    state_values = array("d", [2.0e-9, 0.0])
+
+    assert runtime.step(
+        time=0.0,
+        node_values=array("d"),
+        state_values=state_values,
+    ) == ()
+
+    state_values[0] = 1.0e-9
+    assert runtime.step(
+        time=1.0e-9,
+        node_values=array("d"),
+        state_values=state_values,
+    ) == (0,)
+
+
 def test_event_due_program_rejects_dynamic_timer_expression():
     module = parse(
         """\
