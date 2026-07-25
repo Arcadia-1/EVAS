@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.5] — 2026-07-25
+
+### Fixed — Dynamic Zero-Period Timers
+- Treat `timer(start, 0)` as a Spectre-compatible absolute one-shot timer,
+  including dynamic targets that read runtime state.
+- Preserve dynamic target rearming across Python, Rust full-model lowering,
+  shadow audit runtime, and combined events.
+- Keep positive-period timer behavior and the Rust ABI unchanged.
+
 ## [0.8.4] — 2026-07-23
 
 ### Fixed — Seeded Random Streams
