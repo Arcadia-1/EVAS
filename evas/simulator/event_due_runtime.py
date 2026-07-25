@@ -307,16 +307,24 @@ class RustEventDueRuntime:
         state_values: MutableSequence[float],
         param_values: MutableSequence[float],
     ) -> None:
-        if self._timer_values_initialized or self._timer_batch is None:
+        if self._timer_batch is None:
+            return
+        if (
+            self._timer_values_initialized
+            and not self._absolute_timer_segment_indices
+        ):
             return
         values = self.backend.evaluate_body_expr_batch(
             self._timer_batch, node_values, state_values, param_values
         )
-        for slot, (start_idx, period_idx) in enumerate(
-            self._periodic_timer_segment_indices
-        ):
-            self.periodic_starts[slot] = values[start_idx]
-            self.periodic_periods[slot] = values[period_idx]
+        # Periodic inputs are static by the lowering contract. Absolute timer
+        # targets may be state-owned, so refresh them on every shadow step.
+        if not self._timer_values_initialized:
+            for slot, (start_idx, period_idx) in enumerate(
+                self._periodic_timer_segment_indices
+            ):
+                self.periodic_starts[slot] = values[start_idx]
+                self.periodic_periods[slot] = values[period_idx]
         for slot, target_idx in enumerate(self._absolute_timer_segment_indices):
             self.absolute_targets[slot] = values[target_idx]
         self._timer_values_initialized = True

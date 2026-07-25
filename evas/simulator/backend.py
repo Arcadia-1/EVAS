@@ -13253,11 +13253,17 @@ class _ModuleCompiler:
             return all(self._timer_expr_is_constant_or_param(arg) for arg in expr.args)
         return False
 
+    @staticmethod
+    def _timer_period_is_zero_literal(expr: Expr) -> bool:
+        return isinstance(expr, NumberLiteral) and float(expr.value) == 0.0
+
     def _is_batchable_timer_event_statement(self, stmt) -> bool:
         if not isinstance(stmt, EventStatement):
             return False
         event = stmt.event
         if not isinstance(event, EventExpr) or event.event_type != EventType.TIMER:
+            return False
+        if len(event.args) == 2 and self._timer_period_is_zero_literal(event.args[1]):
             return False
         if len(event.args) == 2 and self._event_body_lfsr_shift_ir("__batch_probe__", stmt.body) is not None:
             return False
@@ -13507,7 +13513,10 @@ class _ModuleCompiler:
 
             elif event.event_type == EventType.TIMER:
                 key = self._alloc_event_key("timer", event)
-                if len(event.args) == 2:
+                if (
+                    len(event.args) == 2
+                    and not self._timer_period_is_zero_literal(event.args[1])
+                ):
                     self._record_timer_static_linear_segment_ir(key, event, stmt.body)
                     start_expr = self._compile_expr(event.args[0])
                     period_expr = self._compile_expr(event.args[1])
@@ -13595,6 +13604,7 @@ class _ModuleCompiler:
         elif isinstance(event, CombinedEvent):
             # Combined events: @(initial_step or cross(...))
             conditions = []
+            absolute_timer_rearms = []
             for e in event.events:
                 if e.event_type == EventType.INITIAL_STEP:
                     # In evaluate, initial_step never fires again
@@ -13616,13 +13626,17 @@ class _ModuleCompiler:
                     conditions.append(self._compile_digital_event_condition(e))
                 elif e.event_type == EventType.TIMER:
                     key = self._alloc_event_key("timer", e)
-                    if len(e.args) == 2:
+                    if (
+                        len(e.args) == 2
+                        and not self._timer_period_is_zero_literal(e.args[1])
+                    ):
                         start_expr = self._compile_expr(e.args[0])
                         period_expr = self._compile_expr(e.args[1])
                         conditions.append(f"self._check_timer({key!r}, time, {period_expr}, {start_expr})")
                     else:
                         target_expr = self._compile_expr(e.args[0])
                         conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
+                        absolute_timer_rearms.append((key, target_expr))
 
             if conditions:
                 hit_vars = []
@@ -13643,6 +13657,10 @@ class _ModuleCompiler:
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                for timer_key, target_expr in absolute_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._set_timer_state({timer_key!r}, {target_expr})"
+                    )
                 lines.append(f"{prefix}    self._event_trace_audit_exit_event()")
                 lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_interpolated_nodes = set()")

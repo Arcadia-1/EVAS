@@ -13,6 +13,7 @@ from evas.compiler.ast_nodes import CombinedEvent, EventExpr
 from evas.simulator.expr_ir import (
     BindingTableIR,
     ExprIR,
+    LiteralIR,
     LoweringContext,
     emit_python,
     encode_body_expr_ops,
@@ -126,8 +127,10 @@ def encode_event_due_program(
     - ``above(expr)`` using the same expression ABI.
     - ``timer(start)`` where ``start`` can be a typed body expression, including
       state-owned absolute timer targets.
-    - static ``timer(start, period)`` where periodic timer expressions do not
-      read node or state values.
+    - ``timer(start, 0)`` as the absolute-time form accepted by Spectre, where
+      ``start`` may read runtime state.
+    - static ``timer(start, period)`` where positive periodic timer expressions
+      do not read node or state values.
     - ``final_step`` without arguments.
 
     The returned plan does not execute event bodies and does not decide global
@@ -249,7 +252,7 @@ def _append_event_due_program(
         if start_ops is None:
             return False
         period_ops: Tuple[BodyExprOp, ...] = ()
-        if len(event_ir.args) == 2:
+        if len(event_ir.args) == 2 and not _is_zero_timer_period(event_ir.args[1]):
             if not _is_static_timer_expr(start_ops):
                 return False
             encoded_period = encode_body_expr_ops(event_ir.args[1], bindings, node_slots)
@@ -289,3 +292,11 @@ def _is_static_timer_expr(expr_ops: Tuple[BodyExprOp, ...]) -> bool:
         if op.op_kind in {BODY_EXPR_READ_NODE, BODY_EXPR_READ_STATE}:
             return False
     return True
+
+
+def _is_zero_timer_period(expr_ir: ExprIR) -> bool:
+    return (
+        isinstance(expr_ir, LiteralIR)
+        and isinstance(expr_ir.value, (int, float))
+        and float(expr_ir.value) == 0.0
+    )
