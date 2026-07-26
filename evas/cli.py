@@ -176,6 +176,25 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 1 if has_compat_errors(diagnostics) else 0
 
 
+def cmd_compile_audit_replay(args: argparse.Namespace) -> int:
+    from evas.netlist.compile_audit_replay import (
+        replay_compile_audit_scores,
+        write_replay_report,
+    )
+
+    try:
+        report = replay_compile_audit_scores(
+            [Path(path) for path in args.score_json],
+            spectre_strict=not args.no_spectre_strict,
+            transitions_only=args.transitions_only,
+        )
+        write_replay_report(report, args.output)
+    except (OSError, ValueError) as exc:
+        print(f"compile-audit-replay: {exc}", file=sys.stderr)
+        return 2
+    return 1 if report["summary"]["failed"] else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="evas",
@@ -264,6 +283,32 @@ def main() -> None:
         help="Reject EVAS extension syntax outside strict standalone Spectre Verilog-A",
     )
     p_lint.set_defaults(func=cmd_lint)
+
+    # evas compile-audit-replay
+    p_compile_audit = sub.add_parser(
+        "compile-audit-replay",
+        help="Replay case-level Spectre compile acceptance offline",
+    )
+    p_compile_audit.add_argument(
+        "score_json",
+        nargs="+",
+        help="SCORE_SPECTRE_AUDIT_*.json file(s)",
+    )
+    p_compile_audit.add_argument(
+        "--output",
+        help="Write JSON report to this path instead of stdout",
+    )
+    p_compile_audit.add_argument(
+        "--no-spectre-strict",
+        action="store_true",
+        help="Disable strict Spectre compatibility diagnostics during replay",
+    )
+    p_compile_audit.add_argument(
+        "--transitions-only",
+        action="store_true",
+        help="Replay only cases whose audited EVAS/Spectre compile statuses differ",
+    )
+    p_compile_audit.set_defaults(func=cmd_compile_audit_replay)
 
     args = parser.parse_args()
     if args.version:
