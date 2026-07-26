@@ -678,7 +678,7 @@ class TestAhdlIncludePathFallback:
         assert "Spectre strict lint diagnostics:" in log
         assert "$rdist_exponential()" in log
         assert "$rdist_poisson()" in log
-        assert "$rdist_normal()" in log
+        assert "$rdist_normal()" not in log
         assert "$rdist_erlang()" in log
         assert "seeded Spectre PRNG sequence parity is not certified" in log
         assert "ERROR: Spectre strict lint rejected this input." in log
