@@ -9,18 +9,17 @@ import pytest
 from evas.compiler.parser import parse
 from evas.simulator.backend import compile_module
 from evas.simulator.expr_ir import (
-    BindingTableIR,
-    LoweringContext,
     SYMBOL_PARAMETER,
     SYMBOL_PORT,
     SYMBOL_STATE_ARRAY,
     SYMBOL_STATE_SCALAR,
+    BindingTableIR,
+    LoweringContext,
     build_state_binding_ir,
     iter_exprs_from_statement,
     iter_identifier_names,
     lower_expr,
 )
-
 
 SAMPLE = """\
 `include "disciplines.vams"
@@ -56,6 +55,27 @@ def test_state_binding_ir_assigns_stable_symbol_kinds():
     assert table.resolve("bits").kind == SYMBOL_STATE_ARRAY
     assert table.resolve("bits").lo == 0
     assert table.resolve("bits").hi == 3
+
+
+def test_state_binding_ir_assigns_localparams_parameter_slots():
+    module = parse(
+        """\
+        module localparam_binding(out);
+            output out;
+            electrical out;
+            parameter real gain = 2.0;
+            localparam real scaled_gain = gain / 2.0;
+            analog V(out) <+ scaled_gain;
+        endmodule
+        """
+    )
+
+    table = build_state_binding_ir(module)
+
+    assert table.resolve("gain").kind == SYMBOL_PARAMETER
+    assert table.resolve("scaled_gain").kind == SYMBOL_PARAMETER
+    assert table.resolve("gain").slot == 0
+    assert table.resolve("scaled_gain").slot == 1
 
 
 def test_release_generic_candidate_identifier_bindings_resolve():

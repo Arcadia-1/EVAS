@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from evas.compiler.ast_nodes import module_constant_parameters
 from evas.simulator.analog_block_runtime import (
     try_build_event_then_transition_shadow_runtime,
 )
@@ -254,6 +255,11 @@ class CrossDetector:
                 trigger_direction = 1
                 trigger_went_beyond = False
                 cross_time = interpolate_cross_time()
+        elif self.direction >= 0 and abs(self.prev_val) <= e_tol and val > e_tol:
+            triggered = True
+            trigger_direction = 1
+            trigger_went_beyond = True
+            cross_time = self.prev_time
         if not triggered and self.direction <= 0 and self.prev_val > e_tol:
             if val < -e_tol:
                 triggered = True
@@ -265,6 +271,11 @@ class CrossDetector:
                 trigger_direction = -1
                 trigger_went_beyond = False
                 cross_time = interpolate_cross_time()
+        elif not triggered and self.direction <= 0 and abs(self.prev_val) <= e_tol and val < -e_tol:
+            triggered = True
+            trigger_direction = -1
+            trigger_went_beyond = True
+            cross_time = self.prev_time
 
         if triggered:
             self.t_cross = cross_time
@@ -275,12 +286,13 @@ class CrossDetector:
                 self.last_cross_time = self.t_cross
             self.pending_touch_direction = 0
             # Clamp val to the post-crossing side to prevent immediate re-trigger.
+            # A threshold-touch trigger followed by a refinement step just beyond
+            # zero is the same semantic crossing, not a second event.
             sign_eps = max(e_tol, 1e-18)
-            if trigger_went_beyond:
-                if trigger_direction < 0:
-                    val = min(val, -sign_eps)
-                elif trigger_direction > 0:
-                    val = max(val, sign_eps)
+            if trigger_direction < 0:
+                val = min(val, -sign_eps)
+            elif trigger_direction > 0:
+                val = max(val, sign_eps)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time
@@ -315,6 +327,10 @@ class CrossDetector:
         if self.pending_touch_direction > 0 and self.direction >= 0 and val > e_tol:
             return True
         if self.pending_touch_direction < 0 and self.direction <= 0 and val < -e_tol:
+            return True
+        if self.direction >= 0 and abs(self.prev_val) <= e_tol and val > e_tol:
+            return True
+        if self.direction <= 0 and abs(self.prev_val) <= e_tol and val < -e_tol:
             return True
         if self.direction >= 0 and self.prev_val < -e_tol and val >= -e_tol:
             return True
@@ -762,7 +778,12 @@ class Simulator:
         runtime_succeeded = False
         runtime_t0 = _wall_time.perf_counter()
         attempts = 0
-        for _attempt in range(6):
+        # Dense but valid periodic schedules can produce far more record
+        # points than the coarse preflight grid predicts, especially when a
+        # nested/gated timer prevents static expansion.  Capacity failures are
+        # cheap and unambiguous, so keep growing logarithmically instead of
+        # failing after the historical six attempts.
+        for _attempt in range(12):
             attempts += 1
             try:
                 (
@@ -1286,7 +1307,7 @@ class Simulator:
 
         state_names = tuple(getattr(model_cls, "_state_scalar_names", ()) or ())
         param_names = tuple(
-            str(param.name) for param in getattr(module, "parameters", ()) or ()
+            str(param.name) for param in module_constant_parameters(module)
         )
         node_values = array("d", [0.0] * len(node_names))
         state_values = array(
@@ -4060,6 +4081,7 @@ class Simulator:
             "rust_full_model_fastpath_available": 0,
             "rust_full_model_fastpath_enabled": 0,
             "rust_full_model_required_failures": 0,
+            "rust_full_model_required_correctness_fallbacks": 0,
             "rust_full_model_fastpath_fallbacks_total": 0,
             "rust_sim_program_requested": 0,
             "rust_sim_program_available": 0,
@@ -4803,7 +4825,7 @@ class Simulator:
                     tuple(getattr(cls, "_state_scalar_names", ()) or ()),
                     tuple(
                         str(param.name)
-                        for param in getattr(module, "parameters", ()) or ()
+                        for param in module_constant_parameters(module)
                     ),
                 )
                 planned += 1
@@ -5074,6 +5096,10 @@ class Simulator:
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
+        for model in self.models:
+            set_source_waveforms = getattr(model, "_set_source_waveforms_tree", None)
+            if set_source_waveforms is not None:
+                set_source_waveforms(source_future_waveforms)
         source_breakpoint_sources = [src for src in self.sources if src.breakpoint_fn is not None]
         source_breakpoint_sources.extend(
             src for _pos, _neg, src in self.current_sources if src.breakpoint_fn is not None
@@ -5102,12 +5128,12 @@ class Simulator:
             if full_model_result is not None:
                 return full_model_result
             if rust_full_model_required:
-                self._perf_stats["rust_full_model_required_failures"] = 1
                 rejection = getattr(
                     self,
                     "_rust_sim_program_last_rejection",
                     "unknown",
                 )
+                self._perf_stats["rust_full_model_required_failures"] = 1
                 raise RuntimeError(
                     "evas-rust full-model path was required but no "
                     "supported whole-segment Rust runtime matched this design. "
@@ -5146,6 +5172,9 @@ class Simulator:
             for model in self.models
             if bool(
                 getattr(model, "_has_transition_target_probes_tree", lambda: False)()
+            )
+            or bool(
+                getattr(model, "_has_cross_breakpoint_probes_tree", lambda: False)()
             )
         ]
         model_uses_bound_step = tuple(
@@ -6596,6 +6625,28 @@ class Simulator:
                 self._perf_stats["indexed_array_record_id_reads"] += initial_record_reads
             _refresh_indexed_array_stats()
         self._step_sizes.append(0.0)
+        def _run_model_post_update_phase(
+            model_index: int,
+            model,
+            has_post_update_events: bool,
+            eval_time: float,
+        ) -> bool:
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            if model_needs_timer_expire[model_index]:
+                model._expire_absolute_timers(eval_time)
+                self._perf_stats["model_timer_expire_calls"] += 1
+            else:
+                self._perf_stats["model_timer_expire_skips"] += 1
+            if has_post_update_events:
+                self._perf_stats["model_post_update_calls"] += 1
+                if model.post_update_events(self.node_voltages, eval_time):
+                    model.refresh_outputs(self.node_voltages, eval_time)
+            else:
+                self._perf_stats["model_post_update_skips"] += 1
+            if profile_clock is not None:
+                elapsed = _add_profile_time("model_post_update_s", _section_start)
+                _add_model_profile_time(model_index, model, "post_update_s", elapsed)
+            return bool(getattr(model, "_step_event_fired", False))
 
         # Main simulation loop
         while time < tstop:
@@ -6928,33 +6979,15 @@ class Simulator:
                             segment_model_indices,
                             segment_models,
                         ):
-                            _section_start = profile_clock() if profile_clock is not None else 0.0
                             segment_has_post_update_events = model_has_post_update_events[
                                 segment_model_index
                             ]
-                            if model_needs_timer_expire[segment_model_index]:
-                                segment_model._expire_absolute_timers(time)
-                                self._perf_stats["model_timer_expire_calls"] += 1
-                            else:
-                                self._perf_stats["model_timer_expire_skips"] += 1
-                            if segment_has_post_update_events:
-                                self._perf_stats["model_post_update_calls"] += 1
-                                if segment_model.post_update_events(self.node_voltages, time):
-                                    segment_model.refresh_outputs(self.node_voltages, time)
-                            else:
-                                self._perf_stats["model_post_update_skips"] += 1
-                            if profile_clock is not None:
-                                elapsed = _add_profile_time(
-                                    "model_post_update_s",
-                                    _section_start,
-                                )
-                                _add_model_profile_time(
-                                    segment_model_index,
-                                    segment_model,
-                                    "post_update_s",
-                                    elapsed,
-                                )
-                            if getattr(segment_model, "_step_event_fired", False):
+                            if _run_model_post_update_phase(
+                                segment_model_index,
+                                segment_model,
+                                segment_has_post_update_events,
+                                time,
+                            ):
                                 cross_fired = True
                     continue
 
@@ -6981,22 +7014,12 @@ class Simulator:
                     elapsed = _add_profile_time("model_evaluate_s", _section_start)
                     _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
                     _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
-                _section_start = profile_clock() if profile_clock is not None else 0.0
-                if model_needs_timer_expire[model_index]:
-                    model._expire_absolute_timers(time)
-                    self._perf_stats["model_timer_expire_calls"] += 1
-                else:
-                    self._perf_stats["model_timer_expire_skips"] += 1
-                if has_post_update_events:
-                    self._perf_stats["model_post_update_calls"] += 1
-                    if model.post_update_events(self.node_voltages, time):
-                        model.refresh_outputs(self.node_voltages, time)
-                else:
-                    self._perf_stats["model_post_update_skips"] += 1
-                if profile_clock is not None:
-                    elapsed = _add_profile_time("model_post_update_s", _section_start)
-                    _add_model_profile_time(model_index, model, "post_update_s", elapsed)
-                if getattr(model, "_step_event_fired", False):
+                if _run_model_post_update_phase(
+                    model_index,
+                    model,
+                    has_post_update_events,
+                    time,
+                ):
                     cross_fired = True
 
             if indexed_array is not None:

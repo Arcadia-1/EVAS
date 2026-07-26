@@ -65,7 +65,7 @@ from evas.compiler.ast_nodes import (
 from evas.compiler.ast_nodes import (
     NumberLiteral as AstNumberLiteral,
 )
-from evas.compiler.ast_nodes import ParamType
+from evas.compiler.ast_nodes import ParamType, module_constant_parameters
 from evas.compiler.ast_nodes import (
     StringLiteral as AstStringLiteral,
 )
@@ -107,6 +107,7 @@ from evas.simulator.expr_ir import (
     StateBindingIR,
     TernaryExprIR,
     UnaryExprIR,
+    VectorLiteralIR,
     build_state_binding_ir,
     static_array_element_name,
     static_node_ref_name,
@@ -1004,9 +1005,129 @@ def _assignment_target_name_for_bindings(
     return None
 
 
+def _iter_assigned_state_names(
+    stmt_ir: object,
+    bindings: BindingTableIR,
+) -> Iterable[str]:
+    if isinstance(stmt_ir, AssignmentIR):
+        target_name = _assignment_target_name_for_bindings(stmt_ir.target, bindings)
+        if target_name is not None:
+            yield target_name
+        yield from _iter_scanf_write_target_names(stmt_ir.value, bindings)
+        return
+    if isinstance(stmt_ir, SystemTaskIR):
+        if stmt_ir.name in {"$fscanf", "$sscanf"}:
+            for target in stmt_ir.args[2:]:
+                target_name = _assignment_target_name_for_bindings(target, bindings)
+                if target_name is not None:
+                    yield target_name
+        for arg in stmt_ir.args:
+            yield from _iter_scanf_write_target_names(arg, bindings)
+        return
+    if isinstance(stmt_ir, BlockIR):
+        for child in stmt_ir.statements:
+            yield from _iter_assigned_state_names(child, bindings)
+        return
+    if isinstance(stmt_ir, EventStatementIR):
+        yield from _iter_assigned_state_names(stmt_ir.body, bindings)
+        return
+    if isinstance(stmt_ir, IfStatementIR):
+        yield from _iter_assigned_state_names(stmt_ir.then_body, bindings)
+        if stmt_ir.else_body is not None:
+            yield from _iter_assigned_state_names(stmt_ir.else_body, bindings)
+        return
+    if isinstance(stmt_ir, ForStatementIR):
+        yield from _iter_assigned_state_names(stmt_ir.init, bindings)
+        yield from _iter_assigned_state_names(stmt_ir.update, bindings)
+        yield from _iter_assigned_state_names(stmt_ir.body, bindings)
+        return
+    if isinstance(stmt_ir, WhileStatementIR):
+        yield from _iter_assigned_state_names(stmt_ir.body, bindings)
+        return
+    if isinstance(stmt_ir, CaseStatementIR):
+        for item in stmt_ir.items:
+            yield from _iter_assigned_state_names(item.body, bindings)
+
+
+def _iter_scanf_write_target_names(
+    expr_ir: ExprIR,
+    bindings: BindingTableIR,
+) -> Iterable[str]:
+    """Yield state targets mutated through scanf side-effect arguments."""
+    if isinstance(expr_ir, FunctionCallIR):
+        if str(expr_ir.name) in {"$fscanf", "$sscanf"}:
+            for target in expr_ir.args[2:]:
+                target_name = _assignment_target_name_for_bindings(target, bindings)
+                if target_name is not None:
+                    yield target_name
+        for arg in expr_ir.args:
+            yield from _iter_scanf_write_target_names(arg, bindings)
+        return
+    if isinstance(expr_ir, BinaryExprIR):
+        yield from _iter_scanf_write_target_names(expr_ir.left, bindings)
+        yield from _iter_scanf_write_target_names(expr_ir.right, bindings)
+        return
+    if isinstance(expr_ir, UnaryExprIR):
+        yield from _iter_scanf_write_target_names(expr_ir.operand, bindings)
+        return
+    if isinstance(expr_ir, TernaryExprIR):
+        yield from _iter_scanf_write_target_names(expr_ir.cond, bindings)
+        yield from _iter_scanf_write_target_names(expr_ir.true_expr, bindings)
+        yield from _iter_scanf_write_target_names(expr_ir.false_expr, bindings)
+        return
+    if isinstance(expr_ir, ArrayAccessIR):
+        yield from _iter_scanf_write_target_names(expr_ir.index, bindings)
+        return
+    if isinstance(expr_ir, MethodCallIR):
+        for arg in expr_ir.args:
+            yield from _iter_scanf_write_target_names(arg, bindings)
+        return
+    if isinstance(expr_ir, VectorLiteralIR):
+        for item in expr_ir.items:
+            yield from _iter_scanf_write_target_names(item, bindings)
+        return
+    if isinstance(expr_ir, BranchAccessIR):
+        for index in (
+            expr_ir.node1_index,
+            expr_ir.node2_index,
+            expr_ir.node1_index2,
+            expr_ir.node2_index2,
+        ):
+            if index is not None:
+                yield from _iter_scanf_write_target_names(index, bindings)
+
+
+def _declared_constant_state_values(
+    *,
+    module: Any,
+    model: Any,
+    body_ir: BlockIR,
+    bindings: BindingTableIR,
+) -> Mapping[int, float]:
+    assigned_names = frozenset(_iter_assigned_state_names(body_ir, bindings))
+    values: dict[int, float] = {}
+    for variable in getattr(module, "variables", ()) or ():
+        if getattr(variable, "is_array", False):
+            continue
+        init_values = tuple(getattr(variable, "init_values", ()) or ())
+        if len(init_values) != 1:
+            continue
+        name = str(getattr(variable, "name", ""))
+        if not name or name in assigned_names:
+            continue
+        binding = bindings.resolve(name)
+        if binding is None or binding.kind != SYMBOL_STATE_SCALAR:
+            continue
+        try:
+            values[int(binding.slot)] = _model_state_value(model, name)
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
 def _model_params(model: Any) -> Tuple[tuple[int, str, float], ...]:
     module = getattr(getattr(model, "__class__", type(model)), "_module_ast", None)
-    params = getattr(module, "parameters", ()) or ()
+    params = module_constant_parameters(module)
     values = getattr(model, "params", {}) or {}
     result: list[tuple[int, str, float]] = []
     for local_slot, param in enumerate(params):
@@ -1690,6 +1811,89 @@ def _is_branch_ddt_contribution_stmt(stmt_ir: object) -> bool:
     return False
 
 
+def _static_voltage_contribution_target(
+    stmt_ir: object,
+) -> Optional[tuple[str, Optional[str]]]:
+    if not isinstance(stmt_ir, ContributionIR):
+        return None
+    branch = stmt_ir.branch
+    if (
+        branch.access_type != "V"
+        or branch.node1_index is not None
+        or branch.node1_index2 is not None
+        or branch.node2_index is not None
+        or branch.node2_index2 is not None
+    ):
+        return None
+    return str(branch.node1), None if branch.node2 is None else str(branch.node2)
+
+
+def _materialize_simple_differential_voltage_constraints(
+    block_ir: BlockIR,
+) -> BlockIR:
+    """Represent simple branch-voltage constraints with explicit node writes.
+
+    The source-record executor writes node values directly; it does not solve
+    simultaneous voltage-source equations.  For the common linear pattern
+    ``V(a,b)<+d`` paired with an absolute contribution on exactly one endpoint,
+    materialize the other endpoint so direct execution observes the same node
+    voltages: ``a = y`` and ``b = y - d`` (or the symmetric ``a = y + d``).
+    """
+
+    statements = tuple(block_ir.statements)
+    absolute_expr_by_node: dict[str, ExprIR] = {}
+    for stmt in statements:
+        target = _static_voltage_contribution_target(stmt)
+        if target is None:
+            continue
+        node1, node2 = target
+        if node2 is None and node1 not in absolute_expr_by_node:
+            absolute_expr_by_node[node1] = stmt.expr
+
+    if not absolute_expr_by_node:
+        return block_ir
+
+    skip_indices: set[int] = set()
+    materialized: list[ContributionIR] = []
+    materialized_nodes: set[str] = set()
+    for idx, stmt in enumerate(statements):
+        target = _static_voltage_contribution_target(stmt)
+        if target is None:
+            continue
+        node1, node2 = target
+        if node2 is None:
+            continue
+        if node1 in absolute_expr_by_node and node2 not in absolute_expr_by_node:
+            if node2 in materialized_nodes:
+                continue
+            skip_indices.add(idx)
+            materialized_nodes.add(node2)
+            materialized.append(
+                ContributionIR(
+                    BranchAccessIR("V", node2),
+                    BinaryExprIR("-", absolute_expr_by_node[node1], stmt.expr),
+                )
+            )
+        elif node2 in absolute_expr_by_node and node1 not in absolute_expr_by_node:
+            if node1 in materialized_nodes:
+                continue
+            skip_indices.add(idx)
+            materialized_nodes.add(node1)
+            materialized.append(
+                ContributionIR(
+                    BranchAccessIR("V", node1),
+                    BinaryExprIR("+", absolute_expr_by_node[node2], stmt.expr),
+                )
+            )
+
+    if not skip_indices:
+        return block_ir
+    return BlockIR(
+        tuple(stmt for idx, stmt in enumerate(statements) if idx not in skip_indices)
+        + tuple(materialized)
+    )
+
+
 def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
     nodes: set[str] = set()
 
@@ -1840,6 +2044,59 @@ def _expr_references_nodes(expr_ir: ExprIR, nodes: frozenset[str]) -> bool:
         )
     if isinstance(expr_ir, FunctionCallIR):
         return any(_expr_references_nodes(arg, nodes) for arg in expr_ir.args)
+    if isinstance(expr_ir, MethodCallIR):
+        return any(_expr_references_nodes(arg, nodes) for arg in expr_ir.args)
+    if isinstance(expr_ir, VectorLiteralIR):
+        return any(_expr_references_nodes(item, nodes) for item in expr_ir.items)
+    return False
+
+
+def _stmt_references_nodes(stmt_ir: object, nodes: frozenset[str]) -> bool:
+    if not nodes:
+        return False
+    if isinstance(stmt_ir, AssignmentIR):
+        target_reads_node = (
+            isinstance(stmt_ir.target, ArrayAccessIR)
+            and _expr_references_nodes(stmt_ir.target.index, nodes)
+        )
+        return target_reads_node or _expr_references_nodes(stmt_ir.value, nodes)
+    if isinstance(stmt_ir, ContributionIR):
+        return _expr_references_nodes(
+            stmt_ir.branch, nodes
+        ) or _expr_references_nodes(stmt_ir.expr, nodes)
+    if isinstance(stmt_ir, BlockIR):
+        return any(_stmt_references_nodes(child, nodes) for child in stmt_ir.statements)
+    if isinstance(stmt_ir, IfStatementIR):
+        return (
+            _expr_references_nodes(stmt_ir.cond, nodes)
+            or _stmt_references_nodes(stmt_ir.then_body, nodes)
+            or (
+                stmt_ir.else_body is not None
+                and _stmt_references_nodes(stmt_ir.else_body, nodes)
+            )
+        )
+    if isinstance(stmt_ir, ForStatementIR):
+        return (
+            _stmt_references_nodes(stmt_ir.init, nodes)
+            or _expr_references_nodes(stmt_ir.cond, nodes)
+            or _stmt_references_nodes(stmt_ir.update, nodes)
+            or _stmt_references_nodes(stmt_ir.body, nodes)
+        )
+    if isinstance(stmt_ir, WhileStatementIR):
+        return _expr_references_nodes(
+            stmt_ir.cond, nodes
+        ) or _stmt_references_nodes(stmt_ir.body, nodes)
+    if isinstance(stmt_ir, CaseStatementIR):
+        return (
+            _expr_references_nodes(stmt_ir.expr, nodes)
+            or any(
+                any(_expr_references_nodes(value, nodes) for value in item.values)
+                or _stmt_references_nodes(item.body, nodes)
+                for item in stmt_ir.items
+            )
+        )
+    if isinstance(stmt_ir, SystemTaskIR):
+        return any(_expr_references_nodes(arg, nodes) for arg in stmt_ir.args)
     return False
 
 
@@ -3827,6 +4084,278 @@ def _convert_indirect_branch_ode_ops(
     return tuple(converted), tuple(reasons)
 
 
+def _event_is_supported_nested_timer(event_ir: EventIR) -> bool:
+    if not isinstance(event_ir, EventTriggerIR):
+        return False
+    if str(event_ir.event_type).upper() != "TIMER":
+        return False
+    return len(event_ir.args) in {1, 2}
+
+
+def _prepend_stmt_ir(prefix_stmt: object, body: object) -> BlockIR:
+    if isinstance(body, BlockIR):
+        return BlockIR((prefix_stmt, *body.statements))
+    return BlockIR((prefix_stmt, body))
+
+
+def _extend_bindings_with_named_scalar_slots(
+    bindings: BindingTableIR,
+    names: Iterable[str],
+    *,
+    integer: bool = True,
+) -> BindingTableIR:
+    requested = tuple(dict.fromkeys(str(name) for name in names))
+    if not requested:
+        return bindings
+    present = {binding.name for binding in bindings.bindings}
+    next_scalar_slot = (
+        max(
+            (
+                int(binding.slot)
+                for binding in bindings.bindings
+                if binding.kind == SYMBOL_STATE_SCALAR
+            ),
+            default=-1,
+        )
+        + 1
+    )
+    rewritten = list(bindings.bindings)
+    for name in requested:
+        if name in present:
+            continue
+        rewritten.append(
+            StateBindingIR(
+                name=name,
+                kind=SYMBOL_STATE_SCALAR,
+                slot=next_scalar_slot,
+                integer=integer,
+            )
+        )
+        present.add(name)
+        next_scalar_slot += 1
+    return BindingTableIR(tuple(rewritten))
+
+
+def _stmt_contains_event_ir(stmt_ir: object) -> bool:
+    if isinstance(stmt_ir, EventStatementIR):
+        return True
+    if isinstance(stmt_ir, BlockIR):
+        return any(_stmt_contains_event_ir(child) for child in stmt_ir.statements)
+    if isinstance(stmt_ir, IfStatementIR):
+        return _stmt_contains_event_ir(stmt_ir.then_body) or (
+            stmt_ir.else_body is not None
+            and _stmt_contains_event_ir(stmt_ir.else_body)
+        )
+    if isinstance(stmt_ir, (ForStatementIR, WhileStatementIR)):
+        return _stmt_contains_event_ir(stmt_ir.body)
+    if isinstance(stmt_ir, CaseStatementIR):
+        return any(_stmt_contains_event_ir(item.body) for item in stmt_ir.items)
+    return False
+
+
+def _lower_spectre_nested_timer_events(
+    body_ir: BlockIR,
+    *,
+    reserved_names: Iterable[str],
+) -> tuple[BlockIR, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]:
+    """Flatten Spectre-accepted nested absolute timers into armed root events.
+
+    Verilog-AMS forbids nested event controls, but Spectre accepts the pattern.
+    Rust owns a static event table, so each nested timer becomes an ordinary
+    timer whose target is infinity until its parent body reaches the nested
+    statement.  Synthetic state latches the target expression at that exact
+    point and preserves the branch in which the timer was armed.  Sequential
+    statements after a nested timer are moved into that timer's synthetic
+    event body, matching Spectre's blocking continuation semantics.
+    """
+
+    used_names = {str(name) for name in reserved_names}
+    arm_names: list[str] = []
+    deadline_names: list[str] = []
+    reasons: list[str] = []
+    counter = 0
+
+    def alloc_state_names() -> tuple[str, str]:
+        nonlocal counter
+        while True:
+            arm_candidate = f"__evas_spectre_nested_timer_arm_{counter}"
+            deadline_candidate = (
+                f"__evas_spectre_nested_timer_deadline_{counter}"
+            )
+            counter += 1
+            if (
+                arm_candidate not in used_names
+                and deadline_candidate not in used_names
+            ):
+                used_names.update((arm_candidate, deadline_candidate))
+                arm_names.append(arm_candidate)
+                deadline_names.append(deadline_candidate)
+                return arm_candidate, deadline_candidate
+
+    def as_sequence(stmt_ir: object) -> tuple[object, ...]:
+        if isinstance(stmt_ir, BlockIR):
+            return tuple(stmt_ir.statements)
+        return (stmt_ir,)
+
+    def prepend_to_block(head: object, tail: BlockIR) -> BlockIR:
+        return BlockIR((head, *tail.statements))
+
+    def transform_sequence(
+        statements: tuple[object, ...],
+    ) -> tuple[BlockIR, list[EventStatementIR], bool]:
+        if not statements:
+            return BlockIR(()), [], False
+
+        head, tail = statements[0], statements[1:]
+        if isinstance(head, BlockIR):
+            return transform_sequence((*head.statements, *tail))
+
+        if isinstance(head, EventStatementIR):
+            if not _event_is_supported_nested_timer(head.event):
+                reasons.append("nested_event_requires_absolute_timer")
+                return BlockIR(statements), [], True
+            transformed_body, descendants, _contains_nested = transform_sequence(
+                (*as_sequence(head.body), *tail)
+            )
+            arm_name, deadline_name = alloc_state_names()
+            arm_ref = IdentifierIR(arm_name)
+            deadline_ref = IdentifierIR(deadline_name)
+            event = head.event
+            assert isinstance(event, EventTriggerIR)
+            gated_start = TernaryExprIR(
+                arm_ref,
+                deadline_ref,
+                LiteralIR(float("inf")),
+            )
+            gated_args: tuple[ExprIR, ...] = (gated_start,)
+            if len(event.args) == 2:
+                gated_args = (
+                    gated_start,
+                    TernaryExprIR(
+                        arm_ref,
+                        event.args[1],
+                        LiteralIR(0.0),
+                    ),
+                )
+            gated_event = EventTriggerIR(
+                event_type=event.event_type,
+                args=gated_args,
+                direction=event.direction,
+                time_tol=event.time_tol,
+                expr_tol=event.expr_tol,
+            )
+            reset_arm = AssignmentIR(arm_ref, LiteralIR(0))
+            child = EventStatementIR(
+                gated_event,
+                _prepend_stmt_ir(reset_arm, transformed_body),
+            )
+            latch_deadline = AssignmentIR(deadline_ref, event.args[0])
+            arm_stmt = AssignmentIR(arm_ref, LiteralIR(1))
+            return (
+                BlockIR((latch_deadline, arm_stmt)),
+                [child, *descendants],
+                True,
+            )
+
+        if isinstance(head, IfStatementIR) and _stmt_contains_event_ir(head):
+            then_body, then_children, then_contains = transform_sequence(
+                (*as_sequence(head.then_body), *tail)
+            )
+            else_body, else_children, else_contains = transform_sequence(
+                (
+                    *(
+                        as_sequence(head.else_body)
+                        if head.else_body is not None
+                        else ()
+                    ),
+                    *tail,
+                )
+            )
+            return (
+                BlockIR(
+                    (
+                        IfStatementIR(
+                            head.cond,
+                            then_body,
+                            else_body,
+                        ),
+                    )
+                ),
+                [*then_children, *else_children],
+                then_contains or else_contains,
+            )
+
+        if isinstance(head, CaseStatementIR) and _stmt_contains_event_ir(head):
+            items: list[CaseItemIR] = []
+            children: list[EventStatementIR] = []
+            contains_nested = False
+            has_default = False
+            for item in head.items:
+                has_default = has_default or not item.values
+                body, item_children, item_contains = transform_sequence(
+                    (*as_sequence(item.body), *tail)
+                )
+                items.append(CaseItemIR(item.values, body))
+                children.extend(item_children)
+                contains_nested = contains_nested or item_contains
+            if not has_default:
+                default_body, default_children, default_contains = (
+                    transform_sequence(tail)
+                )
+                items.append(CaseItemIR((), default_body))
+                children.extend(default_children)
+                contains_nested = contains_nested or default_contains
+            return (
+                BlockIR((CaseStatementIR(head.expr, tuple(items)),)),
+                children,
+                contains_nested,
+            )
+
+        if isinstance(head, (ForStatementIR, WhileStatementIR)):
+            if _stmt_contains_event_ir(head.body):
+                reasons.append("nested_event_in_loop_not_lowered")
+                return BlockIR(statements), [], True
+
+        if _stmt_contains_event_ir(head):
+            reasons.append("nested_event_without_parent_event_not_lowered")
+            return BlockIR(statements), [], True
+
+        transformed_tail, children, contains_nested = transform_sequence(tail)
+        return (
+            prepend_to_block(head, transformed_tail),
+            children,
+            contains_nested,
+        )
+
+    rewritten_top: list[object] = []
+    synthetic_events: list[EventStatementIR] = []
+    for stmt in body_ir.statements:
+        if isinstance(stmt, EventStatementIR):
+            transformed_body, children, _contains_nested = transform_sequence(
+                as_sequence(stmt.body)
+            )
+            rewritten_top.append(EventStatementIR(stmt.event, transformed_body))
+            synthetic_events.extend(children)
+            continue
+        if _stmt_contains_event_ir(stmt):
+            reasons.append("nested_event_without_parent_event_not_lowered")
+        rewritten_top.append(stmt)
+
+    if reasons:
+        return (
+            body_ir,
+            tuple(arm_names),
+            tuple(deadline_names),
+            tuple(dict.fromkeys(reasons)),
+        )
+    return (
+        BlockIR((*rewritten_top, *synthetic_events)),
+        tuple(arm_names),
+        tuple(deadline_names),
+        (),
+    )
+
+
 def _convert_event_transition_ops(
     *,
     model: Any,
@@ -3854,8 +4383,26 @@ def _convert_event_transition_ops(
     body_ir = _lower_module_body_for_model(module, model)
     if not isinstance(body_ir, BlockIR):
         return (f"{prefix}:stmt_lower_failed",)
+    assignment_scan_ir = body_ir
     if preapplied_initial_step_file_read:
         body_ir = _strip_preapplied_initial_file_read_events(body_ir)
+    reserved_names = (
+        binding.name
+        for binding in build_state_binding_ir(module).bindings
+    )
+    (
+        body_ir,
+        nested_timer_arm_names,
+        nested_timer_deadline_names,
+        nested_timer_reasons,
+    ) = (
+        _lower_spectre_nested_timer_events(
+            body_ir,
+            reserved_names=reserved_names,
+        )
+    )
+    if nested_timer_reasons:
+        return tuple(f"{prefix}:{reason}" for reason in nested_timer_reasons)
     if _prefer_existing_timer_static_linear_path(
         model_cls
     ) and not _stmt_has_display_strobe(body_ir):
@@ -3866,6 +4413,21 @@ def _convert_event_transition_ops(
     )
     bindings = _extend_bindings_with_repeat_loop_slots(bindings, body_ir)
     bindings = _extend_bindings_with_stateful_function_slots(bindings, body_ir)
+    bindings = _extend_bindings_with_named_scalar_slots(
+        bindings,
+        nested_timer_arm_names,
+    )
+    bindings = _extend_bindings_with_named_scalar_slots(
+        bindings,
+        nested_timer_deadline_names,
+        integer=False,
+    )
+    constant_state_values = _declared_constant_state_values(
+        module=module,
+        model=model,
+        body_ir=assignment_scan_ir,
+        bindings=bindings,
+    )
     local_node_slots, node_slot_to_global = _node_slot_maps(
         model=model,
         bindings=bindings,
@@ -3911,12 +4473,24 @@ def _convert_event_transition_ops(
                 phase_contributed_nodes.add(local_name)
     phase_contributed_nodes = frozenset(phase_contributed_nodes)
 
-    def flush_continuous_body(phase: int = EVENT_PHASE_PRE) -> None:
+    def flush_continuous_body(phase: Optional[int] = None) -> None:
         nonlocal converted_always_bodies, pending_continuous
         if not pending_continuous:
             return
+        pending_body = _materialize_simple_differential_voltage_constraints(
+            BlockIR(tuple(pending_continuous))
+        )
+        effective_phase = (
+            EVENT_PHASE_POST
+            if (
+                phase is None
+                and seen_transition
+                and _stmt_references_nodes(pending_body, phase_contributed_nodes)
+            )
+            else EVENT_PHASE_PRE if phase is None else phase
+        )
         body_program = encode_body_stmt_ops(
-            BlockIR(tuple(pending_continuous)),
+            pending_body,
             bindings,
             local_node_slots,
             side_effects=side_effect_builder,
@@ -3940,7 +4514,7 @@ def _convert_event_transition_ops(
             RustSimEvent(
                 kind=EVENT_DUE_ALWAYS,
                 event_id=len(events),
-                phase=phase,
+                phase=effective_phase,
                 body_stmt_start=body_start,
                 body_stmt_count=body_count,
             )
@@ -4101,16 +4675,17 @@ def _convert_event_transition_ops(
             seen_transition = True
             continue
         if _is_continuous_body_stmt(stmt):
-            if seen_transition:
-                pending_continuous.append(stmt)
-                flush_continuous_body(EVENT_PHASE_POST)
-            else:
-                pending_continuous.append(stmt)
+            pending_continuous.append(stmt)
             continue
 
         if isinstance(stmt, EventStatementIR):
             flush_continuous_body()
-            due_program = encode_event_due_program(stmt.event, bindings, local_node_slots)
+            due_program = encode_event_due_program(
+                stmt.event,
+                bindings,
+                local_node_slots,
+                constant_state_values=constant_state_values,
+            )
             body_program = encode_body_stmt_ops(
                 stmt.body,
                 bindings,
@@ -4284,6 +4859,9 @@ def _convert_event_transition_ops(
                             )
                         )
                         converted_slews += 1
+                    continue
+                if isinstance(stmt, ContributionIR):
+                    pending_continuous.append(stmt)
                     continue
                 direct_program = encode_body_stmt_ops(
                     BlockIR((stmt,)),

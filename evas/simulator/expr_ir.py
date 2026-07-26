@@ -41,6 +41,7 @@ from evas.compiler.ast_nodes import (
     TernaryExpr,
     UnaryExpr,
     WhileStatement,
+    module_constant_parameters,
 )
 from evas.simulator.rust_backend import (
     BODY_EXPR_ABS,
@@ -922,7 +923,7 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     for slot, name in enumerate(sorted(SPECIAL_IDENTIFIER_NAMES)):
         bindings.append(StateBindingIR(name=name, kind=SYMBOL_SPECIAL, slot=slot))
 
-    for slot, param in enumerate(getattr(module, "parameters", ()) or ()):
+    for slot, param in enumerate(module_constant_parameters(module)):
         integer = getattr(param, "param_type", None) == ParamType.INTEGER
         is_string = getattr(param, "param_type", None) == ParamType.STRING
         if is_string:
@@ -1350,10 +1351,12 @@ def _append_rtoi_body_expr_ops(
 ) -> bool:
     if isinstance(arg, LiteralIR) and isinstance(arg.value, (int, float)):
         value = float(arg.value)
-        rounded = math.floor(value + 0.5) if value >= 0.0 else math.ceil(value - 0.5)
-        ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(rounded)))
+        ops.append(BodyExprOp(BODY_EXPR_CONST, value=float(math.trunc(value))))
         return True
 
+    # floor(x) is truncation for non-negative values; ceil(x) is truncation
+    # for negative values.  Keep assignment conversion separate: assigning a
+    # real to an integer follows Verilog-A round-to-nearest semantics.
     if not _append_body_expr_ops(arg, bindings, node_slots, ops):
         return False
     ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.0))
@@ -1361,16 +1364,11 @@ def _append_rtoi_body_expr_ops(
 
     if not _append_body_expr_ops(arg, bindings, node_slots, ops):
         return False
-    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
-    ops.append(BodyExprOp(BODY_EXPR_ADD))
     ops.append(BodyExprOp(BODY_EXPR_FLOOR))
 
     if not _append_body_expr_ops(arg, bindings, node_slots, ops):
         return False
-    ops.append(BodyExprOp(BODY_EXPR_CONST, value=0.5))
-    ops.append(BodyExprOp(BODY_EXPR_SUB))
     ops.append(BodyExprOp(BODY_EXPR_CEIL))
-
     ops.append(BodyExprOp(BODY_EXPR_SELECT))
     return True
 
