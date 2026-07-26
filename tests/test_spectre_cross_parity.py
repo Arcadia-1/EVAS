@@ -529,14 +529,15 @@ endmodule
     assert result.signals["out"].max() == pytest.approx(0.0, abs=1e-12)
 
 
-def test_transition_target_changed_by_pre_cross_is_observed_next_step() -> None:
+def test_transition_target_changed_by_cross_is_applied_after_delay() -> None:
     _build_rust_core_or_skip()
     src = """\
 `include "disciplines.vams"
 
 module delayed_cross_transition(clk, out);
-    input voltage clk;
-    output voltage out;
+    input clk;
+    output out;
+    electrical clk, out;
     integer state;
 
     analog begin
@@ -574,7 +575,11 @@ endmodule
     out = result.signals["out"]
 
     assert sim._perf_stats["rust_sim_program_enabled"] == 1
-    assert out[(times > 0.55e-9) & (times < 0.65e-9)].max() == pytest.approx(0.0, abs=1e-12)
+    assert out[times <= 0.6e-9].max() == pytest.approx(0.0, abs=1e-12)
+    assert out[(times > 0.6e-9) & (times < 0.65e-9)].max() == pytest.approx(
+        1.0,
+        abs=1e-12,
+    )
     assert out[times > 1.0e-9].max() == pytest.approx(1.0, abs=1e-12)
 
 
