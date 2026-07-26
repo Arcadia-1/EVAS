@@ -110,6 +110,7 @@ class SpectreNetlist:
 # ---------------------------------------------------------------------------
 
 _SUFFIXES_CASE_SENSITIVE = {
+    's': 1.0,
     'T': 1e12,
     'G': 1e9,
     'M': 1e6,
@@ -252,8 +253,9 @@ class _ExprEvaluator:
             self.pos += 1
             val = self._parse_expr()
             self._skip_ws()
-            if self.pos < len(self.expr) and self.expr[self.pos] == ')':
-                self.pos += 1
+            if self.pos >= len(self.expr) or self.expr[self.pos] != ')':
+                raise ValueError("Expected closing parenthesis")
+            self.pos += 1
             return val
 
         # Read token: number or variable name
@@ -273,7 +275,7 @@ class _ExprEvaluator:
         token = self.expr[start:self.pos]
 
         if not token:
-            return 0.0
+            raise ValueError("Expected expression atom")
 
         # Try as number with suffix
         val = _parse_suffix_number(token)
@@ -297,6 +299,18 @@ def evaluate_expr(expr: str, variables: Dict[str, float]) -> float:
     return _ExprEvaluator(variables).evaluate(expr)
 
 
+def _evaluate_complete_expr(expr: str, variables: Dict[str, float]) -> float:
+    """Evaluate an expression and reject trailing or incomplete syntax."""
+    evaluator = _ExprEvaluator(variables)
+    result = evaluator.evaluate(expr)
+    evaluator._skip_ws()
+    if evaluator.pos != len(evaluator.expr):
+        raise ValueError(
+            f"Unexpected trailing expression text: {evaluator.expr[evaluator.pos:]!r}"
+        )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Line preprocessing: strip comments, handle continuation
 # ---------------------------------------------------------------------------
@@ -317,59 +331,113 @@ def _strip_line_comment(line: str) -> str:
                 quote_char = ch
             elif ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
                 return line[:i].rstrip()
+            elif ch == ';':
+                return line[:i].rstrip()
     return line
 
 
 def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
-    """Reject implicit multiline PWL wave arrays that Spectre rejects.
+    """Reject implicit multiline PWL arrays without Spectre continuation marks.
 
-    Spectre does not treat a bracketed ``wave=[...]`` array as an implicit line
-    continuation.  The generated netlist must either keep the full array on one
-    line or use backslash continuation on each non-final line.
+    Spectre 21.1.0.509 ISR12 reports SFE-874 (unexpected end of line) for
+    bracketed PWL data split across unmarked physical lines.
     """
     in_wave = False
-    for line_no, raw in enumerate(raw_lines, start=1):
+    previous_backslash = False
+    saw_plus_continuation = False
+    for line_number, raw in enumerate(raw_lines, 1):
         line = _strip_line_comment(raw.rstrip())
         stripped = line.strip()
         if not stripped:
             continue
 
+        starts_plus = stripped.startswith('+')
         continued = stripped.endswith('\\')
 
-        if not in_wave:
-            match = re.search(r'\bwave\s*=\s*\[', stripped, flags=re.IGNORECASE)
-            if not match:
+        if in_wave:
+            search_text = stripped[1:].lstrip() if starts_plus else stripped
+            # Let the PWL value validator classify an otherwise empty array.
+            # The closing bracket carries no continuation payload, so rejecting
+            # it here would hide the more precise empty-wave diagnostic.
+            if search_text == ']':
+                if (
+                    saw_plus_continuation
+                    and not starts_plus
+                    and not previous_backslash
+                ):
+                    raise ValueError(
+                        "Spectre-incompatible PWL wave syntax at "
+                        f"line {line_number}: a '+'-continued wave requires "
+                        "the closing bracket to remain on a continued line"
+                    )
+                in_wave = False
+                previous_backslash = continued
+                saw_plus_continuation = False
                 continue
-            if ']' in stripped[match.end():]:
-                continue
-            if not continued:
+            if not starts_plus and not previous_backslash:
                 raise ValueError(
                     "Spectre-incompatible PWL wave syntax at "
-                    f"line {line_no}: multiline wave=[...] requires backslash "
-                    "line continuation"
+                    f"line {line_number}: multiline wave=[...] requires '+' "
+                    "or backslash line continuation"
                 )
-            in_wave = True
+            if starts_plus:
+                saw_plus_continuation = True
+            if ']' in search_text:
+                in_wave = False
+                saw_plus_continuation = False
+            previous_backslash = continued
             continue
 
-        if ']' in stripped:
-            in_wave = False
+        match = re.search(r'\bwave\s*=\s*\[', stripped, flags=re.IGNORECASE)
+        if match is None:
+            previous_backslash = continued
             continue
-        if not continued:
-            raise ValueError(
-                "Spectre-incompatible PWL wave syntax at "
-                f"line {line_no}: multiline wave=[...] requires backslash "
-                "line continuation"
-            )
+        if ']' not in stripped[match.end():]:
+            in_wave = True
+            previous_backslash = continued
+            saw_plus_continuation = False
+            continue
+        previous_backslash = continued
 
 
 def _preprocess_lines(raw_lines: List[str]) -> List[str]:
     """Strip comments, handle \\ continuation and bracket blocks, return clean lines."""
     result = []
     continuation = ''
+    continuation_from_backslash = False
     bracket_depth = 0
 
-    for raw in raw_lines:
-        line = _strip_line_comment(raw.rstrip())
+    for line_number, raw in enumerate(raw_lines, 1):
+        raw_line = raw.rstrip()
+        line = _strip_line_comment(raw_line)
+        comment_suffix = raw_line[len(line):].lstrip()
+        has_slash_comment = comment_suffix.startswith('//')
+        if has_slash_comment and (
+            continuation
+            or bracket_depth > 0
+            or line.rstrip().endswith('\\')
+        ):
+            raise ValueError(
+                "Spectre-incompatible comment inside a continued Spectre "
+                f"statement at line {line_number}"
+            )
+        if line.lstrip().startswith('+'):
+            if continuation_from_backslash:
+                raise ValueError(
+                    "Spectre-incompatible continuation syntax at "
+                    f"line {line_number}: cannot mix backslash and '+' "
+                    "continuation markers on the same statement"
+                )
+            continued_text = line.lstrip()[1:].lstrip()
+            if continuation or bracket_depth > 0:
+                line = continued_text
+            else:
+                if not result:
+                    raise ValueError(
+                        "Spectre continuation marker '+' has no preceding "
+                        f"statement at line {line_number}"
+                    )
+                line = f"{result.pop()} {continued_text}"
 
         continued = line.endswith('\\')
         if continued:
@@ -394,14 +462,17 @@ def _preprocess_lines(raw_lines: List[str]) -> List[str]:
         # Handle continuation
         if continued:
             continuation += line + ' '
+            continuation_from_backslash = True
             continue
 
         if continuation:
             line = continuation + line.lstrip()
             continuation = ''
+            continuation_from_backslash = False
 
         if bracket_depth > 0:
             continuation = line.rstrip() + ' '
+            continuation_from_backslash = False
             continue
 
         stripped = line.strip()
@@ -444,27 +515,69 @@ def _parse_named_params(tokens: List[str], start: int,
                         variables: Dict[str, float]) -> Dict[str, Any]:
     """Parse key=value pairs from token list starting at index `start`."""
     params = {}
-    for tok in tokens[start:]:
-        if '=' not in tok:
+    pending_key: Optional[str] = None
+    idx = start
+    while idx < len(tokens):
+        tok = tokens[idx]
+        idx += 1
+
+        if pending_key is not None:
+            # Consume the value in forms like `foo = bar` where `bar` is token.
+            if '=' in tok and not tok.startswith('='):
+                raise ValueError(
+                    f"Missing value for Spectre parameter {pending_key!r}"
+                )
+            val_str = tok
+            if val_str.startswith('='):
+                val_str = val_str[1:].strip()
+            if val_str == "":
+                # Handle `foo =` `bar` where bar comes later.
+                continue
+            params[pending_key] = _parse_param_value(val_str, variables)
+            pending_key = None
             continue
+
+        if '=' not in tok:
+            if tok == '=':
+                continue
+            if tok.endswith('='):
+                key = tok[:-1].strip().lower()
+                if key:
+                    pending_key = key
+                continue
+            if idx < len(tokens) and tokens[idx].startswith('='):
+                pending_key = tok.strip().lower()
+            continue
+
         key, val_str = tok.split('=', 1)
         key = key.strip().lower()
-
-        # Handle bracket-enclosed arrays: wave=[t0 v0 t1 v1 ...]
-        if val_str.startswith('['):
-            # Collect everything until ']'
-            val_str = val_str[1:]  # strip leading [
-            # This is handled separately for PWL
-            params[key] = val_str
+        val_str = val_str.strip()
+        if not key:
             continue
+        if val_str == "":
+            pending_key = key
+            continue
+        if pending_key is None:
+            params[key] = _parse_param_value(val_str, variables)
 
-        # Try to evaluate as expression
-        try:
-            params[key] = evaluate_expr(val_str, variables)
-        except (ValueError, ZeroDivisionError):
-            params[key] = val_str  # keep as string
-
+    if pending_key is not None:
+        raise ValueError(
+            f"Missing value for Spectre parameter {pending_key!r}"
+        )
     return params
+
+
+def _parse_param_value(val_str: str, variables: Dict[str, float]) -> Any:
+    """Parse one parameter value token.
+
+    Supports raw expressions and bracket-enclosed array payloads.
+    """
+    if val_str.startswith('['):
+        return val_str[1:]
+    try:
+        return evaluate_expr(val_str, variables)
+    except (ValueError, ZeroDivisionError):
+        return val_str
 
 
 def _is_inline_wave_arithmetic(tok: str) -> bool:
@@ -476,6 +589,20 @@ def _is_inline_wave_arithmetic(tok: str) -> bool:
     Those expressions must be precomputed by the testbench author.
     """
     text = tok.strip()
+    if text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for index, ch in enumerate(text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and index != len(text) - 1:
+                    break
+            if depth < 0:
+                break
+        else:
+            if depth == 0:
+                return False
     for i, ch in enumerate(text):
         if ch not in "+-":
             continue
@@ -485,6 +612,190 @@ def _is_inline_wave_arithmetic(tok: str) -> bool:
             continue
         return True
     return False
+
+
+def _split_pwl_wave_tokens(wave_data: str, source_name: str) -> List[str]:
+    """Split a Spectre PWL wave array without breaking parenthesized expressions."""
+    tokens: List[str] = []
+    token_chars: List[str] = []
+    depth = 0
+
+    for ch in wave_data:
+        if ch == "(":
+            depth += 1
+            token_chars.append(ch)
+            continue
+        if ch == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(
+                    f"Invalid PWL wave token in source {source_name}: "
+                    "unmatched closing parenthesis"
+                )
+            token_chars.append(ch)
+            continue
+        if depth == 0 and (ch.isspace() or ch == ","):
+            if token_chars:
+                tokens.append("".join(token_chars).strip())
+                token_chars = []
+            continue
+        token_chars.append(ch)
+
+    if depth != 0:
+        raise ValueError(
+            f"Invalid PWL wave token in source {source_name}: "
+            "unmatched opening parenthesis"
+        )
+    if token_chars:
+        tokens.append("".join(token_chars).strip())
+    return [tok for tok in tokens if tok]
+
+
+def _parenthesize_bare_two_terminal_primitive(line: str) -> str:
+    """Normalize Spectre's optional bare two-terminal primitive syntax.
+
+    Cadence accepts both ``V1 (out 0) vsource ...`` and
+    ``V1 out 0 vsource ...`` as well as the analogous resistor form.  Keeping
+    normalization here lets the existing primitive parsers remain the single
+    implementation.
+    """
+    match = re.match(
+        r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+([vi]source|resistor)\b(.*)$",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        instance_name = line.split(maxsplit=1)[0]
+        raise ValueError(
+            f"Invalid bare-terminal Spectre primitive {instance_name!r}; "
+            "expected `name positive_node negative_node "
+            "vsource|isource|resistor ...`."
+        )
+    name, node_pos, node_neg, primitive, remainder = match.groups()
+    return f"{name} ({node_pos} {node_neg}) {primitive}{remainder}"
+
+
+def _is_bare_two_terminal_primitive_syntax(line: str) -> bool:
+    """Return whether *line* starts with a supported bare primitive form.
+
+    Looking for any ``(`` in the complete line is insufficient because legal
+    source parameters, notably PWL expressions, may themselves contain
+    parentheses.  Restrict the decision to the four leading source tokens.
+    """
+    return (
+        re.match(
+            r"^\s*\S+\s+[^()\s]+\s+[^()\s]+\s+"
+            r"(?:[vi]source|resistor)\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _normalize_source_keyword_instance(line: str) -> str:
+    """Normalize Spectre's source-keyword-prefixed forms.
+
+    The non-redundant ``vsource Vclk (p n) ...`` spelling uses ``Vclk`` as the
+    component name.  A redundant trailing primitive,
+    ``vsource Vclk (p n) vsource ...``, is observably different in Spectre:
+    the leading keyword remains the instance identity and the source terminal
+    orientation is reversed.  Preserve that behavior instead of silently
+    repairing generated testbenches into the intended canonical form.
+    """
+    match = re.match(
+        r"""^\s*([vi]source)\s+
+            ("[^"]*"|'[^']*'|[^()\s]+)\s+
+            (\([^)]*\))(.*)$""",
+        line,
+        flags=re.IGNORECASE | re.VERBOSE,
+    )
+    if match is None:
+        return line
+
+    source_master, instance_name, nodes, remainder = match.groups()
+    quoted_instance_name = (
+        (instance_name.startswith('"') and instance_name.endswith('"'))
+        or (instance_name.startswith("'") and instance_name.endswith("'"))
+    )
+    if quoted_instance_name:
+        instance_name = instance_name[1:-1]
+
+    remainder = remainder.strip()
+    if remainder:
+        first_tail, sep, rest = remainder.partition(" ")
+        if (
+            not quoted_instance_name
+            and first_tail.lower() in {"vsource", "isource"}
+        ):
+            if first_tail.lower() != source_master.lower():
+                raise ValueError(
+                    f"Spectre source instance {instance_name!r} uses conflicting "
+                    f"primitive names {source_master!r} and {first_tail!r}"
+                )
+            node_names = nodes[1:-1].split()
+            if len(node_names) != 2:
+                raise ValueError(
+                    f"Spectre source instance {source_master!r} requires two "
+                    f"terminals, got {nodes!r}"
+                )
+            reversed_nodes = f"({node_names[1]} {node_names[0]})"
+            trailing_params = rest.strip() if sep else ""
+            if trailing_params:
+                return (
+                    f"{source_master} {reversed_nodes} {source_master} "
+                    f"{trailing_params}"
+                )
+            return f"{source_master} {reversed_nodes} {source_master}"
+
+    if not instance_name:
+        raise ValueError(
+            f"Spectre source master {source_master!r} is missing an instance name"
+        )
+    if remainder:
+        return f"{instance_name} {nodes} {source_master} {remainder}"
+    return f"{instance_name} {nodes} {source_master}"
+
+
+def _ensure_unique_instance_name(netlist: SpectreNetlist, name: str) -> None:
+    """Reject duplicate top-level source/instance names like Spectre does."""
+    existing_names = (
+        [source.name for source in netlist.sources]
+        + [instance.name for instance in netlist.instances]
+    )
+    if name in existing_names:
+        raise ValueError(
+            f"Spectre duplicate instance name {name!r} is already defined"
+        )
+
+
+def _parse_pwl_wave_values(
+    wave_data: str,
+    variables: Dict[str, float],
+    source_name: str,
+) -> List[float]:
+    """Parse one Spectre PWL wave array for voltage or current sources."""
+    wave_vals = []
+    for tok in _split_pwl_wave_tokens(wave_data, source_name):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if _is_inline_wave_arithmetic(tok):
+            raise ValueError(
+                f"Spectre-incompatible PWL wave token {tok!r} in source "
+                f"{source_name}: inline arithmetic inside wave=[...] is "
+                "rejected; precompute the time/value literal"
+            )
+        val = _parse_suffix_number(tok)
+        if val is None:
+            try:
+                val = _evaluate_complete_expr(tok, variables)
+            except (ValueError, ZeroDivisionError):
+                raise ValueError(
+                    f"Invalid PWL wave token {tok!r} in source {source_name}"
+                )
+        wave_vals.append(val)
+    return wave_vals
 
 
 def _build_source(
@@ -534,21 +845,36 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
     idx = 0
     while idx < len(lines):
         line = lines[idx]
+        line = _normalize_source_keyword_instance(line)
         low = line.lower().strip()
+        tokens = low.split()
+        first = tokens[0] if tokens else ""
+
+        if low.startswith("simulator("):
+            raise ValueError(
+                "Unsupported simulator language directive: use "
+                "`simulator lang=spectre`, not parenthesized syntax"
+            )
 
         # simulatorOptions
-        if low.startswith('simulatoroptions'):
+        if first == 'simulatoroptions':
+            _parse_simulator_options(line, netlist, evaluator_vars)
+            idx += 1
+            continue
+
+        # Named Spectre options analysis: "options options reltol=..."
+        if first == 'options' and len(tokens) >= 2 and tokens[1] == 'options':
             _parse_simulator_options(line, netlist, evaluator_vars)
             idx += 1
             continue
 
         # Skip simulator language directive
-        if low.startswith('simulator '):
+        if first == 'simulator':
             idx += 1
             continue
 
         # Global ground
-        if low.startswith('global'):
+        if first == 'global':
             parts = line.split()
             if len(parts) >= 2:
                 netlist.ground = parts[1]
@@ -556,48 +882,60 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             continue
 
         # Parameters block
-        if low.startswith('parameters'):
+        if first == 'parameters':
             _parse_parameters(line, evaluator_vars)
             netlist.parameters = dict(evaluator_vars)
             idx += 1
             continue
 
         # Include (process models)
-        if low.startswith('include'):
+        if first == 'include':
             _parse_include(line, netlist)
             idx += 1
             continue
 
         # ahdl_include
-        if low.startswith('ahdl_include'):
+        if first == 'ahdl_include':
             rest = line[len('ahdl_include'):].strip()
-            path = rest.strip('"').strip("'")
+            path, trailing = _split_quoted_path(rest, "ahdl_include")
+            if trailing:
+                raise ValueError(
+                    f"Malformed ahdl_include options: {trailing!r}"
+                )
             netlist.ahdl_includes.append(AhdlInclude(path=path))
             idx += 1
             continue
 
         # subckt block
-        if low.startswith('subckt '):
+        if first == 'subckt':
             idx = _parse_subckt_block(lines, idx, netlist, evaluator_vars)
             continue
 
-        # Transient analysis: "tran tran stop=..."
-        if low.startswith('tran'):
+        # Transient analysis: "tran tran ..." or "tran1 tran ..."
+        if first == 'tran' or (
+            len(tokens) >= 2 and tokens[1] == 'tran'
+        ):
             _parse_tran(line, netlist, evaluator_vars)
             idx += 1
             continue
 
         # saveOptions, info, finalTimeOP, etc. — skip
-        if low.startswith('saveoptions') or low.startswith('info ') or \
-           low.startswith('finaltimeop') or low.startswith('modelparameter') or \
-           low.startswith('element ') or low.startswith('outputparameter') or \
-           low.startswith('designparamvals') or low.startswith('primitives ') or \
-           low.startswith('subckts '):
+        if first in {
+            'saveoptions',
+            'info',
+            'finaltimeop',
+            'modelparameter',
+            'element',
+            'outputparameter',
+            'designparamvals',
+            'primitives',
+            'subckts',
+        }:
             idx += 1
             continue
 
         # save statement
-        if low.startswith('save'):
+        if first == 'save':
             parts = line.split()
             for sig in parts[1:]:
                 for name, fmt in _expand_save_signal(sig):
@@ -607,16 +945,13 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             idx += 1
             continue
 
-        # A source-like line without a parenthesized terminal list is not a
-        # valid Spectre instance.  Do not silently drop it and simulate an
-        # undriven circuit, which turns a netlist error into a misleading
-        # behavioral mismatch.
-        if '(' not in line and re.search(r'(?i)\b[vi]source\b', line):
-            source_name = line.split(maxsplit=1)[0]
-            raise ValueError(
-                f"Spectre source {source_name!r} requires a parenthesized "
-                "terminal list, for example `V1 (out 0) vsource dc=1`."
-            )
+        # Cadence accepts supported two-terminal primitives with or without
+        # parentheses. Normalize the bare form so both share one parser.
+        if _is_bare_two_terminal_primitive_syntax(line):
+            normalized = _parenthesize_bare_two_terminal_primitive(line)
+            _parse_instance(normalized, netlist, evaluator_vars)
+            idx += 1
+            continue
 
         # Voltage source: Vname (node node) vsource ...
         if line[0] in ('V', 'v') and '(' in line:
@@ -631,25 +966,129 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             idx += 1
             continue
 
-        idx += 1
+        raise ValueError(
+            f"Unsupported or malformed Spectre statement: {line!r}"
+        )
 
     return netlist
+
+
+def _split_parameter_assignments(rest: str) -> List[Tuple[str, str]]:
+    """Split ``name=expression`` pairs while preserving spaced expressions."""
+    assignments: List[Tuple[str, str]] = []
+    pos = 0
+
+    while True:
+        while pos < len(rest) and rest[pos].isspace():
+            pos += 1
+        if pos >= len(rest):
+            break
+
+        name_match = re.match(r"[A-Za-z_]\w*", rest[pos:])
+        if name_match is None:
+            raise ValueError(
+                f"Expected Spectre parameter name near {rest[pos:]!r}"
+            )
+        name = name_match.group(0)
+        pos += len(name)
+        while pos < len(rest) and rest[pos].isspace():
+            pos += 1
+        if pos >= len(rest) or rest[pos] != "=":
+            raise ValueError(f"Expected '=' after Spectre parameter {name!r}")
+        pos += 1
+        while pos < len(rest) and rest[pos].isspace():
+            pos += 1
+
+        expr_start = pos
+        expr_end = len(rest)
+        next_assignment = len(rest)
+        depth = 0
+        quote: Optional[str] = None
+        escaped = False
+        while pos < len(rest):
+            ch = rest[pos]
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote:
+                    quote = None
+                pos += 1
+                continue
+            if ch in {'"', "'"}:
+                quote = ch
+                pos += 1
+                continue
+            if ch == "(":
+                depth += 1
+                pos += 1
+                continue
+            if ch == ")":
+                if depth == 0:
+                    raise ValueError(
+                        f"Unmatched ')' in Spectre parameter {name!r}"
+                    )
+                depth -= 1
+                pos += 1
+                continue
+            if depth == 0 and ch.isspace():
+                lookahead = pos
+                while lookahead < len(rest) and rest[lookahead].isspace():
+                    lookahead += 1
+                next_name = re.match(r"[A-Za-z_]\w*", rest[lookahead:])
+                if next_name is not None:
+                    after_name = lookahead + len(next_name.group(0))
+                    while after_name < len(rest) and rest[after_name].isspace():
+                        after_name += 1
+                    if after_name < len(rest) and rest[after_name] == "=":
+                        expr_end = pos
+                        next_assignment = lookahead
+                        break
+            pos += 1
+
+        if quote is not None:
+            raise ValueError(
+                f"Unterminated quote in Spectre parameter {name!r}"
+            )
+        if depth != 0:
+            raise ValueError(
+                f"Unmatched '(' in Spectre parameter {name!r}"
+            )
+        expr = rest[expr_start:expr_end].strip()
+        if not expr:
+            raise ValueError(
+                f"Missing expression for Spectre parameter {name!r}"
+            )
+        assignments.append((name, expr))
+        pos = next_assignment
+
+    if not assignments:
+        raise ValueError("Spectre parameters statement has no assignments")
+    return assignments
 
 
 def _parse_parameters(line: str, variables: Dict[str, float]):
     """Parse a `parameters` line, evaluating expressions in order."""
     rest = line[len('parameters'):].strip()
+    if rest.startswith('{'):
+        raise ValueError(
+            "Spectre-incompatible block-style parameters declaration; "
+            "use `parameters name=value ...` on one statement"
+        )
 
-    # Split on whitespace, but respect that expressions don't have spaces
-    # (Spectre parameters are space-separated key=value pairs)
-    pairs = re.findall(r'(\w+)\s*=\s*([^\s]+)', rest)
+    try:
+        assignments = _split_parameter_assignments(rest)
+    except ValueError as exc:
+        raise ValueError(f"Invalid Spectre parameters statement: {exc}") from exc
 
-    for name, expr in pairs:
+    for name, expr in assignments:
         try:
-            val = evaluate_expr(expr, variables)
-            variables[name] = val
-        except (ValueError, ZeroDivisionError):
-            variables[name] = 0.0
+            variables[name] = _evaluate_complete_expr(expr, variables)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ValueError(
+                f"Invalid Spectre parameter {name!r} expression {expr!r}: {exc}"
+            ) from exc
 
 
 def _parse_simulator_options(line: str, netlist: SpectreNetlist,
@@ -665,6 +1104,22 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
                 variables: Dict[str, float]):
     """Parse transient analysis: tran tran stop=val [maxstep=val] ..."""
     tokens = line.split()
+    for token in tokens[1:]:
+        if '=' not in token:
+            continue
+        key, value = token.split('=', 1)
+        if (
+            key.lower() in {"write", "writefinal"}
+            and any(char in value for char in "/\\")
+            and not (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {'"', "'"}
+            )
+        ):
+            raise ValueError(
+                f"Spectre {key}= output requires a quoted path; got {value!r}"
+            )
     params = _parse_named_params(tokens, 1, variables)
 
     stop = params.get('stop', 0.0)
@@ -682,12 +1137,9 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
     refine_steps  = int(params.get('refine_steps',  8))
     errpreset = str(params.get('errpreset', ''))
 
-    # Find analysis name (first token that's not a key=value)
-    name = 'tran'
-    for tok in tokens[1:]:
-        if '=' not in tok:
-            name = tok
-            break
+    # The first token is the analysis instance name in both `tran tran` and
+    # named forms such as `tran1 tran`.
+    name = tokens[0] if tokens else 'tran'
 
     netlist.tran = SpectreTran(stop=float(stop), step=float(step), name=name,
                                refine_factor=refine_factor, refine_steps=refine_steps,
@@ -776,8 +1228,10 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
     """Parse a voltage source: Vname (n+ n-) vsource type=X dc=Y ..."""
     name, nodes, remainder = _extract_nodes(line)
 
-    if len(nodes) < 2:
-        return
+    if len(nodes) != 2:
+        raise ValueError(
+            f"Spectre source {name!r} requires exactly two terminals"
+        )
 
     node_pos = nodes[0]
     node_neg = nodes[1]
@@ -785,10 +1239,11 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
     # remainder: "vsource dc=0.9 type=dc"
     tokens = remainder.split()
 
-    # Skip "vsource" keyword
-    param_start = 0
-    if tokens and tokens[0].lower() == 'vsource':
-        param_start = 1
+    if not tokens or tokens[0].lower() != 'vsource':
+        raise ValueError(
+            f"Spectre voltage source {name!r} is missing the vsource master"
+        )
+    param_start = 1
 
     # Handle bracket-delimited wave= for PWL
     # Rejoin remainder after vsource to handle wave=[...] properly
@@ -813,28 +1268,10 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
     params = _parse_named_params(param_str.split(), 0, variables)
 
     if wave_data is not None:
-        # Evaluate each wave token; parameter refs (e.g. 'vdd') use variables
-        wave_vals = []
-        for tok in wave_data.replace(',', ' ').split():
-            tok = tok.strip()
-            if not tok:
-                continue
-            if _is_inline_wave_arithmetic(tok):
-                raise ValueError(
-                    f"Spectre-incompatible PWL wave token {tok!r} in source {name}: "
-                    "inline arithmetic inside wave=[...] is rejected; precompute "
-                    "the time/value literal"
-                )
-            val = _parse_suffix_number(tok)
-            if val is None:
-                try:
-                    val = evaluate_expr(tok, variables)
-                except (ValueError, ZeroDivisionError):
-                    raise ValueError(f"Invalid PWL wave token {tok!r} in source {name}")
-            wave_vals.append(val)
-        params['wave'] = wave_vals
+        params['wave'] = _parse_pwl_wave_values(wave_data, variables, name)
 
     src = _build_source(name, node_pos, node_neg, params)
+    _ensure_unique_instance_name(netlist, name)
     netlist.sources.append(src)
 
 
@@ -867,6 +1304,10 @@ def _parse_instance(line: str, netlist: SpectreNetlist,
         _parse_vsource(line, netlist, variables)
         return
     if model_name.lower() == 'isource':
+        if len(nodes) != 2:
+            raise ValueError(
+                f"Spectre source {name!r} requires exactly two terminals"
+            )
         param_str = ' '.join(param_tokens)
         wave_data = None
         wave_match = re.search(r'wave\s*=\s*\[([^\]]*)\]', param_str)
@@ -875,27 +1316,16 @@ def _parse_instance(line: str, netlist: SpectreNetlist,
             param_str = param_str[:wave_match.start()] + param_str[wave_match.end():]
         params = _parse_named_params(param_str.split(), 0, variables)
         if wave_data is not None:
-            wave_vals = []
-            for tok in wave_data.replace(',', ' ').split():
-                tok = tok.strip()
-                if not tok:
-                    continue
-                val = _parse_suffix_number(tok)
-                if val is None:
-                    try:
-                        val = evaluate_expr(tok, variables)
-                    except (ValueError, ZeroDivisionError):
-                        raise ValueError(f"Invalid PWL wave token {tok!r} in source {name}")
-                wave_vals.append(val)
-            params['wave'] = wave_vals
-        if len(nodes) >= 2:
-            netlist.sources.append(
-                _build_source(name, nodes[0], nodes[1], params, kind="current")
-            )
+            params['wave'] = _parse_pwl_wave_values(wave_data, variables, name)
+        _ensure_unique_instance_name(netlist, name)
+        netlist.sources.append(
+            _build_source(name, nodes[0], nodes[1], params, kind="current")
+        )
         return
 
     params = _parse_named_params(param_tokens, 0, variables)
 
+    _ensure_unique_instance_name(netlist, name)
     netlist.instances.append(SpectreInstance(
         name=name, nodes=nodes, model_name=model_name, params=params,
     ))
@@ -905,21 +1335,31 @@ def _parse_instance(line: str, netlist: SpectreNetlist,
 # Include parser
 # ---------------------------------------------------------------------------
 
+def _split_quoted_path(rest: str, statement: str) -> Tuple[str, str]:
+    rest = rest.strip()
+    if not rest or rest[0] not in {'"', "'"}:
+        raise ValueError(f"{statement} requires a quoted path")
+    quote = rest[0]
+    end = rest.find(quote, 1)
+    if end <= 1:
+        raise ValueError(f"{statement} requires a non-empty quoted path")
+    return rest[1:end], rest[end + 1:].strip()
+
+
 def _parse_include(line: str, netlist: SpectreNetlist):
     """Parse include "path" [section=X] -> SpectreInclude."""
-    # Extract quoted path
-    m = re.search(r'"([^"]+)"', line)
-    if not m:
-        m = re.search(r"'([^']+)'", line)
-    if not m:
-        return
-    path = m.group(1)
-
-    # Check for section=XXX
+    rest = line[len("include"):].strip()
+    path, trailing = _split_quoted_path(rest, "include")
     section = None
-    sm = re.search(r'section\s*=\s*(\S+)', line)
-    if sm:
-        section = sm.group(1)
+    if trailing:
+        match = re.fullmatch(
+            r"section\s*=\s*(\S+)",
+            trailing,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError(f"Malformed include options: {trailing!r}")
+        section = match.group(1)
 
     netlist.includes.append(SpectreInclude(path=path, section=section))
 
