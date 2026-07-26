@@ -351,16 +351,8 @@ def has_compat_errors(diagnostics: Sequence[Diagnostic]) -> bool:
 
 def _resolve_ahdl_include(path_text: str, scs_dir: Path) -> Optional[Path]:
     raw = Path(path_text)
-    candidates = [raw, scs_dir / raw, scs_dir / raw.name]
-    seen = set()
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if resolved.exists():
-            return resolved
-    return None
+    resolved = raw.resolve() if raw.is_absolute() else (scs_dir / raw).resolve()
+    return resolved if resolved.is_file() else None
 
 
 def _lint_module(
@@ -481,7 +473,7 @@ def _lint_module(
 
 def _module_symbol_types(module: va_ast.Module) -> Dict[str, va_ast.ParamType]:
     symbol_types: Dict[str, va_ast.ParamType] = {}
-    for param in getattr(module, "parameters", []):
+    for param in va_ast.module_constant_parameters(module):
         symbol_types[param.name] = param.param_type
     for var in getattr(module, "variables", []):
         symbol_types[var.name] = var.var_type
@@ -559,11 +551,6 @@ _STRICT_TOKEN_REJECTIONS = {
 }
 
 _STRICT_IDENT_REJECTIONS = {
-    "generate": (
-        "generate/genvar static elaboration",
-        AMS_DIGITAL,
-        "generate is accepted by EVAS extension mode but rejected in strict mode",
-    ),
     "specify": (
         "specify/specparam",
         AMS_DIGITAL,
@@ -584,10 +571,8 @@ _STRICT_VERSION_GATED_RANDOM = {
 _STRICT_SEEDED_RANDOM_PARITY = {
     "$rdist_erlang",
     "$rdist_exponential",
-    "$rdist_normal",
     "$rdist_poisson",
 }
-
 
 def _strict_spectre_diag(
     feature: str,
@@ -648,13 +633,15 @@ def _lint_strict_spectre_module(
     filename: str,
 ) -> List[Diagnostic]:
     diagnostics: List[Diagnostic] = []
-    constant_index_names = {param.name for param in getattr(module, "parameters", [])}
+    constant_index_names = {
+        param.name for param in va_ast.module_constant_parameters(module)
+    }
     constant_index_names.update(
         var.name for var in getattr(module, "variables", [])
         if getattr(var, "is_genvar", False)
     )
     scalar_integer_names = {
-        param.name for param in getattr(module, "parameters", [])
+        param.name for param in va_ast.module_constant_parameters(module)
         if getattr(param, "param_type", None) == va_ast.ParamType.INTEGER
     }
     scalar_integer_names.update(
@@ -664,7 +651,21 @@ def _lint_strict_spectre_module(
             and not getattr(var, "is_array", False)
         )
     )
-
+    for instance in getattr(module, "instances", []):
+        for connection in instance.connections:
+            expr = connection.expr
+            if isinstance(expr, va_ast.Identifier) and expr.name in constant_index_names:
+                diagnostics.append(
+                    _strict_spectre_diag(
+                        "parameter/variable as an instance terminal",
+                        BEHAVIORAL_EVENT,
+                        f"`{expr.name}` is a scalar parameter or constant, not "
+                        "an electrical terminal",
+                        filename,
+                        module=module.name,
+                        node=expr,
+                    )
+                )
     for function in getattr(module, "functions", []):
         if _stmt_has_function_call(function.body, function.name):
             diagnostics.append(
@@ -715,6 +716,21 @@ def _lint_strict_spectre_module(
         )
 
     if module.analog_block is not None:
+        for nested_timer in _iter_nested_timer_statements(
+            module.analog_block.body
+        ):
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "nested timer event control",
+                    BEHAVIORAL_EVENT,
+                    "timer scheduling parity is not certified inside another "
+                    "event body; hoist the timer to analog-block scope and "
+                    "arm it with explicit state",
+                    filename,
+                    module=module.name,
+                    node=nested_timer.event,
+                )
+            )
         _lint_strict_spectre_statement(
             module.analog_block.body,
             diagnostics,
@@ -724,6 +740,22 @@ def _lint_strict_spectre_module(
             scalar_integer_names,
         )
     for always in getattr(module, "always_blocks", []):
+        for nested_timer in _iter_nested_timer_statements(
+            always.body,
+            inside_event=True,
+        ):
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "nested timer event control",
+                    BEHAVIORAL_EVENT,
+                    "timer scheduling parity is not certified inside another "
+                    "event body; hoist the timer to analog-block scope and "
+                    "arm it with explicit state",
+                    filename,
+                    module=module.name,
+                    node=nested_timer.event,
+                )
+            )
         _lint_strict_spectre_event(
             always.event,
             diagnostics,
@@ -1003,6 +1035,23 @@ def _lint_strict_spectre_branch(
     module: str,
     constant_index_names: Set[str],
 ) -> None:
+    bad_nodes = [
+        node
+        for node in (branch.node1, branch.node2)
+        if node is not None and node in constant_index_names
+    ]
+    for node_name in bad_nodes:
+        diagnostics.append(
+            _strict_spectre_diag(
+                "parameter/variable as an electrical branch node",
+                BEHAVIORAL_EVENT,
+                f"`{node_name}` is a scalar parameter or constant, not an "
+                "electrical node",
+                filename,
+                module=module,
+                node=branch,
+            )
+        )
     index_exprs = (
         branch.node1_index,
         branch.node2_index,
@@ -2076,6 +2125,66 @@ def _event_has_timer(event: va_ast.EventExpr | va_ast.CombinedEvent) -> bool:
     return event.event_type == va_ast.EventType.TIMER
 
 
+def _iter_nested_timer_statements(
+    stmt: Optional[va_ast.Statement],
+    *,
+    inside_event: bool = False,
+) -> Iterable[va_ast.EventStatement]:
+    if stmt is None:
+        return
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            yield from _iter_nested_timer_statements(
+                child,
+                inside_event=inside_event,
+            )
+        return
+    if isinstance(stmt, va_ast.EventStatement):
+        if inside_event and _event_has_timer(stmt.event):
+            yield stmt
+        yield from _iter_nested_timer_statements(
+            stmt.body,
+            inside_event=True,
+        )
+        return
+    if isinstance(stmt, va_ast.IfStatement):
+        yield from _iter_nested_timer_statements(
+            stmt.then_body,
+            inside_event=inside_event,
+        )
+        yield from _iter_nested_timer_statements(
+            stmt.else_body,
+            inside_event=inside_event,
+        )
+        return
+    if isinstance(stmt, va_ast.ForStatement):
+        yield from _iter_nested_timer_statements(
+            stmt.init,
+            inside_event=inside_event,
+        )
+        yield from _iter_nested_timer_statements(
+            stmt.update,
+            inside_event=inside_event,
+        )
+        yield from _iter_nested_timer_statements(
+            stmt.body,
+            inside_event=inside_event,
+        )
+        return
+    if isinstance(stmt, va_ast.WhileStatement):
+        yield from _iter_nested_timer_statements(
+            stmt.body,
+            inside_event=inside_event,
+        )
+        return
+    if isinstance(stmt, va_ast.CaseStatement):
+        for item in stmt.items:
+            yield from _iter_nested_timer_statements(
+                item.body,
+                inside_event=inside_event,
+            )
+
+
 def _conditional_analog_operator_diagnostics(
     expr: Optional[va_ast.Expr],
     filename: str,
@@ -2620,6 +2729,5 @@ def _is_supported_function(name: str, user_function_names: Set[str]) -> bool:
 
 _CONDITIONAL_ANALOG_OPERATOR_CODES = {
     "transition": ("EVAS-COMP-E2143", "VACOMP-2143"),
-    "slew": ("EVAS-COMP-E2151", "VACOMP-2151"),
     "idt": ("EVAS-COMP-E2154", "VACOMP-2154"),
 }

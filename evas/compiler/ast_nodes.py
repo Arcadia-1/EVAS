@@ -3,7 +3,7 @@ ast_nodes.py — AST node definitions for Verilog-A
 """
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
 class Direction(Enum):
@@ -243,6 +243,7 @@ class ParameterDecl:
     range_hi: Optional[Expr] = None
     range_lo_inclusive: bool = True
     range_hi_inclusive: bool = True
+    exclude_expr: Optional[Expr] = None
 
 @dataclass
 class VariableDecl:
@@ -324,6 +325,8 @@ class Module:
     ports: List[str]
     port_decls: List[PortDecl] = field(default_factory=list)
     parameters: List[ParameterDecl] = field(default_factory=list)
+    localparams: List[ParameterDecl] = field(default_factory=list)
+    constant_parameters: List[ParameterDecl] = field(default_factory=list)
     variables: List[VariableDecl] = field(default_factory=list)
     functions: List[FunctionDecl] = field(default_factory=list)
     tasks: List[TaskDecl] = field(default_factory=list)
@@ -336,3 +339,20 @@ class Module:
     default_transition: Optional[float] = None
     defines: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+
+
+def module_constant_parameters(module: Module) -> Tuple[ParameterDecl, ...]:
+    """Return all parameter-like constants in declaration order.
+
+    ``parameters`` remains the public, instance-overridable surface while
+    ``localparams`` remains non-overridable.  The ordered combined view is for
+    expression binding and lowering, where both declaration kinds are
+    constants.
+    """
+
+    ordered = tuple(getattr(module, "constant_parameters", ()) or ())
+    if ordered:
+        return ordered
+    return tuple(getattr(module, "parameters", ()) or ()) + tuple(
+        getattr(module, "localparams", ()) or ()
+    )

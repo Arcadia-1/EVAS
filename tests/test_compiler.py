@@ -143,6 +143,21 @@ y = `CLIP(a + b, 0, max(v, 1));
         assert "a + b" in out
         assert "max(v, 1)" in out
 
+    def test_unexpanded_macro_is_rejected(self):
+        with pytest.raises(PreprocessorError, match="unexpanded Verilog-A macro"):
+            preprocess("value = `UNKNOWN(1.0);")
+
+    def test_backticks_in_comments_and_strings_are_not_macros(self):
+        src = """\
+message = "`not_a_macro";
+// `not_a_macro
+/* `also_not_a_macro */
+"""
+
+        out, _defines, _default_transition = preprocess(src)
+
+        assert '"`not_a_macro"' in out
+
     def test_inactive_missing_include_is_ignored(self):
         src = """\
 `ifdef NEVER_DEFINED
@@ -158,6 +173,10 @@ value = 4;
     def test_active_missing_include_raises_clear_error(self):
         with pytest.raises(PreprocessorError, match="include file not found"):
             preprocess('`include "missing_file.vams"')
+
+    def test_angle_bracket_include_is_rejected_like_spectre(self):
+        with pytest.raises(PreprocessorError, match="quoted filename"):
+            preprocess('`include <disciplines.vams>')
 
     def test_unmatched_conditionals_raise_clear_error(self):
         with pytest.raises(PreprocessorError, match="missing `endif"):
@@ -559,6 +578,39 @@ class TestParserParameters:
         assert p.range_hi is not None
         assert p.range_lo_inclusive is True
         assert p.range_hi_inclusive is True
+
+    def test_parameter_exclude_static_expr(self):
+        m = _parse("module m(); parameter real X = 0.5 exclude 0.0; endmodule")
+        p = m.parameters[0]
+        assert isinstance(p.exclude_expr, NumberLiteral)
+        assert p.exclude_expr.value == pytest.approx(0.0)
+
+    def test_parameter_exclude_malformed_fails_closed(self):
+        with pytest.raises(ParseError):
+            _parse("module m(); parameter real X = 0.5 exclude; endmodule")
+
+    def test_localparam_real_and_integer_declarations(self):
+        m = _parse(
+            "module m(); localparam real SCALE = 2.0; "
+            "localparam integer COUNT = 3; endmodule"
+        )
+        assert [p.name for p in m.parameters] == []
+        assert [p.name for p in m.localparams] == ["SCALE", "COUNT"]
+        assert [p.param_type for p in m.localparams] == [
+            ParamType.REAL,
+            ParamType.INTEGER,
+        ]
+
+    def test_constant_parameter_declarations_preserve_source_order(self):
+        m = _parse(
+            "module m(); parameter real A = 2.0; "
+            "localparam real B = A / 2.0; "
+            "parameter real C = B + 1.0; endmodule"
+        )
+
+        assert [p.name for p in m.constant_parameters] == ["A", "B", "C"]
+        assert [p.name for p in m.parameters] == ["A", "C"]
+        assert [p.name for p in m.localparams] == ["B"]
 
     def test_multiple_parameters(self):
         m = _parse("module m(); parameter real A = 1.0; parameter real B = 2.0; endmodule")
@@ -1504,6 +1556,30 @@ class TestParserSystemTask:
 
 class TestParserPortDecls:
 
+    def test_unknown_module_item_is_rejected_instead_of_skipped(self):
+        src = "module m(out); outout out; endmodule"
+
+        with pytest.raises(ParseError, match="Unsupported module item"):
+            _parse(src)
+
+    def test_function_declared_after_analog_block_is_rejected_like_spectre(self):
+        src = """
+        module m(inp, out);
+        input inp;
+        output out;
+        electrical inp, out;
+        analog V(out) <+ clip01(V(inp));
+        function real clip01;
+            input value;
+            real value;
+            clip01 = value;
+        endfunction
+        endmodule
+        """
+
+        with pytest.raises(ParseError, match="before the analog block"):
+            _parse(src)
+
     def test_non_ansi_electrical_decl(self):
         src = """
         module buf(in, out);
@@ -1702,3 +1778,31 @@ class TestAnsiSharedDisciplineWarning:
         assert "VDD" in all_ports
         assert "VSS" in all_ports
         assert "OUT" in all_ports
+
+    def test_non_ansi_combined_direction_discipline_warns_and_is_fail_closed(self):
+        """Non-ANSI input/output + discipline must be rejected as Spectre-incompatible."""
+        src = """
+        module m(
+            data,
+            clk,
+            retimed_data,
+            up,
+            down
+        );
+            input electrical data;
+            input electrical clk;
+            input electrical retimed_data;
+            output voltage up;
+            output voltage down;
+            electrical data, clk, retimed_data;
+            voltage up, down;
+
+            analog begin
+                V(data) <+ 0.0;
+            end
+        endmodule
+        """
+        m = _parse(src)
+        assert any(
+            "EVAS-SPECTRE-NONANSI-COMBINED-PORT" in w for w in m.warnings
+        )

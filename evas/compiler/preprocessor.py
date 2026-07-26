@@ -30,7 +30,91 @@ def preprocess(source: str, source_dir: str = '.', defines: dict = None,
 
     result = _preprocess_recursive(source, defines, include_dirs,
                                    included_files, default_transition)
+    unexpanded = _find_unexpanded_macro(result[0])
+    if unexpanded is not None:
+        name, line, column = unexpanded
+        raise PreprocessorError(
+            "unexpanded Verilog-A macro "
+            f"`{name} remains after preprocessing at line {line}, column {column}"
+        )
     return result[0], defines, result[2]
+
+
+def _find_unexpanded_macro(source: str) -> Optional[tuple[str, int, int]]:
+    """Find a backtick identifier outside strings and comments."""
+    index = 0
+    line = 1
+    column = 1
+    in_line_comment = False
+    in_block_comment = False
+    in_string = False
+    escaped = False
+
+    while index < len(source):
+        ch = source[index]
+        next_ch = source[index + 1] if index + 1 < len(source) else ""
+
+        if ch == "\n":
+            line += 1
+            column = 1
+            in_line_comment = False
+            escaped = False
+            index += 1
+            continue
+
+        if in_line_comment:
+            index += 1
+            column += 1
+            continue
+
+        if in_block_comment:
+            if ch == "*" and next_ch == "/":
+                in_block_comment = False
+                index += 2
+                column += 2
+            else:
+                index += 1
+                column += 1
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            index += 1
+            column += 1
+            continue
+
+        if ch == "/" and next_ch == "/":
+            in_line_comment = True
+            index += 2
+            column += 2
+            continue
+        if ch == "/" and next_ch == "*":
+            in_block_comment = True
+            index += 2
+            column += 2
+            continue
+        if ch == '"':
+            in_string = True
+            index += 1
+            column += 1
+            continue
+        if ch == "`" and (next_ch.isalpha() or next_ch == "_"):
+            end = index + 2
+            while end < len(source) and (
+                source[end].isalnum() or source[end] == "_"
+            ):
+                end += 1
+            return source[index + 1:end], line, column
+
+        index += 1
+        column += 1
+
+    return None
 
 
 def _preprocess_recursive(source, defines, include_dirs, included_files,
@@ -129,6 +213,11 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
             if sub_result[2] is not None:
                 default_transition = sub_result[2]
             continue
+
+        if re.match(r'`include\b', stripped):
+            raise PreprocessorError(
+                "Spectre-compatible `include requires a quoted filename"
+            )
 
         # `define NAME(arg, ...) value
         m = re.match(r'`define\s+(\w+)\(([^)]*)\)\s+(.*)', stripped)

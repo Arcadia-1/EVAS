@@ -120,6 +120,14 @@ pub fn timer_absolute_step_for_arrays(
         }
 
         let first_seen = has_state_flags[idx] == 0;
+        if has_last_fired_flags[idx] != 0
+            && last_fired_times[idx].abs() <= tolerance
+            && (next_fire_times[idx] - last_fired_times[idx]).abs() <= tolerance
+            && (target - next_fire_times[idx]).abs() > tolerance
+        {
+            continue;
+        }
+
         if first_seen || (next_fire_times[idx] - target).abs() > tolerance {
             next_fire_times[idx] = target;
             has_state_flags[idx] = 1;
@@ -216,6 +224,11 @@ pub fn cross_detector_step_for_arrays(
                 went_beyond = false;
                 cross_time = interpolate_cross_time(previous_time, previous_value, time, value);
             }
+        } else if direction >= 0 && previous_value.abs() <= e_tol && value > e_tol {
+            triggered = true;
+            trigger_direction = 1;
+            went_beyond = true;
+            cross_time = previous_time;
         }
         if !triggered && direction <= 0 && previous_value > e_tol {
             if value < -e_tol {
@@ -229,6 +242,11 @@ pub fn cross_detector_step_for_arrays(
                 went_beyond = false;
                 cross_time = interpolate_cross_time(previous_time, previous_value, time, value);
             }
+        } else if !triggered && direction <= 0 && previous_value.abs() <= e_tol && value < -e_tol {
+            triggered = true;
+            trigger_direction = -1;
+            went_beyond = true;
+            cross_time = previous_time;
         }
 
         if triggered {

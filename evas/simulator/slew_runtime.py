@@ -12,6 +12,7 @@ from evas.simulator.expr_ir import (
     BranchAccessIR,
     FunctionCallIR,
     LiteralIR,
+    TernaryExprIR,
     UnaryExprIR,
     encode_body_expr_ops,
     static_node_ref_name,
@@ -22,6 +23,7 @@ from evas.simulator.stmt_ir import (
     ContributionIR,
     EventStatementIR,
     ForStatementIR,
+    IfStatementIR,
     StmtIR,
     unroll_static_for_statement,
 )
@@ -115,6 +117,36 @@ def _append_slew_contribution_specs(
             expr_segments,
         )
 
+    if isinstance(stmt_ir, IfStatementIR):
+        if stmt_ir.else_body is None:
+            return False
+        then_spec = _single_slew_contribution_spec(stmt_ir.then_body, node_slots)
+        else_spec = _single_slew_contribution_spec(stmt_ir.else_body, node_slots)
+        if then_spec is None or else_spec is None:
+            return False
+        then_output, then_reference, then_args = then_spec
+        else_output, else_reference, else_args = else_spec
+        if (
+            then_output != else_output
+            or then_reference != else_reference
+            or len(then_args) != len(else_args)
+        ):
+            return False
+        encoded_segments = []
+        for then_expr, else_expr in zip(then_args, else_args):
+            encoded = encode_body_expr_ops(
+                TernaryExprIR(stmt_ir.cond, then_expr, else_expr),
+                bindings,
+                node_slots,
+            )
+            if encoded is None:
+                return False
+            encoded_segments.append(encoded)
+        output_slots.append(then_output)
+        reference_slots.append(then_reference)
+        expr_segments.extend(encoded_segments)
+        return True
+
     if not isinstance(stmt_ir, ContributionIR):
         return False
 
@@ -137,6 +169,30 @@ def _append_slew_contribution_specs(
     reference_slots.append(reference_slot)
     expr_segments.extend(encoded_segments)
     return True
+
+
+def _single_slew_contribution_spec(
+    stmt_ir: StmtIR,
+    node_slots: dict[str, int],
+) -> Optional[
+    tuple[
+        int,
+        Optional[int],
+        Tuple[object, object, object, object, object],
+    ]
+]:
+    if isinstance(stmt_ir, BlockIR):
+        if len(stmt_ir.statements) != 1:
+            return None
+        return _single_slew_contribution_spec(stmt_ir.statements[0], node_slots)
+    if not isinstance(stmt_ir, ContributionIR):
+        return None
+    target = _encode_slew_contribution_target(stmt_ir.branch, node_slots)
+    slew_args = _slew_call_args(stmt_ir.expr)
+    if target is None or slew_args is None:
+        return None
+    output_slot, reference_slot = target
+    return output_slot, reference_slot, slew_args
 
 
 def _encode_slew_contribution_target(
