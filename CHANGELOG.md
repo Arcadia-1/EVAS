@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.6] — 2026-07-27
+
+### Added — Audited Spectre Acceptance
+- Accept the audited Spectre 21.1 Verilog-A frontend and netlist forms while
+  retaining explicit rejection tests for unsupported neighboring syntax.
+- Add deterministic compile-audit replay and CLI reporting for evaluator
+  acceptance evidence.
+- Add voltage/current-source topology and floating-island coverage.
+
+### Changed — Fail-Closed Netlist Elaboration
+- Reject malformed, unsupported, or unresolved evaluator inputs at parser,
+  compile, and runner boundaries instead of silently repairing or skipping
+  them.
+- Preserve Spectre-compatible source topology and require include paths to
+  resolve exactly.
+
+### Fixed — Event Runtime Parity
+- Align timer, cross, transition, numeric, state-binding, and `idtmod`
+  behavior across Python lowering and the production Rust fastpath.
+- Preserve one event body per physical crossing, accepted event ordering,
+  integrator origins, and delayed-transition output refresh.
+- Preserve exact-touch detector behavior when no known future driver exists
+  while rejecting terminal touches whose source trajectory never crosses.
+
+### CI — Native Core Coverage
+- Run the Rust release unit suite in CI in addition to the Python platform
+  matrix and installed-wheel identity check.
+- Bump the Rust core to 0.2.3; the C ABI remains 20260718.
+
 ## [0.8.5] — 2026-07-25
 
 ### Fixed — Dynamic Zero-Period Timers
