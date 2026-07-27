@@ -279,7 +279,7 @@ class CrossDetector:
 
         if triggered:
             self.t_cross = cross_time
-            t_tol = max(0.0, float(time_tol or 0.0))
+            t_tol = max(1e-15, float(time_tol or 0.0))
             if self.last_cross_time >= 0.0 and abs(self.t_cross - self.last_cross_time) <= t_tol:
                 triggered = False
             else:

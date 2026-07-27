@@ -124,6 +124,7 @@ endmodule
         skip_source_error_control=True,
     )
 
-    for time, metric in zip(result.time, result.signals["metric"], strict=True):
+    assert len(result.time) == len(result.signals["metric"])
+    for time, metric in zip(result.time, result.signals["metric"]):
         expected_phase = (7.0e6 * float(time)) % 1.0
         assert float(metric) == pytest.approx(0.9 * expected_phase, abs=1.0e-9)

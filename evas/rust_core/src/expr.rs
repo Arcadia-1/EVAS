@@ -787,9 +787,12 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                         state_values[last_t_id] = time;
                         state_values[last_x_id] = x;
                     } else if dt < 0.0 {
-                        state_values[stmt.target_id] = ic;
-                        state_values[last_t_id] = time;
-                        state_values[last_x_id] = x;
+                        // Cross-event replay can inspect an interpolated time
+                        // after the continuous state was already accepted at
+                        // the enclosing step endpoint.  Do not rewind the
+                        // integrator origin without also rewinding its value;
+                        // the next forward evaluation would otherwise count
+                        // the replay interval twice.
                     }
                     state_values[last_eval_t_id] = time;
                 }
@@ -1098,8 +1101,10 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                         state_values[last_t_id] = time;
                         state_values[last_x_id] = x;
                     } else if dt < 0.0 {
-                        state_values[last_t_id] = time;
-                        state_values[last_x_id] = x;
+                        // Preserve the accepted integration origin during
+                        // interpolated cross-event replay.  Re-basing only the
+                        // hidden timestamp would double-count this interval on
+                        // the next forward evaluation.
                     }
                     state_values[last_eval_t_id] = time;
                 }

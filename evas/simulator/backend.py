@@ -150,6 +150,11 @@ class CompiledModel:
         self._transition_pending_input: Optional[Dict[str, List]] = None
         self.slew_states: Dict[str, Dict[str, float]] = {}
         self.cross_detectors: Dict[str, CrossDetector] = {}
+        # Accepted event times deliberately live outside speculative analysis
+        # snapshots.  Adaptive refinement may restore detector state after an
+        # event body ran; this monotonic guard prevents that same physical
+        # crossing from executing the body a second time.
+        self._accepted_cross_times: Dict[str, float] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.digital_edge_states: Dict[str, int] = {}
         self.output_nodes: Dict[str, Any] = {}
@@ -4912,26 +4917,40 @@ class CompiledModel:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         detector = self.cross_detectors[key]
+        effective_time_tol = max(1e-15, float(time_tol or 0.0))
         before = self._cross_detector_shadow_state(detector)
         # Audit 089: production gate — let Rust own the detector state
         # evolution math. If unavailable or fails, fall back to Python.
         fired = self._check_cross_rust_production(
-            detector, before, time, val, time_tol, expr_tol,
+            detector, before, time, val, effective_time_tol, expr_tol,
         )
         if fired is None:
-            fired = detector.check(time, val, time_tol=time_tol, expr_tol=expr_tol)
+            fired = detector.check(
+                time,
+                val,
+                time_tol=effective_time_tol,
+                expr_tol=expr_tol,
+            )
         self._rust_shadow_check_cross(
             before,
             detector,
             fired,
             time,
             val,
-            time_tol,
+            effective_time_tol,
             expr_tol,
         )
         if fired:
             cross_time = float(detector.t_cross)
-            if cross_time + max(1e-18, float(time_tol or 0.0)) < self._step_latest_cross_event_time:
+            last_accepted = self._accepted_cross_times.get(key)
+            if (
+                last_accepted is not None
+                and abs(cross_time - last_accepted) <= effective_time_tol
+            ):
+                detector.last_triggered = False
+                return False
+            self._accepted_cross_times[key] = cross_time
+            if cross_time + effective_time_tol < self._step_latest_cross_event_time:
                 # Multiple cross() statements can trigger inside one simulator
                 # step. Spectre applies their event bodies in chronological
                 # crossing order, not source order. EVAS does not yet replay a
@@ -5014,7 +5033,7 @@ class CompiledModel:
                 }
             if (
                 prev_cross_directions
-                and abs(float(prev_event_time) - float(self._event_time)) <= max(1e-18, float(time_tol or 0.0))
+                and abs(float(prev_event_time) - float(self._event_time)) <= effective_time_tol
             ):
                 for node, cross_dir in cross_directions.items():
                     if cross_dir or node not in prev_cross_directions:
@@ -5036,7 +5055,12 @@ class CompiledModel:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         cd = self.cross_detectors[key]
-        cd.check(time, val, time_tol=time_tol, expr_tol=expr_tol)
+        cd.check(
+            time,
+            val,
+            time_tol=max(1e-15, float(time_tol or 0.0)),
+            expr_tol=expr_tol,
+        )
         return cd.t_cross
 
     def _check_above(
