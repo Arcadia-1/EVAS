@@ -1151,6 +1151,202 @@ fn rust_sim_expr_segment_has_known_post_driver(
     Ok(false)
 }
 
+fn rust_sim_expr_segment_positive_state_guard_reads(
+    body_expr_ops: &[EvasRustBodyExprOp],
+    start: usize,
+    count: usize,
+) -> Result<Option<Vec<usize>>, i32> {
+    let end = start.checked_add(count).ok_or(-967)?;
+    if end > body_expr_ops.len() {
+        return Err(-968);
+    }
+    let mut stack: Vec<Vec<usize>> = Vec::new();
+    for op in &body_expr_ops[start..end] {
+        match op.op_kind {
+            BODY_EXPR_READ_STATE => stack.push(vec![op.index]),
+            BODY_EXPR_LAND => {
+                let mut right = stack.pop().ok_or(-979)?;
+                let mut left = stack.pop().ok_or(-980)?;
+                for state_id in right.drain(..) {
+                    if !left.contains(&state_id) {
+                        left.push(state_id);
+                    }
+                }
+                stack.push(left);
+            }
+            _ => return Ok(None),
+        }
+    }
+    if stack.len() != 1 || stack[0].is_empty() {
+        return Ok(None);
+    }
+    Ok(stack.pop())
+}
+
+fn rust_sim_expr_segment_is_const_zero(
+    body_expr_ops: &[EvasRustBodyExprOp],
+    start: usize,
+    count: usize,
+) -> Result<bool, i32> {
+    let end = start.checked_add(count).ok_or(-975)?;
+    if end > body_expr_ops.len() {
+        return Err(-976);
+    }
+    Ok(count == 1
+        && body_expr_ops[start].op_kind == BODY_EXPR_CONST
+        && body_expr_ops[start].value == 0.0)
+}
+
+fn rust_sim_if_true_branch_assigns_zero_to_state(
+    stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    if_pc: usize,
+    state_ids: &[usize],
+) -> Result<bool, i32> {
+    let mut write_counts = vec![0_usize; state_ids.len()];
+    let mut has_top_level_const_zero = vec![false; state_ids.len()];
+    let true_branch_has_final_zero = |write_counts: &[usize], has_top_level_const_zero: &[bool]| {
+        write_counts
+            .iter()
+            .zip(has_top_level_const_zero.iter())
+            .any(|(writes, is_const_zero)| *writes == 1 && *is_const_zero)
+    };
+    let mut depth = 0_usize;
+    let mut pc = if_pc.checked_add(1).ok_or(-969)?;
+    while pc < stmt_ops.len() {
+        let stmt = stmt_ops[pc];
+        match stmt.target_kind {
+            BODY_STMT_IF => {
+                depth = depth.checked_add(1).ok_or(-970)?;
+            }
+            BODY_STMT_ELSE if depth == 0 => {
+                return Ok(true_branch_has_final_zero(
+                    &write_counts,
+                    &has_top_level_const_zero,
+                ));
+            }
+            BODY_STMT_ENDIF if depth == 0 => {
+                return Ok(true_branch_has_final_zero(
+                    &write_counts,
+                    &has_top_level_const_zero,
+                ));
+            }
+            BODY_STMT_ENDIF => {
+                depth = depth.checked_sub(1).ok_or(-971)?;
+            }
+            TARGET_STATE => {
+                if let Some(idx) = state_ids
+                    .iter()
+                    .position(|state_id| *state_id == stmt.target_id)
+                {
+                    write_counts[idx] = write_counts[idx].checked_add(1).ok_or(-981)?;
+                    if depth == 0
+                        && rust_sim_expr_segment_is_const_zero(
+                            body_expr_ops,
+                            stmt.expr_start,
+                            stmt.expr_count,
+                        )?
+                    {
+                        has_top_level_const_zero[idx] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        pc += 1;
+    }
+    Ok(true_branch_has_final_zero(
+        &write_counts,
+        &has_top_level_const_zero,
+    ))
+}
+
+fn rust_sim_if_wraps_entire_body(
+    stmt_ops: &[EvasRustBodyStmtOp],
+    if_pc: usize,
+) -> Result<bool, i32> {
+    if if_pc >= stmt_ops.len() {
+        return Err(-982);
+    }
+    let mut depth = 0_usize;
+    let mut pc = if_pc.checked_add(1).ok_or(-983)?;
+    while pc < stmt_ops.len() {
+        match stmt_ops[pc].target_kind {
+            BODY_STMT_IF => {
+                depth = depth.checked_add(1).ok_or(-984)?;
+            }
+            BODY_STMT_ENDIF if depth == 0 => {
+                return Ok(pc + 1 == stmt_ops.len());
+            }
+            BODY_STMT_ENDIF => {
+                depth = depth.checked_sub(1).ok_or(-985)?;
+            }
+            _ => {}
+        }
+        pc += 1;
+    }
+    Err(-986)
+}
+
+fn rust_sim_timer_body_self_disarms_guard(
+    event: &EvasRustSimEventSpec,
+    body_stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+) -> Result<bool, i32> {
+    let end = event
+        .body_stmt_start
+        .checked_add(event.body_stmt_count)
+        .ok_or(-973)?;
+    if end > body_stmt_ops.len() {
+        return Err(-974);
+    }
+    let stmt_ops = &body_stmt_ops[event.body_stmt_start..end];
+    let Some(stmt) = stmt_ops.first() else {
+        return Ok(false);
+    };
+    if stmt.target_kind != BODY_STMT_IF {
+        return Ok(false);
+    }
+    let mut depth = 0_usize;
+    let mut wrapper_endif = None;
+    for (pc, stmt) in stmt_ops.iter().enumerate() {
+        match stmt.target_kind {
+            BODY_STMT_IF => {
+                depth = depth.checked_add(1).ok_or(-982)?;
+            }
+            BODY_STMT_ELSE if depth == 1 => {
+                // Keep the ownership proof deliberately narrow: a reusable
+                // one-shot timer must be wrapped by one positive true branch.
+                return Ok(false);
+            }
+            BODY_STMT_ENDIF => {
+                depth = depth.checked_sub(1).ok_or(-983)?;
+                if depth == 0 {
+                    wrapper_endif = Some(pc);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if wrapper_endif != Some(stmt_ops.len() - 1) {
+        // A self-disarming sibling `if` does not guard the whole timer body.
+        return Ok(false);
+    }
+    let Some(state_ids) = rust_sim_expr_segment_positive_state_guard_reads(
+        body_expr_ops,
+        stmt.expr_start,
+        stmt.expr_count,
+    )?
+    else {
+        return Ok(false);
+    };
+    if !rust_sim_if_wraps_entire_body(stmt_ops, 0)? {
+        return Ok(false);
+    }
+    rust_sim_if_true_branch_assigns_zero_to_state(stmt_ops, body_expr_ops, 0, &state_ids)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_collect_cross_events_into(
     sources: &[EvasRustSimSourceSpec],
@@ -1261,15 +1457,7 @@ pub(crate) fn rust_sim_collect_cross_events_into(
             expr_tol,
         )?;
         if !initial_condition_mode && triggered[0] != 0 && cross_times[0].is_finite() {
-            if went_beyond[0] == 0
-                && rust_sim_expr_segment_has_known_post_driver(
-                    sources,
-                    transitions,
-                    body_expr_ops,
-                    event.expr_start,
-                    event.expr_count,
-                )?
-            {
+            if went_beyond[0] == 0 {
                 let post_time = time + 1.0e-18_f64.max(time.abs() * f64::EPSILON * 8.0);
                 let mut post_nodes = node_values.to_vec();
                 rust_sim_write_sources(sources, source_data, &mut post_nodes, post_time)?;
@@ -1316,7 +1504,7 @@ pub(crate) fn rust_sim_collect_cross_events_into(
                     post_time,
                     0.0,
                 )?;
-                if (trigger_dirs[0] as f64) * post_expr <= 1.0e-18 {
+                if (trigger_dirs[0] as f64) * post_expr < -1.0e-18 {
                     continue;
                 }
             }
@@ -1416,6 +1604,9 @@ fn rust_sim_execute_cross_event_body(
                 crosses_through = (related.trigger_direction as f64) * post_expr > eps;
             }
             if !crosses_through {
+                continue;
+            }
+            if (related.trigger_direction as f64) * baseline_expr > eps {
                 continue;
             }
             for op in &body_expr_ops[related_event.expr_start..expr_end] {
@@ -1791,6 +1982,37 @@ pub(crate) fn rust_sim_execute_events(
                         time,
                         0.0,
                     )?;
+                    let has_pending_timer = timer_has_state_flags[event_idx] != 0;
+                    let start_is_future = start.is_finite() && start > time + 1.0e-18;
+                    let pending_is_future = timer_next_fire_times[event_idx] > time + 1.0e-18;
+                    let first_deadline_start_changed = has_pending_timer
+                        && timer_has_last_flags[event_idx] == 0
+                        && pending_is_future
+                        && start_is_future
+                        && (start - timer_next_fire_times[event_idx]).abs() > 1.0e-18;
+                    let self_disarmed_start_moves_earlier = has_pending_timer
+                        && timer_has_last_flags[event_idx] != 0
+                        && start_is_future
+                        && start < timer_next_fire_times[event_idx] - 1.0e-18;
+                    if first_deadline_start_changed
+                        || (self_disarmed_start_moves_earlier
+                            && rust_sim_timer_body_self_disarms_guard(
+                                &event,
+                                body_stmt_ops,
+                                body_expr_ops,
+                            )?)
+                    {
+                        // A periodic timer's start expression is live until
+                        // the first future deadline is accepted.  After that
+                        // point, preserve the periodic grid unless the timer
+                        // body is explicitly guarded by state that the accepted
+                        // body consumes.  That ownership pattern models
+                        // reusable one-shot deadlines such as
+                        // `if (armed) ... armed=0`; unguarded periodic timers
+                        // still keep their existing next-fire grid when the
+                        // start expression changes.
+                        timer_next_fire_times[event_idx] = start;
+                    }
                     let periods = [period];
                     let starts = [start];
                     let has_start = [1_u8];
@@ -1810,6 +2032,33 @@ pub(crate) fn rust_sim_execute_events(
                     )?;
                     fired = due[0] != 0;
                 } else {
+                    // A zero-valued absolute timer is consumed at
+                    // initialization.  A later sibling event may legitimately
+                    // move its target into the future, while a combined
+                    // `@(cross(...) or timer(...))` body must not rearm the
+                    // timer merely because that same body changed the target.
+                    // Lowering represents combined triggers with the same body
+                    // range, which gives this runtime enough ownership
+                    // information to distinguish the two cases without
+                    // weakening the primitive timer guard globally.
+                    let shares_body_with_sibling_trigger =
+                        events.iter().enumerate().any(|(other_idx, other)| {
+                            other_idx != event_idx
+                                && other.body_stmt_start == event.body_stmt_start
+                                && other.body_stmt_count == event.body_stmt_count
+                        });
+                    if !shares_body_with_sibling_trigger
+                        && timer_has_last_flags[event_idx] != 0
+                        && timer_last_fired_times[event_idx].abs() <= 1.0e-18
+                        && (timer_next_fire_times[event_idx] - timer_last_fired_times[event_idx])
+                            .abs()
+                            <= 1.0e-18
+                        && start > time + 1.0e-18
+                    {
+                        timer_next_fire_times[event_idx] = start;
+                        timer_has_state_flags[event_idx] = 1;
+                        timer_has_last_flags[event_idx] = 0;
+                    }
                     let targets = [start];
                     let mut due = [0_u8];
                     let mut expired = [0_u8];
@@ -1834,6 +2083,10 @@ pub(crate) fn rust_sim_execute_events(
         }
 
         if fired {
+            if event.kind == RUST_SIM_EVENT_TIMER && event.timer_period_expr_count > 0 {
+                timer_last_fired_times[event_idx] = time;
+                timer_has_last_flags[event_idx] = 1;
+            }
             rust_sim_execute_event_body(
                 &event,
                 body_stmt_ops,
@@ -2781,111 +3034,6 @@ fn rust_sim_refresh_sources_static_transitions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rust_sim_refresh_sources_continuous_outputs(
-    sources: &[EvasRustSimSourceSpec],
-    source_data: &[f64],
-    linear_ops: &[EvasRustLinearOp],
-    linear_terms: &[EvasRustLinearTerm],
-    linear_conditions: &[EvasRustLinearCondition],
-    transitions: &[EvasRustSimTransitionSpec],
-    slews: &[EvasRustSimSlewSpec],
-    branch_ddt_ops: &[EvasRustBranchDdtOp],
-    body_stmt_ops: &[EvasRustBodyStmtOp],
-    body_expr_ops: &[EvasRustBodyExprOp],
-    events: &[EvasRustSimEventSpec],
-    node_values: &mut [f64],
-    state_values: &mut [f64],
-    param_values: &[f64],
-    branch_ddt_states: &mut [RustSimBranchIdtState],
-    transition_current_values: &mut [f64],
-    transition_target_values: &mut [f64],
-    transition_start_times: &mut [f64],
-    transition_start_values: &mut [f64],
-    transition_delays: &mut [f64],
-    transition_rise_times: &mut [f64],
-    transition_fall_times: &mut [f64],
-    transition_active_flags: &mut [u8],
-    transition_initialized_flags: &mut [u8],
-    transition_output_values: &mut [f64],
-    slew_current_values: &mut [f64],
-    slew_last_times: &mut [f64],
-    slew_initialized_flags: &mut [u8],
-    slew_output_values: &mut [f64],
-    bound_step_limit: &mut f64,
-    side_effect_log: &mut RustSideEffectLog<'_>,
-    mut file_io: Option<&mut RustFileIoRuntime<'_>>,
-    time: f64,
-    default_transition: f64,
-    has_pre_always_events: bool,
-) -> Result<usize, i32> {
-    rust_sim_write_sources(sources, source_data, node_values, time)?;
-    let mut event_fires = 0_usize;
-    if has_pre_always_events {
-        event_fires += rust_sim_execute_always_events(
-            events,
-            body_stmt_ops,
-            body_expr_ops,
-            node_values,
-            state_values,
-            param_values,
-            bound_step_limit,
-            side_effect_log,
-            file_io.as_deref_mut(),
-            time,
-            RUST_SIM_EVENT_PHASE_PRE,
-        )?;
-    }
-    evaluate_static_linear_ops(
-        linear_ops,
-        linear_terms,
-        linear_conditions,
-        node_values,
-        state_values,
-    )?;
-    rust_sim_step_branch_ddt_ops(
-        branch_ddt_ops,
-        node_values,
-        state_values,
-        branch_ddt_states,
-        time,
-    )?;
-    rust_sim_apply_transitions(
-        transitions,
-        body_expr_ops,
-        node_values,
-        state_values,
-        param_values,
-        transition_current_values,
-        transition_target_values,
-        transition_start_times,
-        transition_start_values,
-        transition_delays,
-        transition_rise_times,
-        transition_fall_times,
-        transition_active_flags,
-        transition_initialized_flags,
-        transition_output_values,
-        time,
-        default_transition,
-        false,
-    )?;
-    rust_sim_apply_slews(
-        slews,
-        body_expr_ops,
-        node_values,
-        state_values,
-        param_values,
-        slew_current_values,
-        slew_last_times,
-        slew_initialized_flags,
-        slew_output_values,
-        time,
-        false,
-    )?;
-    Ok(event_fires)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn rust_sim_refresh_sources_continuous_outputs_fixed_point(
     sources: &[EvasRustSimSourceSpec],
     source_data: &[f64],
@@ -2919,11 +3067,12 @@ fn rust_sim_refresh_sources_continuous_outputs_fixed_point(
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
     mut file_io: Option<&mut RustFileIoRuntime<'_>>,
+    source_time: f64,
     time: f64,
     default_transition: f64,
     has_pre_always_events: bool,
 ) -> Result<usize, i32> {
-    rust_sim_write_sources(sources, source_data, node_values, time)?;
+    rust_sim_write_sources(sources, source_data, node_values, source_time)?;
     let mut event_fires = 0_usize;
     let mut previous_nodes = vec![0.0_f64; node_values.len()];
     let mut previous_transition_targets = vec![0.0_f64; transition_target_values.len()];
@@ -2933,7 +3082,7 @@ fn rust_sim_refresh_sources_continuous_outputs_fixed_point(
         previous_transition_targets.copy_from_slice(transition_target_values);
         previous_transition_outputs.copy_from_slice(transition_output_values);
 
-        rust_sim_write_sources(sources, source_data, node_values, time)?;
+        rust_sim_write_sources(sources, source_data, node_values, source_time)?;
         if has_pre_always_events {
             event_fires += rust_sim_execute_always_events(
                 events,
@@ -3161,6 +3310,7 @@ fn rust_sim_record_transition_breakpoints_until(
             side_effect_log,
             file_io.as_deref_mut(),
             bp,
+            bp,
             default_transition,
             has_pre_always_events,
         )?;
@@ -3353,6 +3503,7 @@ fn rust_sim_record_transition_breakpoints_until(
                 bound_step_limit,
                 side_effect_log,
                 file_io.as_deref_mut(),
+                bp,
                 bp,
                 default_transition,
                 has_pre_always_events,
@@ -3612,6 +3763,11 @@ fn rust_sim_execute_ordered_cross_events(
             file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
         )?;
+        let refresh_time = if events[candidate.event_idx].kind == RUST_SIM_EVENT_CROSS {
+            event_time + eps.max(event_time.abs() * f64::EPSILON * 8.0)
+        } else {
+            event_time
+        };
         fired += rust_sim_refresh_sources_continuous_outputs_fixed_point(
             sources,
             source_data,
@@ -3645,7 +3801,8 @@ fn rust_sim_execute_ordered_cross_events(
             bound_step_limit,
             side_effect_log,
             file_io.as_deref_mut(),
-            event_time,
+            body_time,
+            refresh_time,
             default_transition,
             has_pre_always_events,
         )?;
@@ -4399,7 +4556,7 @@ pub fn rust_sim_event_transition_record_trace(
                 } else {
                     time
                 };
-                event_fires += rust_sim_refresh_sources_continuous_outputs(
+                event_fires += rust_sim_refresh_sources_continuous_outputs_fixed_point(
                     sources,
                     source_data,
                     linear_ops,
@@ -4432,6 +4589,7 @@ pub fn rust_sim_event_transition_record_trace(
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     Some(&mut file_io_runtime),
+                    source_time,
                     source_time,
                     default_transition,
                     has_pre_always_events,
@@ -4628,7 +4786,7 @@ pub fn rust_sim_event_transition_record_trace(
                 event_fires += post_cross_fires;
                 transition_breakpoints += post_cross_transition_bps;
                 force_record = true;
-                event_fires += rust_sim_refresh_sources_continuous_outputs(
+                event_fires += rust_sim_refresh_sources_continuous_outputs_fixed_point(
                     sources,
                     source_data,
                     linear_ops,
@@ -4661,6 +4819,7 @@ pub fn rust_sim_event_transition_record_trace(
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     Some(&mut file_io_runtime),
+                    time,
                     time,
                     default_transition,
                     has_pre_always_events,

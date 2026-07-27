@@ -2487,6 +2487,22 @@ class CompiledModel:
             del history[:keep_from]
         return float(delayed)
 
+    def _absdelay(
+        self,
+        key: str,
+        time: float,
+        value: Any,
+        delay: float,
+        maxdelay: Optional[float] = None,
+    ) -> float:
+        """Sampled scalar transport delay for voltage-domain absdelay()."""
+        d = float(delay)
+        if d < 0.0:
+            raise ValueError("absdelay() delay must be nonnegative")
+        if maxdelay is not None and float(maxdelay) < d:
+            raise ValueError("absdelay() maxdelay must be >= delay")
+        return self._specify_path_delay(f"absdelay:{key}", value, time, d)
+
     def _has_transition_target_probes_tree(self) -> bool:
         own = int(getattr(self.__class__, "_transition_target_probe_count", 0)) > 0
         return own or any(
@@ -6181,6 +6197,7 @@ class _ModuleCompiler:
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
+        self._absdelay_counter = 0
         self._system_task_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
@@ -6462,8 +6479,15 @@ class _ModuleCompiler:
                         lines.append(f"        self.arrays[{name!r}][{flat}] = 0")
                 continue
             if init_vals:
-                for i, iv in enumerate(init_vals):
-                    idx = hi_idx - i
+                # Verilog-A aggregate initializers follow declaration order:
+                # the first item initializes the left bound, then proceeds
+                # toward the right bound.  Do not normalize the direction
+                # before assigning values (for example, [0:15] starts at 0,
+                # while [15:0] starts at 15).
+                step = 1 if lo >= hi else -1
+                declared_count = abs(lo - hi) + 1
+                for i, iv in enumerate(init_vals[:declared_count]):
+                    idx = hi + i * step
                     val = self._eval_expr_static(iv, static_env)
                     if self._is_integer_variable(name):
                         val = CompiledModel._to_integer(val)
@@ -6619,6 +6643,7 @@ class _ModuleCompiler:
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
+        self._absdelay_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
         self._event_key_cache = {}
@@ -12197,38 +12222,40 @@ class _ModuleCompiler:
                 return True
             return self._statement_has_dynamic_breakpoints(stmt.body)
 
+        dynamic_funcs = {"transition", "last_crossing", "absdelay"}
+
         if isinstance(stmt, IfStatement):
             return (
-                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                self._expr_has_function_call(stmt.cond, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.then_body)
                 or self._statement_has_dynamic_breakpoints(stmt.else_body)
             )
 
         if isinstance(stmt, WhileStatement):
             return (
-                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                self._expr_has_function_call(stmt.cond, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.body)
             )
 
         if isinstance(stmt, ForStatement):
             return (
-                self._assignment_has_function_call(stmt.init, {"transition", "last_crossing"})
-                or self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
-                or self._assignment_has_function_call(stmt.update, {"transition", "last_crossing"})
+                self._assignment_has_function_call(stmt.init, dynamic_funcs)
+                or self._expr_has_function_call(stmt.cond, dynamic_funcs)
+                or self._assignment_has_function_call(stmt.update, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.body)
             )
 
         if isinstance(stmt, CaseStatement):
-            if self._expr_has_function_call(stmt.expr, {"transition", "last_crossing"}):
+            if self._expr_has_function_call(stmt.expr, dynamic_funcs):
                 return True
             for item in stmt.items:
-                if any(self._expr_has_function_call(v, {"transition", "last_crossing"}) for v in item.values):
+                if any(self._expr_has_function_call(v, dynamic_funcs) for v in item.values):
                     return True
                 if self._statement_has_dynamic_breakpoints(item.body):
                     return True
             return False
 
-        if self._statement_has_function_call(stmt, {"transition", "last_crossing", "zi_nd"}):
+        if self._statement_has_function_call(stmt, dynamic_funcs | {"zi_nd"}):
             return True
 
         return False
@@ -14230,6 +14257,9 @@ class _ModuleCompiler:
         elif kind == "last_crossing":
             key = f"last_cross_{self._last_cross_counter}"
             self._last_cross_counter += 1
+        elif kind == "absdelay":
+            key = f"absdelay_{self._absdelay_counter}"
+            self._absdelay_counter += 1
         elif kind == "ddt":
             key = f"ddt_{self._ddt_counter}"
             self._ddt_counter += 1
@@ -16441,6 +16471,15 @@ class _ModuleCompiler:
         if name == 'transition':
             key_expr, target, delay, rise, fall = self._compile_transition_call_parts(expr)
             return f"self._transition({key_expr}, time, {target}, {delay}, {rise}, {fall})"
+
+        if name == 'absdelay':
+            base_key = self._alloc_stateful_func_key("absdelay", expr)
+            value = args[0] if len(args) > 0 else "0.0"
+            delay = args[1] if len(args) > 1 else "0.0"
+            maxdelay = args[2] if len(args) > 2 else "None"
+            if self._in_loop_var:
+                return f"self._absdelay(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {value}, {delay}, {maxdelay})"
+            return f"self._absdelay({base_key!r}, time, {value}, {delay}, {maxdelay})"
 
         if name == 'slew':
             base_key = self._alloc_stateful_func_key("slew", expr)

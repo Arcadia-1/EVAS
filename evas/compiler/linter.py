@@ -10,9 +10,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
-from evas.netlist.spectre_parser import parse_spectre
+from evas.netlist.spectre_parser import (
+    parse_spectre,
+    strict_spectre_netlist_diagnostics,
+)
 from evas.support_tiers import (
     AMS_DIGITAL,
+    BEHAVIORAL_CONTINUOUS_TIME,
     BEHAVIORAL_EVENT,
     CONSERVATIVE_CURRENT_KCL,
     format_support_tier_hint,
@@ -215,10 +219,25 @@ def lint_spectre_netlist(
     strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     scs_path = Path(path).resolve()
+    diagnostics: List[Diagnostic] = []
+    if strict_spectre:
+        prefix = "EVAS-NETLIST-ESPECTRESTRICT: "
+        diagnostics.extend(
+            _diag(
+                code="EVAS-COMP-ESPECTRESTRICT",
+                message=(
+                    message[len(prefix):]
+                    if message.startswith(prefix)
+                    else message
+                ),
+                file=str(scs_path),
+            )
+            for message in strict_spectre_netlist_diagnostics(str(scs_path))
+        )
     try:
         netlist = parse_spectre(str(scs_path))
     except Exception as exc:
-        return [
+        return diagnostics + [
             _diag(
                 code="EVAS-COMP-ENETLIST",
                 message=f"failed to parse Spectre netlist: {exc}",
@@ -226,7 +245,6 @@ def lint_spectre_netlist(
             )
         ]
 
-    diagnostics: List[Diagnostic] = []
     scs_dir = Path(netlist.source_dir)
     for inc in netlist.ahdl_includes:
         va_path = _resolve_ahdl_include(inc.path, scs_dir)
@@ -286,9 +304,15 @@ def lint_source(
     diagnostics: List[Diagnostic] = []
     strict_token_diagnostics: List[Diagnostic] = []
     try:
+        if strict_spectre:
+            strict_token_diagnostics.extend(
+                _lint_strict_source_declarations(source, filename)
+            )
         pp_src, _defines, _default_transition = preprocess(source, source_dir=source_dir)
         if strict_spectre:
-            strict_token_diagnostics = _lint_strict_spectre_tokens(pp_src, filename)
+            strict_token_diagnostics.extend(
+                _lint_strict_spectre_tokens(pp_src, filename)
+            )
         range_diagnostics = _lint_nonconstant_discipline_ranges(pp_src, filename)
         modules = parse_all(pp_src)
     except PreprocessorError as exc:
@@ -606,9 +630,42 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
         tokens = tokenize(source)
     except Exception:
         return diagnostics
-    for token in tokens:
+    in_function = False
+    function_header_terminated = False
+    for index, token in enumerate(tokens):
         if token.type == TokenType.EOF:
             break
+        if token.type == TokenType.FUNCTION:
+            in_function = True
+            function_header_terminated = False
+        elif token.type == TokenType.ENDFUNCTION:
+            in_function = False
+            function_header_terminated = False
+        elif in_function and token.type == TokenType.SEMI:
+            function_header_terminated = True
+
+        if (
+            in_function
+            and function_header_terminated
+            and token.type in {TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT}
+            and index + 1 < len(tokens)
+            and tokens[index + 1].type in {TokenType.REAL, TokenType.INTEGER}
+        ):
+            name = "argument"
+            if index + 2 < len(tokens):
+                name = tokens[index + 2].value
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "typed old-style analog function argument",
+                    BEHAVIORAL_EVENT,
+                    f"declare `input {name}; real {name};` (or the matching "
+                    "integer type) as separate declarations",
+                    filename,
+                    line=token.line,
+                    column=token.col,
+                )
+            )
+
         spec = _STRICT_TOKEN_REJECTIONS.get(token.type)
         if spec is None and token.type == TokenType.IDENT:
             spec = _STRICT_IDENT_REJECTIONS.get(token.value.lower())
@@ -628,11 +685,99 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
     return diagnostics
 
 
+def _lint_strict_source_declarations(
+    source: str,
+    filename: str,
+) -> List[Diagnostic]:
+    """Reject source-local custom nature/discipline definitions.
+
+    Preprocessing expands ``disciplines.vams`` into the token stream, so this
+    check deliberately runs on the unexpanded source.  Built-in discipline
+    includes remain accepted while candidate-local redefinitions do not get
+    silently skipped by EVAS's module-oriented parser.
+    """
+    diagnostics: List[Diagnostic] = []
+    try:
+        tokens = tokenize(source)
+    except Exception:
+        return diagnostics
+    for token in tokens:
+        if token.type != TokenType.IDENT:
+            continue
+        if token.value.lower() not in {"discipline", "nature"}:
+            continue
+        diagnostics.append(
+            _strict_spectre_diag(
+                "source-local custom nature/discipline declaration",
+                BEHAVIORAL_EVENT,
+                "EVAS does not elaborate custom nature/discipline definitions; "
+                "include `disciplines.vams` and use its built-in electrical "
+                "discipline instead",
+                filename,
+                line=token.line,
+                column=token.col,
+            )
+        )
+    return diagnostics
+
+
 def _lint_strict_spectre_module(
     module: va_ast.Module,
     filename: str,
 ) -> List[Diagnostic]:
     diagnostics: List[Diagnostic] = []
+    for param in va_ast.module_constant_parameters(module):
+        default = _numeric_value(param.default_value)
+        lower = (
+            _numeric_value(param.range_lo)
+            if param.range_lo is not None
+            else None
+        )
+        upper = (
+            _numeric_value(param.range_hi)
+            if param.range_hi is not None
+            else None
+        )
+        if (
+            default is not None
+            and lower is not None
+            and (
+                default < lower
+                or (default == lower and not param.range_lo_inclusive)
+            )
+        ):
+            boundary = "inclusive" if param.range_lo_inclusive else "exclusive"
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "parameter default outside its declared range",
+                    BEHAVIORAL_EVENT,
+                    f"parameter {param.name} default {default:g} violates the "
+                    f"{boundary} lower bound {lower:g}",
+                    filename,
+                    module=module.name,
+                    node=param,
+                )
+            )
+        if (
+            default is not None
+            and upper is not None
+            and (
+                default > upper
+                or (default == upper and not param.range_hi_inclusive)
+            )
+        ):
+            boundary = "inclusive" if param.range_hi_inclusive else "exclusive"
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "parameter default outside its declared range",
+                    BEHAVIORAL_EVENT,
+                    f"parameter {param.name} default {default:g} violates the "
+                    f"{boundary} upper bound {upper:g}",
+                    filename,
+                    module=module.name,
+                    node=param,
+                )
+            )
     constant_index_names = {
         param.name for param in va_ast.module_constant_parameters(module)
     }
@@ -1662,6 +1807,8 @@ def _lint_expr(
                 expr, diagnostics, filename, module, min_transition,
                 continuous_vars,
             )
+        elif name == "absdelay":
+            _lint_absdelay_call(expr, diagnostics, filename, module)
         elif name == "ddt" and any(_expr_has_call(arg, "ddt") for arg in expr.args):
             diagnostics.append(
                 _diag(
@@ -1710,6 +1857,45 @@ def _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
                 discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
+
+
+def _lint_absdelay_call(
+    expr: va_ast.FunctionCall,
+    diagnostics: List[Diagnostic],
+    filename: str,
+    module: str,
+) -> None:
+    if len(expr.args) not in {2, 3}:
+        diagnostics.append(
+            _diag(
+                code="EVAS-COMP-EUNSUPPORTED",
+                message=(
+                    "absdelay() expects 2 or 3 arguments in EVAS's "
+                    "voltage-domain sampled transport-delay subset"
+                ),
+                file=filename,
+                module=module,
+                support_tier=BEHAVIORAL_CONTINUOUS_TIME,
+                node=expr,
+            )
+        )
+        return
+
+    delay_value = _numeric_value(expr.args[1])
+    if delay_value is not None and delay_value < 0.0:
+        diagnostics.append(
+            _diag(
+                code="EVAS-COMP-EUNSUPPORTED",
+                message=(
+                    "absdelay() delay must be nonnegative in EVAS's "
+                    "voltage-domain sampled transport-delay subset"
+                ),
+                file=filename,
+                module=module,
+                support_tier=BEHAVIORAL_CONTINUOUS_TIME,
+                node=expr,
+            )
+        )
 
 
 def _lint_transition_call(
@@ -2701,7 +2887,7 @@ _REAL_RETURN_FUNCTIONS = {
 
 
 _SUPPORTED_FUNCTIONS = {
-    "transition", "slew", "ddt", "idt", "idtmod", "cross", "last_crossing",
+    "transition", "absdelay", "slew", "ddt", "idt", "idtmod", "cross", "last_crossing",
     "limexp", "laplace_nd", "laplace_np", "laplace_zd", "laplace_zp",
     "zi_nd", "zi_np", "zi_zd", "zi_zp", "ln", "log", "exp", "sqrt",
     "abs", "pow", "min", "max", "sin", "cos", "tan", "tanh", "floor",

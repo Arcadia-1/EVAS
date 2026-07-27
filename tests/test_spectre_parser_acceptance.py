@@ -94,6 +94,41 @@ def test_plus_continued_pwl_rejects_standalone_closing_bracket(tmp_path):
         )
 
 
+def test_backslash_continued_pwl_rejects_standalone_closing_bracket(tmp_path):
+    with pytest.raises(ValueError, match="closing bracket"):
+        _parse_netlist(
+            tmp_path,
+            """\
+            simulator lang=spectre
+            global 0
+            V1 (out 0) vsource type=pwl wave=[ \\
+                0 0 \\
+                10n 1
+            ]
+            tran tran stop=20n
+            """,
+        )
+
+
+def test_backslash_continued_pwl_accepts_continued_closing_bracket(tmp_path):
+    netlist = _parse_netlist(
+        tmp_path,
+        """\
+        simulator lang=spectre
+        global 0
+        V1 (out 0) vsource type=pwl wave=[ \\
+            0 0 \\
+            10n 1 \\
+        ]
+        tran tran stop=20n
+        """,
+    )
+
+    assert netlist.sources[0].params["wave"] == pytest.approx(
+        [0.0, 0.0, 10e-9, 1.0]
+    )
+
+
 @pytest.mark.parametrize(
     "source_lines",
     [
@@ -145,6 +180,39 @@ def test_named_transient_analysis_is_accepted(tmp_path):
     assert netlist.tran is not None
     assert netlist.tran.name == "tran1"
     assert netlist.tran.stop == pytest.approx(1e-9)
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [
+        ("18us", 18e-6),
+        ("250ns", 250e-9),
+        ("4ps", 4e-12),
+        ("3fs", 3e-15),
+    ],
+)
+def test_spectre_time_unit_suffix_is_accepted(tmp_path, literal, expected):
+    netlist = _parse_netlist(
+        tmp_path,
+        f"""\
+        simulator lang=spectre
+        tran tran stop={literal}
+        """,
+    )
+
+    assert netlist.tran is not None
+    assert netlist.tran.stop == pytest.approx(expected)
+
+
+def test_unknown_time_unit_suffix_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="Unknown variable or invalid number"):
+        _parse_netlist(
+            tmp_path,
+            """\
+            simulator lang=spectre
+            tran tran stop=18xs
+            """,
+        )
 
 
 def test_options_analysis_statement_is_accepted(tmp_path):

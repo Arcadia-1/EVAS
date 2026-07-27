@@ -86,6 +86,117 @@ def test_compile_gate_accepts_source_only_netlist_without_tran(tmp_path):
     assert result.rust_report.program.record_names == ("in",)
 
 
+def test_compile_gate_strict_rejects_fake_ground_instance(tmp_path):
+    scs = _netlist(
+        tmp_path,
+        """\
+        gnd (0)
+        Vin (in 0) vsource dc=0.9
+        save in
+        """,
+    )
+
+    extension_result = compile_spectre_netlist(str(scs))
+    strict_result = compile_spectre_netlist(str(scs), spectre_strict=True)
+
+    assert extension_result.ok
+    assert not strict_result.ok
+    assert strict_result.stage == "strict_netlist"
+    assert any(
+        "use `global 0`" in diag.message
+        for diag in strict_result.diagnostics
+    )
+
+
+def test_compile_gate_strict_accepts_global_ground_declaration(tmp_path):
+    scs = _netlist(
+        tmp_path,
+        """\
+        Vin (in 0) vsource dc=0.9
+        save in
+        """,
+    )
+
+    result = compile_spectre_netlist(str(scs), spectre_strict=True)
+
+    assert result.ok
+    assert result.stage == "ok"
+
+
+def test_compile_gate_accepts_absdelay_voltage_transport_delay_subset(tmp_path):
+    _basic_va(
+        tmp_path,
+        name="delayed_buf",
+        body="V(out) <+ absdelay(V(in), 1n);",
+    )
+    scs = _netlist(
+        tmp_path,
+        """\
+        ahdl_include "delayed_buf.va"
+        Vin (in 0) vsource dc=0.9
+        XDUT (in out) delayed_buf
+        save out
+        """,
+    )
+
+    result = compile_spectre_netlist(str(scs))
+
+    assert result.ok
+    assert result.stage == "ok"
+
+
+def test_compile_gate_rejects_absdelay_wrong_arity(tmp_path):
+    _basic_va(
+        tmp_path,
+        name="delayed_buf",
+        body="V(out) <+ absdelay(V(in));",
+    )
+    scs = _netlist(
+        tmp_path,
+        """\
+        ahdl_include "delayed_buf.va"
+        Vin (in 0) vsource dc=0.9
+        XDUT (in out) delayed_buf
+        save out
+        """,
+    )
+
+    result = compile_spectre_netlist(str(scs))
+
+    assert not result.ok
+    assert result.stage == "verilog_a_compile"
+    assert any(
+        "absdelay() expects 2 or 3 arguments" in diag.message
+        for diag in result.diagnostics
+    )
+
+
+def test_compile_gate_rejects_absdelay_negative_static_delay(tmp_path):
+    _basic_va(
+        tmp_path,
+        name="delayed_buf",
+        body="V(out) <+ absdelay(V(in), -1n);",
+    )
+    scs = _netlist(
+        tmp_path,
+        """\
+        ahdl_include "delayed_buf.va"
+        Vin (in 0) vsource dc=0.9
+        XDUT (in out) delayed_buf
+        save out
+        """,
+    )
+
+    result = compile_spectre_netlist(str(scs))
+
+    assert not result.ok
+    assert result.stage == "verilog_a_compile"
+    assert any(
+        "absdelay() delay must be nonnegative" in diag.message
+        for diag in result.diagnostics
+    )
+
+
 def test_compile_gate_reports_missing_ahdl_include(tmp_path):
     scs = _netlist(
         tmp_path,

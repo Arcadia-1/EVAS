@@ -13403,6 +13403,25 @@ endmodule
         assert model.arrays["stage"][0] == pytest.approx(0.625)
         assert model.output_nodes["y"] == pytest.approx(0.625)
 
+    def test_array_aggregate_initializer_follows_declared_direction(self):
+        src = """\
+module aggregate_array_direction(out);
+    output wreal out;
+    real ascending[0:3] = '{0.1, 0.2, 0.3, 0.4};
+    real descending[3:0] = '{1.1, 1.2, 1.3, 1.4};
+    assign out = ascending[0] + descending[3];
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.arrays["ascending"] == pytest.approx(
+            {0: 0.1, 1: 0.2, 2: 0.3, 3: 0.4}
+        )
+        assert model.arrays["descending"] == pytest.approx(
+            {3: 1.1, 2: 1.2, 1: 1.3, 0: 1.4}
+        )
+
     def test_initial_step_analysis_filters_are_accepted_like_spectre(self):
         src = """\
 `include "disciplines.vams"

@@ -52,10 +52,12 @@ separate from current-domain contribution stamping or full Spectre
 transfer-function solving.
 
 Spectre-restricted placements, such as conditional `idt()` or event-local
-analog contributions, are reported through compatibility diagnostics. Legal
-continuous-time operators without an EVAS implementation, for example
-`absdelay()`, report `EVAS-COMP-EUNSUPPORTED` with
-`support_tier="behavioral-continuous-time"`.
+analog contributions, are reported through compatibility diagnostics.
+`absdelay()` has a deliberately narrower compatibility subset: sampled
+voltage-domain scalar transport delay with two or three arguments, a
+nonnegative evaluated delay, and `maxdelay >= delay` when supplied. EVAS routes
+that subset to its deterministic Python compatibility engine. This is not a
+claim of full Spectre continuous-time `absdelay()` equivalence.
 
 ## Noise and Stochastic Semantics
 
@@ -88,6 +90,15 @@ task-local variables, and state updates through task calls.
 Pure expression vector semantics are separate from electrical topology. EVAS
 supports bit select, part select, concatenation, replication, reductions,
 packed logic vectors, and integer/real state arrays.
+
+Runtime-indexed integer/real state arrays use the deterministic Python
+compatibility engine. Aggregate initializers are assigned in declaration order,
+starting at the left bound for both ascending and descending declared ranges.
+
+`cross()` expressions whose input is a scalar state assigned continuously in
+the same analog block also use the compatibility engine so the continuous
+assignment and event observation follow Spectre ordering. Direct electrical
+forms such as `cross(V(clk)-vth,+1)` remain on the Rust engine.
 
 Static `generate`/`genvar` elaboration is supported for the limited
 behavioral/continuous-assign subset used by supported bridge models. This is

@@ -64,6 +64,7 @@ RUST_EVAS_ENGINE = "evas-rust"
 DEFAULT_EVAS_ENGINE = RUST_EVAS_ENGINE
 _RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
 _DEVELOPER_ENGINE_OVERRIDE: Optional[str] = None
+_PYTHON_COMPATIBILITY_FUNCTIONS = frozenset({"absdelay"})
 
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
@@ -183,6 +184,180 @@ def _normalize_evas_engine(engine: str) -> str:
     raise ValueError(
         f"unsupported EVAS engine {engine!r}; expected {RUST_EVAS_ENGINE!r}"
     )
+
+
+def _netlist_python_compatibility_features(
+    netlist: SpectreNetlist,
+) -> Tuple[str, ...]:
+    """Return supported syntax features that require the Python engine.
+
+    This is a narrow, syntax-driven compatibility route. It never falls back
+    because Rust compilation or simulation failed.
+    """
+
+    features: set[str] = set()
+    source_dir = Path(netlist.source_dir)
+    for include in netlist.ahdl_includes:
+        include_path = Path(include.path)
+        va_path = (
+            include_path.resolve()
+            if include_path.is_absolute()
+            else (source_dir / include_path).resolve()
+        )
+        if not va_path.is_file():
+            continue
+        try:
+            source = va_path.read_text(encoding="utf-8", errors="replace")
+            preprocessed, _defines, _default_transition = preprocess(
+                source,
+                source_dir=str(va_path.parent),
+            )
+            tokens = tokenize_va(preprocessed)
+            modules = parse_all_va(preprocessed)
+        except Exception:
+            # The normal compile gate owns diagnostics for malformed sources.
+            continue
+        for current, following in zip(tokens, tokens[1:]):
+            name = str(current.value).lower()
+            if (
+                current.type == TokenType.IDENT
+                and following.type == TokenType.LPAREN
+                and name in _PYTHON_COMPATIBILITY_FUNCTIONS
+            ):
+                features.add(name)
+        for module in modules:
+            array_names = {
+                variable.name
+                for variable in module.variables
+                if getattr(variable, "is_array", False)
+            }
+            if array_names:
+                static_names = {
+                    parameter.name
+                    for parameter in va_ast.module_constant_parameters(module)
+                }
+                static_names.update(
+                    variable.name
+                    for variable in module.variables
+                    if getattr(variable, "is_genvar", False)
+                )
+                for access in _iter_array_accesses(module):
+                    if access.name not in array_names:
+                        continue
+                    if not _is_static_array_index(access.index, static_names):
+                        features.add("dynamic_state_array_access")
+                        break
+            if _module_uses_continuous_state_cross(module):
+                features.add("continuous_state_cross_event")
+    return tuple(sorted(features))
+
+
+def _iter_array_accesses(value):
+    if value is None:
+        return
+    if isinstance(value, va_ast.ArrayAccess):
+        yield value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_array_accesses(item)
+    elif is_dataclass(value):
+        for field in fields(value):
+            yield from _iter_array_accesses(getattr(value, field.name))
+
+
+def _is_static_array_index(value, static_names: set[str]) -> bool:
+    if isinstance(value, va_ast.NumberLiteral):
+        return True
+    if isinstance(value, va_ast.Identifier):
+        return value.name in static_names
+    if isinstance(value, (va_ast.UnaryExpr, va_ast.BinaryExpr)):
+        return all(
+            _is_static_array_index(getattr(value, field.name), static_names)
+            for field in fields(value)
+            if field.name != "op"
+        )
+    return False
+
+
+def _module_uses_continuous_state_cross(module) -> bool:
+    """Detect cross() expressions fed by procedural continuous state.
+
+    Rust currently does not guarantee Spectre's ordering for a scalar assigned
+    in the continuously evaluated analog body and then consumed by a separate
+    cross event in that same body.  Route only this syntactic dependency to the
+    compatibility engine; direct cross(V(...)) remains on Rust.
+    """
+
+    analog_block = getattr(module, "analog_block", None)
+    if analog_block is None:
+        return False
+    state_names = {
+        variable.name
+        for variable in module.variables
+        if not getattr(variable, "is_array", False)
+    }
+    continuously_assigned = _continuous_assignment_targets(
+        analog_block.body,
+        state_names,
+    )
+    if not continuously_assigned:
+        return False
+    for value in _iter_dataclass_values(analog_block.body):
+        if not isinstance(value, va_ast.EventStatement):
+            continue
+        events = (
+            value.event.events
+            if isinstance(value.event, va_ast.CombinedEvent)
+            else (value.event,)
+        )
+        for event in events:
+            if event.event_type != va_ast.EventType.CROSS or not event.args:
+                continue
+            identifiers = {
+                item.name
+                for item in _iter_dataclass_values(event.args[0])
+                if isinstance(item, va_ast.Identifier)
+            }
+            if identifiers & continuously_assigned:
+                return True
+    return False
+
+
+def _continuous_assignment_targets(value, state_names: set[str], in_event=False):
+    targets: set[str] = set()
+    if value is None:
+        return targets
+    if isinstance(value, va_ast.EventStatement):
+        return _continuous_assignment_targets(value.body, state_names, True)
+    if isinstance(value, va_ast.Assignment) and not in_event:
+        if isinstance(value.target, va_ast.Identifier):
+            if value.target.name in state_names:
+                targets.add(value.target.name)
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            targets.update(
+                _continuous_assignment_targets(item, state_names, in_event)
+            )
+    elif is_dataclass(value):
+        for field in fields(value):
+            targets.update(
+                _continuous_assignment_targets(
+                    getattr(value, field.name), state_names, in_event
+                )
+            )
+    return targets
+
+
+def _iter_dataclass_values(value):
+    if value is None:
+        return
+    yield value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_dataclass_values(item)
+    elif is_dataclass(value):
+        for field in fields(value):
+            yield from _iter_dataclass_values(getattr(value, field.name))
 
 
 def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
@@ -354,7 +529,7 @@ def _expr_has_call(expr, call_name: str) -> bool:
 
 
 _SUPPORTED_FUNCTION_CALLS = {
-    'transition', 'slew', 'ddt', 'idt', 'idtmod', 'cross', 'last_crossing',
+    'transition', 'absdelay', 'slew', 'ddt', 'idt', 'idtmod', 'cross', 'last_crossing',
     'limexp',
     'laplace_nd', 'laplace_np', 'laplace_zd', 'laplace_zp',
     'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
@@ -775,6 +950,34 @@ def _validate_supported_function_calls(expr, user_function_names: Optional[set] 
                 )
                 + format_support_tier_hint(support_tier)
             )
+        _validate_absdelay_call(call)
+
+
+def _static_numeric_literal(expr) -> Optional[float]:
+    if isinstance(expr, va_ast.NumberLiteral):
+        return float(expr.value)
+    if isinstance(expr, va_ast.UnaryExpr) and expr.op in {"+", "-"}:
+        value = _static_numeric_literal(expr.operand)
+        if value is None:
+            return None
+        return value if expr.op == "+" else -value
+    return None
+
+
+def _validate_absdelay_call(call) -> None:
+    if call.name.lower() != "absdelay":
+        return
+    if len(call.args) not in {2, 3}:
+        raise ValueError(
+            "unsupported Verilog-A feature: absdelay() expects 2 or 3 "
+            "arguments in EVAS"
+        )
+    delay = _static_numeric_literal(call.args[1])
+    if delay is not None and delay < 0.0:
+        raise ValueError(
+            "unsupported Verilog-A feature: absdelay() delay must be "
+            "nonnegative"
+        )
 
 
 def _iter_contributions(stmt):
@@ -2162,11 +2365,22 @@ def compile_spectre_netlist(
     ``Simulator.run`` or advances transient time.
     """
     scs_path = Path(scs_file).resolve()
+    try:
+        netlist = parse_spectre(str(scs_path))
+    except Exception:
+        netlist = None
+    python_features = (
+        _netlist_python_compatibility_features(netlist)
+        if netlist is not None
+        else ()
+    )
     return _build_spectre_compile_context(
         scs_path,
+        netlist=netlist,
         ahdllint=ahdllint,
         ahdllint_min_transition=ahdllint_min_transition,
         spectre_strict=spectre_strict,
+        require_rust_lowering=not python_features,
     )
 
 
@@ -2253,8 +2467,23 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log_file.close()
         return False
 
+    requested_engine = evas_engine
+    python_features = _netlist_python_compatibility_features(netlist)
+    if evas_engine == RUST_EVAS_ENGINE and python_features:
+        evas_engine = PYTHON_EVAS_ENGINE
+        log.write(
+            "Compatibility engine route: "
+            f"{RUST_EVAS_ENGINE} -> {PYTHON_EVAS_ENGINE} "
+            f"for {', '.join(python_features)}"
+        )
+        log.write("")
+
     identity = collect_build_identity()
     identity["engine"] = evas_engine
+    identity["engine_requested"] = requested_engine
+    if python_features and requested_engine == RUST_EVAS_ENGINE:
+        identity["engine_fallback_kind"] = "syntax_feature_gate"
+        identity["engine_fallback_features"] = list(python_features)
     write_build_identity(out_dir / "evas_identity.json", identity)
     log.write("Build identity:")
     log.write(f"    package_version = {identity['package_version']}")

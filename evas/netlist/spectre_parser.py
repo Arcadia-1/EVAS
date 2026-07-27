@@ -134,6 +134,16 @@ _SUFFIXES_CASE_INSENSITIVE = {
     'X': 1e6,
 }
 
+_SPECTRE_TIME_UNITS = {
+    's': 1.0,
+    'ms': 1e-3,
+    'us': 1e-6,
+    'ns': 1e-9,
+    'ps': 1e-12,
+    'fs': 1e-15,
+    'as': 1e-18,
+}
+
 
 def _parse_suffix_number(s: str) -> Optional[float]:
     """Try to parse a number with optional SPICE suffix. Returns None if not a number."""
@@ -146,6 +156,20 @@ def _parse_suffix_number(s: str) -> Optional[float]:
         return float(s)
     except ValueError:
         pass
+
+    # Spectre accepts an explicit seconds unit after an engineering prefix,
+    # for example ``18us``.  Parse these before the one-letter suffix table so
+    # the trailing ``s`` is not mistaken for the entire suffix.
+    for suffix, multiplier in sorted(
+        _SPECTRE_TIME_UNITS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if s.endswith(suffix):
+            try:
+                return float(s[:-len(suffix)]) * multiplier
+            except ValueError:
+                continue
 
     # Spectre engineering suffixes are case-sensitive for M/m.  Keep the
     # common case-insensitive multi-letter aliases separately so 100M means
@@ -345,6 +369,7 @@ def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
     in_wave = False
     previous_backslash = False
     saw_plus_continuation = False
+    saw_wave_data = False
     for line_number, raw in enumerate(raw_lines, 1):
         line = _strip_line_comment(raw.rstrip())
         stripped = line.strip()
@@ -356,23 +381,22 @@ def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
 
         if in_wave:
             search_text = stripped[1:].lstrip() if starts_plus else stripped
-            # Let the PWL value validator classify an otherwise empty array.
-            # The closing bracket carries no continuation payload, so rejecting
-            # it here would hide the more precise empty-wave diagnostic.
             if search_text == ']':
-                if (
-                    saw_plus_continuation
-                    and not starts_plus
-                    and not previous_backslash
-                ):
+                if saw_wave_data and not starts_plus and not previous_backslash:
+                    style = (
+                        "'+'-continued"
+                        if saw_plus_continuation
+                        else "backslash-continued"
+                    )
                     raise ValueError(
                         "Spectre-incompatible PWL wave syntax at "
-                        f"line {line_number}: a '+'-continued wave requires "
+                        f"line {line_number}: a {style} wave requires "
                         "the closing bracket to remain on a continued line"
                     )
                 in_wave = False
                 previous_backslash = continued
                 saw_plus_continuation = False
+                saw_wave_data = False
                 continue
             if not starts_plus and not previous_backslash:
                 raise ValueError(
@@ -382,9 +406,11 @@ def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
                 )
             if starts_plus:
                 saw_plus_continuation = True
+            saw_wave_data = True
             if ']' in search_text:
                 in_wave = False
                 saw_plus_continuation = False
+                saw_wave_data = False
             previous_backslash = continued
             continue
 
@@ -396,6 +422,7 @@ def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
             in_wave = True
             previous_backslash = continued
             saw_plus_continuation = False
+            saw_wave_data = bool(stripped[match.end():].strip())
             continue
         previous_backslash = continued
 
@@ -495,6 +522,14 @@ def strict_spectre_netlist_diagnostics(path: str) -> List[str]:
     """
     raw_lines = Path(path).read_text(encoding="utf-8").splitlines()
     diagnostics: List[str] = []
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        line = _strip_line_comment(raw_line).strip()
+        if re.fullmatch(r"(?i)gnd\s*\(\s*0\s*\)", line):
+            diagnostics.append(
+                "EVAS-NETLIST-ESPECTRESTRICT: strict Spectre ground syntax "
+                f"rejects `gnd (0)` at line {line_number}; use `global 0` "
+                "to declare the Spectre ground node"
+            )
     for line in _preprocess_lines(raw_lines):
         if not line.lower().startswith("save"):
             continue

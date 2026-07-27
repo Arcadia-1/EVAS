@@ -188,7 +188,13 @@ pub fn cross_detector_step_for_arrays(
     }
 
     let e_tol = expr_tol.abs();
-    let t_tol = time_tol.max(0.0);
+    // A zero user time tolerance still needs to collapse the same physical
+    // root when decimal/SI parsing and adaptive replay differ by a few ulps.
+    // Without this numerical floor, the accepted point can execute twice.
+    let t_tol = time_tol
+        .max(0.0)
+        .max(1.0e-18)
+        .max(time.abs() * f64::EPSILON * 8.0);
     for idx in 0..count {
         triggered_flags[idx] = 0;
         trigger_directions[idx] = 0;
