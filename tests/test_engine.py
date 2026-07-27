@@ -4638,14 +4638,6 @@ endmodule
             sim.record("RDY")
             return sim, model
 
-        ref, ref_model = build_sim()
-        ref_result = ref.run(
-            tstop=4e-9,
-            tstep=250e-12,
-            record_step=250e-12,
-            skip_source_error_control=True,
-        )
-
         rust, rust_model = build_sim()
         rust_result = rust.run(
             tstop=4e-9,
