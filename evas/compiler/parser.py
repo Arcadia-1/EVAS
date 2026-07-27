@@ -1,6 +1,8 @@
 """
 parser.py — Recursive descent parser for Verilog-A → AST
 """
+import copy
+from dataclasses import fields, is_dataclass
 from typing import Dict, List, Optional, Tuple
 
 from evas.support_tiers import AMS_DIGITAL, format_support_tier_hint
@@ -78,6 +80,74 @@ _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
 
 _UNSUPPORTED_MODULE_BLOCKS = set()
 
+_REPEATABLE_MATH_CALLS = {
+    'abs',
+    'ceil',
+    'cos',
+    'exp',
+    'floor',
+    'limexp',
+    'ln',
+    'log',
+    'max',
+    'min',
+    'pow',
+    'sin',
+    'sqrt',
+    'tan',
+    'tanh',
+}
+
+
+def _is_repeatable_math_expression(expr: Expr) -> bool:
+    """Return whether duplicating *expr* preserves one-call math semantics."""
+    if isinstance(expr, (NumberLiteral, Identifier)):
+        return True
+    if isinstance(expr, ArrayAccess):
+        return (
+            _is_repeatable_math_expression(expr.index)
+            and (
+                expr.index2 is None
+                or _is_repeatable_math_expression(expr.index2)
+            )
+        )
+    if isinstance(expr, PartSelect):
+        return (
+            _is_repeatable_math_expression(expr.msb)
+            and _is_repeatable_math_expression(expr.lsb)
+        )
+    if isinstance(expr, BinaryExpr):
+        return (
+            _is_repeatable_math_expression(expr.left)
+            and _is_repeatable_math_expression(expr.right)
+        )
+    if isinstance(expr, UnaryExpr):
+        return _is_repeatable_math_expression(expr.operand)
+    if isinstance(expr, TernaryExpr):
+        return (
+            _is_repeatable_math_expression(expr.cond)
+            and _is_repeatable_math_expression(expr.true_expr)
+            and _is_repeatable_math_expression(expr.false_expr)
+        )
+    if isinstance(expr, BranchAccess):
+        indexes = (
+            expr.node1_index,
+            expr.node2_index,
+            expr.node1_index2,
+            expr.node2_index2,
+        )
+        return all(
+            index is None or _is_repeatable_math_expression(index)
+            for index in indexes
+        )
+    if isinstance(expr, FunctionCall):
+        name = expr.name[1:] if expr.name.startswith('$') else expr.name
+        return (
+            name in _REPEATABLE_MATH_CALLS
+            and all(_is_repeatable_math_expression(arg) for arg in expr.args)
+        )
+    return False
+
 
 class ParseError(Exception):
     def __init__(self, msg, token=None):
@@ -117,6 +187,7 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self._repeat_counter = 0
+        self._generate_counter = 0
         self._range_param_values: Dict[str, float] = {}
 
     def peek(self) -> Token:
@@ -156,6 +227,48 @@ class Parser:
         if column is not None:
             setattr(node, "column", column)
         return node
+
+    def _lower_cosh_call(self, args: List[Expr], token: Token) -> Expr:
+        """Lower repeatable ``cosh(x)`` calls to existing ``exp`` primitives."""
+        if len(args) != 1 or not _is_repeatable_math_expression(args[0]):
+            return self._with_location(
+                FunctionCall(name="cosh", args=args),
+                token,
+            )
+
+        positive_arg = copy.deepcopy(args[0])
+        negative_arg = copy.deepcopy(args[0])
+        positive_exp = self._with_location(
+            FunctionCall(name="exp", args=[positive_arg]),
+            token,
+        )
+        negative_exp = self._with_location(
+            FunctionCall(
+                name="exp",
+                args=[
+                    self._with_location(
+                        UnaryExpr(op="-", operand=negative_arg),
+                        token,
+                    )
+                ],
+            ),
+            token,
+        )
+        numerator = self._with_location(
+            BinaryExpr(op="+", left=positive_exp, right=negative_exp),
+            token,
+        )
+        return self._with_location(
+            BinaryExpr(
+                op="/",
+                left=numerator,
+                right=self._with_location(
+                    NumberLiteral(value=2.0, raw="2.0"),
+                    token,
+                ),
+            ),
+            token,
+        )
 
     def _reject_reserved_identifier(self, token: Token, context: str) -> None:
         if token.value in _SPECTRE_RESERVED_IDENTIFIERS:
@@ -586,7 +699,7 @@ class Parser:
         self._reject_unsupported_procedural_block_if_present("module item")
 
         if tok.type == TokenType.IDENT and tok.value == "generate":
-            module.continuous_assigns.extend(self._parse_generate_block_assignments())
+            self._parse_generate_block(module)
             return
 
         if tok.type == TokenType.IDENT and tok.value == "specify":
@@ -624,18 +737,28 @@ class Parser:
             return
 
         # Parameter declarations
-        if tok.type == TokenType.PARAMETER:
+        if tok.type in (TokenType.PARAMETER, TokenType.LOCALPARAM):
             self._parse_parameter_decl(module)
             return
 
         # User-defined functions/tasks
         if tok.type == TokenType.FUNCTION:
+            if module.analog_block is not None:
+                raise ParseError(
+                    "Spectre requires function declarations before the analog block",
+                    tok,
+                )
             module.functions.append(self._parse_function_decl())
             return
         if tok.type == TokenType.TASK:
             module.tasks.append(self._parse_task_decl())
             return
         if tok.type == TokenType.ANALOG and self.peek_n(1).type == TokenType.FUNCTION:
+            if module.analog_block is not None:
+                raise ParseError(
+                    "Spectre requires function declarations before the analog block",
+                    tok,
+                )
             self.advance()
             module.functions.append(self._parse_function_decl())
             return
@@ -684,8 +807,13 @@ class Parser:
                 module.instances.append(inst)
                 return
 
-        # Skip unknown tokens
-        self.advance()
+        if self.match(TokenType.SEMI):
+            return
+        raise ParseError(
+            f"Unsupported module item {tok.value!r}; EVAS will not silently "
+            "ignore syntax that Spectre may reject",
+            tok,
+        )
 
     def _parse_branch_decl(self) -> BranchDecl:
         self.expect(TokenType.IDENT)  # branch
@@ -748,67 +876,300 @@ class Parser:
             parameter_overrides=parameter_overrides,
         )
 
-    def _parse_generate_block_assignments(self) -> List[Assignment]:
-        """Parse the supported generate/genvar subset as static assignments.
+    def _parse_generate_block(self, module: Module) -> None:
+        """Statically elaborate the supported Verilog-A generate subset.
 
-        EVAS behavioral mode does not elaborate arbitrary SystemVerilog
-        generate constructs. This accepts the common simple wrapper used by
-        benchmark language-extension tasks:
-
-            generate
-                for (...) begin: label
-                    assign lhs = rhs;
-                end
-            endgenerate
-
-        The genvar itself is already parsed as a module variable; for the
-        current behavioral subset, assignments inside the generated body are
-        evaluated like ordinary continuous assignments.
+        Besides continuous assignments, Spectre permits an ``analog`` block
+        inside a genvar loop.  Such blocks are elaborated at compile time, so
+        EVAS clones each generated body and substitutes the genvar with its
+        literal value.  Local real/integer declarations receive unique names
+        per generated instance to preserve their scope.
         """
         self.expect(TokenType.IDENT)  # generate
-        assignments: List[Assignment] = []
         while not self.at(TokenType.EOF):
             tok = self.peek()
             if tok.type == TokenType.IDENT and tok.value == "endgenerate":
                 self.advance()
-                break
+                self.match(TokenType.SEMI)
+                return
             if tok.type == TokenType.FOR:
-                assignments.extend(self._parse_generate_for_assignments())
+                self._parse_generate_for_item(module)
                 continue
             if tok.type == TokenType.ASSIGN_KW:
-                assignments.append(self._parse_continuous_assign())
+                module.continuous_assigns.append(self._parse_continuous_assign())
                 continue
-            self.advance()
-        return assignments
+            if self.match(TokenType.SEMI):
+                continue
+            raise ParseError(
+                "Unsupported item inside generate block; EVAS supports static "
+                "genvar loops containing continuous assignments or analog blocks",
+                tok,
+            )
+        raise ParseError("Unterminated generate block", self.peek())
 
-    def _parse_generate_for_assignments(self) -> List[Assignment]:
-        self.expect(TokenType.FOR)
+    def _parse_generate_for_item(self, module: Module) -> None:
+        for_tok = self.expect(TokenType.FOR)
         self.expect(TokenType.LPAREN)
-        self._parse_simple_assignment()
+        init = self._parse_simple_assignment()
         self.expect(TokenType.SEMI)
-        self._parse_expression()
+        cond = self._parse_expression()
         self.expect(TokenType.SEMI)
-        self._parse_simple_assignment()
+        update = self._parse_simple_assignment()
         self.expect(TokenType.RPAREN)
 
+        loop_name, loop_values = self._static_generate_loop_values(
+            init, cond, update, for_tok
+        )
         assignments: List[Assignment] = []
+        analog_templates: List[Tuple[Statement, List[VariableDecl], int]] = []
+
+        def parse_generated_item() -> None:
+            if self.at(TokenType.ASSIGN_KW):
+                assignments.append(self._parse_continuous_assign())
+                return
+            if self.match(TokenType.ANALOG):
+                body, local_decls = self._parse_generated_analog_body()
+                scope_id = self._generate_counter
+                self._generate_counter += 1
+                analog_templates.append((body, local_decls, scope_id))
+                return
+            raise ParseError(
+                "Unsupported generated item; expected continuous assignment or "
+                "analog block",
+                self.peek(),
+            )
+
         if self.match(TokenType.BEGIN):
             if self.match(TokenType.COLON) and self.at(TokenType.IDENT):
                 self.advance()
             while not self.at(TokenType.END, TokenType.EOF):
-                if self.at(TokenType.ASSIGN_KW):
-                    assignments.append(self._parse_continuous_assign())
-                else:
-                    self.advance()
+                if self.match(TokenType.SEMI):
+                    continue
+                parse_generated_item()
             self.expect(TokenType.END)
+            if self.match(TokenType.COLON):
+                self.expect(TokenType.IDENT)
             self.match(TokenType.SEMI)
-            return assignments
-
-        if self.at(TokenType.ASSIGN_KW):
-            assignments.append(self._parse_continuous_assign())
         else:
-            self.advance()
-        return assignments
+            parse_generated_item()
+
+        for ordinal, loop_value in enumerate(loop_values):
+            for assignment in assignments:
+                module.continuous_assigns.append(
+                    self._clone_generated_ast(
+                        assignment,
+                        loop_name=loop_name,
+                        loop_value=loop_value,
+                        local_names={},
+                    )
+                )
+            for body, local_decls, scope_id in analog_templates:
+                local_names = {
+                    decl.name: (
+                        f"__evas_gen_{scope_id}_{ordinal}_{decl.name}"
+                    )
+                    for decl in local_decls
+                }
+                for decl in local_decls:
+                    cloned_decl = self._clone_generated_ast(
+                        decl,
+                        loop_name=loop_name,
+                        loop_value=loop_value,
+                        local_names=local_names,
+                    )
+                    cloned_decl.name = local_names[decl.name]
+                    module.variables.append(cloned_decl)
+                cloned_body = self._clone_generated_ast(
+                    body,
+                    loop_name=loop_name,
+                    loop_value=loop_value,
+                    local_names=local_names,
+                )
+                self._append_analog_block(module, cloned_body)
+
+    def _parse_generated_analog_body(
+        self,
+    ) -> Tuple[Statement, List[VariableDecl]]:
+        """Parse an analog body whose generate scope may declare locals."""
+        if not self.at(TokenType.BEGIN):
+            return self._parse_statement(), []
+
+        begin_tok = self.expect(TokenType.BEGIN)
+        if self.match(TokenType.COLON):
+            self.expect(TokenType.IDENT)
+        local_decls: List[VariableDecl] = []
+        statements: List[Statement] = []
+        while not self.at(TokenType.END, TokenType.EOF):
+            if (
+                self.at(TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
+                or (self.at(TokenType.IDENT) and self.peek().value == "string")
+            ):
+                local_decls.extend(self._parse_variable_decl_list())
+                continue
+            statements.append(self._parse_statement())
+        self.expect(TokenType.END)
+        if self.match(TokenType.COLON):
+            self.expect(TokenType.IDENT)
+        return self._with_location(Block(statements=statements), begin_tok), local_decls
+
+    def _static_generate_loop_values(
+        self,
+        init: Assignment,
+        cond: Expr,
+        update: Assignment,
+        token: Token,
+    ) -> Tuple[str, List[float]]:
+        """Evaluate a finite, integer genvar loop without executing behavior."""
+        if not isinstance(init.target, Identifier):
+            raise ParseError("Generate loop initializer must target a genvar", token)
+        loop_name = init.target.name
+        if not isinstance(update.target, Identifier) or update.target.name != loop_name:
+            raise ParseError(
+                "Generate loop update must target the initialized genvar", token
+            )
+
+        value = self._eval_generate_expr(init.value, {})
+        values: List[float] = []
+        for _ in range(65536):
+            env = {loop_name: value}
+            if not self._eval_generate_expr(cond, env):
+                return loop_name, values
+            if not float(value).is_integer():
+                raise ParseError("Generate loop values must be integers", token)
+            values.append(float(value))
+            next_value = self._eval_generate_expr(update.value, env)
+            if next_value == value:
+                raise ParseError("Generate loop update does not make progress", token)
+            value = next_value
+        raise ParseError("Generate loop exceeds EVAS static elaboration limit", token)
+
+    def _eval_generate_expr(self, expr: Expr, env: Dict[str, float]) -> float:
+        if isinstance(expr, NumberLiteral):
+            return float(expr.value)
+        if isinstance(expr, Identifier):
+            if expr.name in env:
+                return float(env[expr.name])
+            if expr.name in self._range_param_values:
+                return float(self._range_param_values[expr.name])
+            raise ParseError(
+                f"Generate expression uses non-constant identifier {expr.name!r}"
+            )
+        if isinstance(expr, UnaryExpr):
+            value = self._eval_generate_expr(expr.operand, env)
+            if expr.op == "+":
+                return value
+            if expr.op == "-":
+                return -value
+            if expr.op == "!":
+                return float(not value)
+            if expr.op == "~":
+                return float(~int(value))
+        if isinstance(expr, BinaryExpr):
+            left = self._eval_generate_expr(expr.left, env)
+            right = self._eval_generate_expr(expr.right, env)
+            operators = {
+                "+": lambda: left + right,
+                "-": lambda: left - right,
+                "*": lambda: left * right,
+                "/": lambda: left / right,
+                "%": lambda: left % right,
+                "**": lambda: left ** right,
+                "<": lambda: float(left < right),
+                "<=": lambda: float(left <= right),
+                ">": lambda: float(left > right),
+                ">=": lambda: float(left >= right),
+                "==": lambda: float(left == right),
+                "!=": lambda: float(left != right),
+                "&&": lambda: float(bool(left) and bool(right)),
+                "||": lambda: float(bool(left) or bool(right)),
+                "&": lambda: float(int(left) & int(right)),
+                "|": lambda: float(int(left) | int(right)),
+                "^": lambda: float(int(left) ^ int(right)),
+                "<<": lambda: float(int(left) << int(right)),
+                ">>": lambda: float(int(left) >> int(right)),
+            }
+            operation = operators.get(expr.op)
+            if operation is not None:
+                return float(operation())
+        if isinstance(expr, TernaryExpr):
+            branch = expr.true_expr if self._eval_generate_expr(expr.cond, env) else expr.false_expr
+            return self._eval_generate_expr(branch, env)
+        raise ParseError("Unsupported non-constant expression in generate loop")
+
+    def _clone_generated_ast(
+        self,
+        value,
+        *,
+        loop_name: str,
+        loop_value: float,
+        local_names: Dict[str, str],
+    ):
+        """Clone generated AST while substituting genvar and scoped locals."""
+        if isinstance(value, Identifier):
+            if value.name == loop_name:
+                replacement = NumberLiteral(float(loop_value))
+                if hasattr(value, "line"):
+                    replacement.line = value.line
+                if hasattr(value, "column"):
+                    replacement.column = value.column
+                return replacement
+            cloned = copy.deepcopy(value)
+            cloned.name = local_names.get(value.name, value.name)
+            return cloned
+        if isinstance(value, ArrayAccess):
+            cloned = copy.deepcopy(value)
+            cloned.name = local_names.get(value.name, value.name)
+            cloned.index = self._clone_generated_ast(
+                value.index,
+                loop_name=loop_name,
+                loop_value=loop_value,
+                local_names=local_names,
+            )
+            if value.index2 is not None:
+                cloned.index2 = self._clone_generated_ast(
+                    value.index2,
+                    loop_name=loop_name,
+                    loop_value=loop_value,
+                    local_names=local_names,
+                )
+            return cloned
+        if isinstance(value, list):
+            return [
+                self._clone_generated_ast(
+                    item,
+                    loop_name=loop_name,
+                    loop_value=loop_value,
+                    local_names=local_names,
+                )
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                self._clone_generated_ast(
+                    item,
+                    loop_name=loop_name,
+                    loop_value=loop_value,
+                    local_names=local_names,
+                )
+                for item in value
+            )
+        if is_dataclass(value):
+            cloned = copy.deepcopy(value)
+            for field in fields(value):
+                setattr(
+                    cloned,
+                    field.name,
+                    self._clone_generated_ast(
+                        getattr(value, field.name),
+                        loop_name=loop_name,
+                        loop_value=loop_value,
+                        local_names=local_names,
+                    ),
+                )
+            if isinstance(cloned, MethodCall):
+                cloned.obj = local_names.get(cloned.obj, cloned.obj)
+            return cloned
+        return copy.deepcopy(value)
 
     def _parse_specify_block(self) -> List[SpecifyPathDelay]:
         """Parse the supported specify/specparam path-delay subset.
@@ -895,6 +1256,7 @@ class Parser:
 
         # Optional discipline
         discipline = 'electrical'
+        combined_direction_discipline = False
 
         # Check for array range before discipline
         array_hi, array_lo = None, None
@@ -910,6 +1272,7 @@ class Parser:
                 TokenType.LOGIC,
                 TokenType.WREAL,
             ):
+                combined_direction_discipline = True
                 discipline = self.advance().value
                 # Check again for range after discipline
                 if self.at(TokenType.LBRACKET) and array_hi is None:
@@ -935,6 +1298,11 @@ class Parser:
             if not self.match(TokenType.COMMA):
                 break
         self.match(TokenType.SEMI)
+        if combined_direction_discipline:
+            module.warnings.append(
+                "EVAS-SPECTRE-NONANSI-COMBINED-PORT: Spectre requires separate "
+                "direction and discipline declarations in a non-ANSI module body"
+            )
 
     def _parse_discipline_decl(self, module: Module):
         """Parse: electrical name [, name] ;
@@ -950,8 +1318,18 @@ class Parser:
         if self.at(TokenType.LBRACKET):
             array_hi, array_lo = self._parse_range()
 
+        prior_instance_nets = set()
+        for instance in module.instances:
+            for connection in instance.connections:
+                if isinstance(
+                    connection.expr,
+                    (Identifier, ArrayAccess, PartSelect),
+                ):
+                    prior_instance_nets.add(connection.expr.name)
+
         while True:
             if self.at(TokenType.IDENT):
+                name_tok = self.peek()
                 name = self._expect_identifier_name("discipline declaration")
                 # Optional outer dimension range after the name.
                 post_array_hi, post_array_lo = None, None
@@ -972,6 +1350,13 @@ class Parser:
                         found = True
                         break
                 if not found:
+                    if name in prior_instance_nets:
+                        raise ParseError(
+                            "Spectre-incompatible discipline declaration "
+                            f"redeclares implicit net {name!r} used by an "
+                            "earlier module instance",
+                            name_tok,
+                        )
                     if effective_array_hi is not None and discipline in {"logic", "wreal"}:
                         var_type = ParamType.INTEGER if discipline in {"logic"} else ParamType.REAL
                         if discipline in {"logic"} and post_array_hi is None:
@@ -1009,7 +1394,9 @@ class Parser:
 
     def _parse_parameter_decl(self, module: Module):
         """Parse one or more comma-separated parameter declarators."""
-        self.expect(TokenType.PARAMETER)
+        is_localparam = self.match(TokenType.LOCALPARAM) is not None
+        if not is_localparam:
+            self.expect(TokenType.PARAMETER)
 
         declared_type = ParamType.REAL
         if self.match(TokenType.REAL):
@@ -1032,6 +1419,7 @@ class Parser:
             range_hi = None
             range_lo_incl = True
             range_hi_incl = True
+            exclude_expr = None
             if self.at(TokenType.IDENT) and self.peek().value == 'from':
                 self.advance()
                 if self.match(TokenType.LBRACKET):
@@ -1045,17 +1433,30 @@ class Parser:
                     range_hi_incl = True
                 elif self.match(TokenType.RPAREN):
                     range_hi_incl = False
+            if self.match(TokenType.EXCLUDE):
+                if not self._at_expression_start():
+                    raise ParseError(
+                        "Expected expression after parameter exclude",
+                        self.peek(),
+                    )
+                exclude_expr = self._parse_expression()
 
             param_type = (
                 ParamType.STRING
                 if isinstance(default_val, StringLiteral)
                 else declared_type
             )
-            module.parameters.append(ParameterDecl(
+            param = ParameterDecl(
                 name=name, param_type=param_type, default_value=default_val,
                 range_lo=range_lo, range_hi=range_hi,
                 range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
-            ))
+                exclude_expr=exclude_expr,
+            )
+            if is_localparam:
+                module.localparams.append(param)
+            else:
+                module.parameters.append(param)
+            module.constant_parameters.append(param)
             if param_type != ParamType.STRING:
                 try:
                     self._range_param_values[name] = self._eval_range_const_expr(default_val)
@@ -1066,6 +1467,19 @@ class Parser:
                 break
 
         self.match(TokenType.SEMI)
+
+    def _at_expression_start(self) -> bool:
+        return self.at(
+            TokenType.NUMBER,
+            TokenType.STRING,
+            TokenType.IDENT,
+            TokenType.LPAREN,
+            TokenType.LBRACE,
+            TokenType.PLUS,
+            TokenType.MINUS,
+            TokenType.BANG,
+            TokenType.TILDE,
+        )
 
     def _parse_decl_type(self, default: ParamType = ParamType.REAL) -> Tuple[ParamType, bool]:
         """Parse an optional scalar declaration type.
@@ -1287,7 +1701,12 @@ class Parser:
             initial_tok = self.advance()
             body = self._parse_block_or_statement()
             event = self._with_location(EventExpr(EventType.INITIAL_STEP), initial_tok)
-            return self._with_location(EventStatement(event=event, body=body), initial_tok)
+            stmt = self._with_location(
+                EventStatement(event=event, body=body),
+                initial_tok,
+            )
+            stmt.analog_initial = True
+            return stmt
         return self._parse_block_or_statement()
 
     def _append_analog_block(self, module: Module, stmt: Statement) -> None:
@@ -1476,6 +1895,7 @@ class Parser:
 
             elif tok.value == 'initial_step':
                 event_tok = self.advance()
+                self._parse_optional_analysis_filter_list("initial_step")
                 return self._with_location(EventExpr(EventType.INITIAL_STEP), event_tok)
 
             elif tok.value == 'timer':
@@ -1497,9 +1917,24 @@ class Parser:
 
             elif tok.value == 'final_step':
                 event_tok = self.advance()
+                self._parse_optional_analysis_filter_list("final_step")
                 return self._with_location(EventExpr(EventType.FINAL_STEP), event_tok)
 
         raise ParseError(f"Expected event expression, got {tok.value!r}", tok)
+
+    def _parse_optional_analysis_filter_list(self, event_name: str) -> None:
+        """Consume Spectre's optional analysis-name filters on step events."""
+        if not self.match(TokenType.LPAREN):
+            return
+        if self.at(TokenType.RPAREN):
+            raise ParseError(
+                f"{event_name} analysis filter list cannot be empty",
+                self.peek(),
+            )
+        self.expect(TokenType.STRING)
+        while self.match(TokenType.COMMA):
+            self.expect(TokenType.STRING)
+        self.expect(TokenType.RPAREN)
 
     def _parse_if_statement(self) -> IfStatement:
         if_tok = self.expect(TokenType.IF)
@@ -2004,6 +2439,8 @@ class Parser:
                 self.advance()
                 args = self._parse_arg_list()
                 self.expect(TokenType.RPAREN)
+                if name == "cosh":
+                    return self._lower_cosh_call(args, name_tok)
                 return self._with_location(FunctionCall(name=name, args=args), name_tok)
 
             self._reject_reserved_identifier(tok, "expression identifier")

@@ -318,7 +318,7 @@ def test_conditional_idt_is_compat_error():
     assert has_compat_errors(diags)
 
 
-def test_conditional_slew_is_compat_error():
+def test_conditional_slew_is_not_compile_blocked_for_target_spectre():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module conditional_slew(inp, en, out);
@@ -336,8 +336,8 @@ def test_conditional_slew_is_compat_error():
 
     diags = lint_source(source)
 
-    assert "EVAS-COMP-E2151" in _codes(diags)
-    assert has_compat_errors(diags)
+    assert "EVAS-COMP-E2151" not in _codes(diags)
+    assert not has_compat_errors(diags)
 
 
 def test_conditional_direct_contribution_matches_oracle_negative():
@@ -888,6 +888,75 @@ def test_conditional_timer_warns():
     assert not has_compat_errors(diags)
 
 
+def test_strict_spectre_rejects_nested_timer_event_control():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module nested_timer(clk, out);
+            input clk;
+            output out;
+            electrical clk, out;
+            integer fired;
+            analog begin
+                @(cross(V(clk) - 0.5, +1)) begin
+                    @(timer($abstime + 1n))
+                        fired = fired + 1;
+                end
+                V(out) <+ fired;
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert any(
+        "nested timer event control" in diag.message
+        for diag in strict_diags
+    )
+    assert has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_allows_explicit_armed_root_timer():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module armed_root_timer(clk, out);
+            input clk;
+            output out;
+            electrical clk, out;
+            real deadline;
+            integer armed, fired;
+            analog begin
+                @(initial_step) begin
+                    deadline = 1.0;
+                    armed = 0;
+                    fired = 0;
+                end
+                @(cross(V(clk) - 0.5, +1)) begin
+                    deadline = $abstime + 1n;
+                    armed = 1;
+                end
+                @(timer(deadline)) begin
+                    if (armed) begin
+                        fired = fired + 1;
+                        armed = 0;
+                    end
+                end
+                V(out) <+ fired;
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert not any(
+        "nested timer event control" in diag.message
+        for diag in strict_diags
+    )
+    assert not has_compat_errors(strict_diags)
+
+
 def test_variable_electrical_range_is_compat_error():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
@@ -1019,7 +1088,7 @@ def test_strict_spectre_rejects_extension_only_behavioral_constructs():
     )
 
 
-def test_strict_spectre_rejects_seeded_rdist_parity_gaps():
+def test_strict_spectre_rejects_seeded_rdist_parity_gaps_except_normal():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
         module strict_random(out);
@@ -1040,9 +1109,55 @@ def test_strict_spectre_rejects_seeded_rdist_parity_gaps():
     assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
     assert "$rdist_exponential()" in messages
     assert "$rdist_poisson()" in messages
-    assert "$rdist_normal()" in messages
+    assert "$rdist_normal()" not in messages
     assert "$rdist_erlang()" in messages
     assert "seeded Spectre PRNG sequence parity is not certified" in messages
+
+
+def test_strict_spectre_allows_target_accepted_rdist_normal_and_gnd_warning():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module strict_random_gnd(gnd, out);
+            input gnd;
+            output out;
+            electrical gnd, out;
+            integer seed;
+            analog begin
+                seed = 17;
+                V(out, gnd) <+ $rdist_normal(seed, 0.0, 1.0);
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-AHDL-W5017" in _codes(strict_diags)
+    assert "$rdist_normal()" not in messages
+    assert not has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_allows_static_generate_genvar_elaboration():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module strict_generate(out);
+            output [1:0] out;
+            electrical [1:0] out;
+            genvar i;
+            generate for (i = 0; i < 2; i = i + 1) begin
+                analog begin
+                    V(out[i]) <+ 0.0;
+                end
+            end endgenerate
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "generate/genvar static elaboration" not in messages
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(strict_diags)
+    assert not has_compat_errors(strict_diags)
 
 
 def test_strict_spectre_rejects_integer_select_concat_parity_gaps():
@@ -1089,6 +1204,29 @@ def test_strict_spectre_allows_static_electrical_indexing():
     assert not has_compat_errors(strict_diags)
 
 
+def test_strict_spectre_does_not_treat_comment_or_string_backticks_as_macros():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module literal_backtick(out);
+            output out;
+            electrical out;
+            string message;
+            analog begin
+                // `not_a_macro
+                message = "`also_not_a_macro";
+                V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diagnostics = lint_source(source, strict_spectre=True)
+
+    assert not any(
+        "unexpanded Verilog-A macro" in diagnostic.message
+        for diagnostic in diagnostics
+    )
+
+
 def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     va_file = tmp_path / "model.va"
     va_file.write_text(textwrap.dedent("""\
@@ -1112,6 +1250,23 @@ def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     diags = lint_file(scs_file)
 
     assert {"EVAS-AHDL-W5004", "EVAS-AHDL-W5005"} <= _codes(diags)
+
+
+def test_lint_spectre_netlist_does_not_fallback_to_include_basename(tmp_path):
+    (tmp_path / "model.va").write_text(
+        "module model(out); output out; electrical out; endmodule\n",
+        encoding="utf-8",
+    )
+    scs_file = tmp_path / "tb.scs"
+    scs_file.write_text(
+        'simulator lang=spectre\nahdl_include "missing/model.va"\n',
+        encoding="utf-8",
+    )
+
+    diags = lint_file(scs_file)
+
+    assert "EVAS-COMP-EINCLUDE" in _codes(diags)
+    assert any("missing/model.va" in diag.message for diag in diags)
 
 
 def test_lint_cli_json_exits_nonzero_on_compat_error(tmp_path, monkeypatch, capsys):
@@ -1145,8 +1300,10 @@ def test_lint_cli_json_spectre_strict_exits_nonzero(tmp_path, monkeypatch, capsy
     va_file = tmp_path / "ams_bridge.va"
     va_file.write_text(textwrap.dedent("""\
         module ams_bridge(clk, y);
-            input logic clk;
-            output wreal y;
+            input clk;
+            logic clk;
+            output y;
+            wreal y;
             assign y = clk;
             always @(posedge clk) y = 1;
         endmodule

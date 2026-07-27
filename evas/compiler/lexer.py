@@ -16,6 +16,7 @@ class TokenType(Enum):
     BEGIN = auto()
     END = auto()
     PARAMETER = auto()
+    LOCALPARAM = auto()
     REAL = auto()
     INTEGER = auto()
     GENVAR = auto()
@@ -44,6 +45,7 @@ class TokenType(Enum):
     TASK = auto()
     ENDTASK = auto()
     OR = auto()
+    EXCLUDE = auto()
 
     # Literals
     NUMBER = auto()
@@ -108,6 +110,7 @@ KEYWORDS = {
     'begin': TokenType.BEGIN,
     'end': TokenType.END,
     'parameter': TokenType.PARAMETER,
+    'localparam': TokenType.LOCALPARAM,
     'real': TokenType.REAL,
     'integer': TokenType.INTEGER,
     'genvar': TokenType.GENVAR,
@@ -136,6 +139,7 @@ KEYWORDS = {
     'task': TokenType.TASK,
     'endtask': TokenType.ENDTASK,
     'or': TokenType.OR,
+    'exclude': TokenType.EXCLUDE,
 }
 
 # SI suffixes for numbers
