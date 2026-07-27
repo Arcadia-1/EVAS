@@ -357,6 +357,67 @@ endmodule
     assert result.signals["pulse_out"][-1] == pytest.approx(1.0, abs=1e-12)
 
 
+def test_retriggered_cross_reschedules_standalone_dynamic_timer() -> None:
+    """Family 108: a separate cross update extends the public pulse."""
+
+    _build_rust_core_or_skip()
+    src = """\
+`include "disciplines.vams"
+module retriggerable_pulse(sigin, sigout);
+    input voltage sigin;
+    output voltage sigout;
+    real level;
+    real pulse_end;
+    analog begin
+        @(initial_step) begin
+            level = 0.0;
+            pulse_end = 0.0;
+        end
+        @(cross(V(sigin) - 0.45, 0)) begin
+            level = 0.9;
+            pulse_end = $abstime + 4n;
+        end
+        @(timer(pulse_end))
+            level = 0.0;
+        V(sigout) <+ transition(level, 1n, 20p, 20p);
+    end
+endmodule
+"""
+    model_cls = compile_module(parse(src))
+    model = model_cls()
+    model.node_map = {"sigin": "sigin", "sigout": "sigout"}
+
+    sim = Simulator()
+    sim.add_source(
+        "sigin",
+        pwl(
+            [0.0, 0.9e-9, 1.1e-9, 2.9e-9, 3.1e-9, 9e-9],
+            [0.0, 0.0, 0.9, 0.9, 0.0, 0.0],
+        ),
+    )
+    sim.add_model(model)
+    sim.record("sigout")
+
+    result = sim.run(
+        tstop=9e-9,
+        tstep=500e-12,
+        record_step=100e-12,
+        max_step=500e-12,
+        rust_full_model_fastpath=True,
+        rust_full_model_required=True,
+        rust_required=True,
+        skip_source_error_control=True,
+    )
+
+    assert sim._perf_stats["rust_sim_program_enabled"] == 1
+    held_high = result.signals["sigout"][
+        (result.time >= 6.2e-9) & (result.time <= 7.7e-9)
+    ]
+    settled_low = result.signals["sigout"][result.time >= 8.2e-9]
+    assert held_high.min() > 0.8
+    assert settled_low.max() < 0.1
+
+
 def test_dynamic_absolute_timer_past_target_disarms_after_fire() -> None:
     _build_rust_core_or_skip()
     src = """\

@@ -1546,11 +1546,33 @@ fn rust_sim_execute_cross_event_body(
     bound_step_limit: &mut f64,
     file_io: Option<&mut RustFileIoRuntime<'_>>,
     side_effect_log: Option<&mut RustSideEffectLog<'_>>,
-) -> Result<(), i32> {
+) -> Result<bool, i32> {
     if candidate.event_idx >= events.len() {
         return Err(-972);
     }
     let event = &events[candidate.event_idx];
+    if event.kind == RUST_SIM_EVENT_CROSS
+        && candidate.trigger_direction != 0
+        && !candidate.went_beyond
+        && event.expr_count > 0
+    {
+        let post_time = time + 1.0e-18_f64.max(time.abs() * f64::EPSILON * 8.0);
+        let mut post_nodes = node_values.to_vec();
+        rust_sim_write_sources(sources, source_data, &mut post_nodes, post_time)?;
+        let post_expr = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            event.expr_start,
+            event.expr_count,
+            &post_nodes,
+            state_values,
+            param_values,
+            post_time,
+            0.0,
+        )?;
+        if (candidate.trigger_direction as f64) * post_expr <= 1.0e-18 {
+            return Ok(false);
+        }
+    }
     let mut restored_nodes: Vec<(usize, f64)> = Vec::new();
     if event.kind == RUST_SIM_EVENT_CROSS {
         let eps = 1.0e-18;
@@ -1667,7 +1689,7 @@ fn rust_sim_execute_cross_event_body(
             node_values[idx] = value;
         }
     }
-    result
+    result.map(|_| true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3415,7 +3437,7 @@ fn rust_sim_record_transition_breakpoints_until(
                     transition_fall_times.copy_from_slice(&saved_fall_times);
                     transition_active_flags.copy_from_slice(&saved_active_flags);
                 }
-                rust_sim_execute_cross_event_body(
+                let executed = rust_sim_execute_cross_event_body(
                     sources,
                     source_data,
                     events,
@@ -3431,6 +3453,9 @@ fn rust_sim_record_transition_breakpoints_until(
                     file_io.as_deref_mut(),
                     Some(&mut *side_effect_log),
                 )?;
+                if !executed {
+                    continue;
+                }
                 evaluate_static_linear_ops(
                     linear_ops,
                     linear_terms,
@@ -3747,7 +3772,7 @@ fn rust_sim_execute_ordered_cross_events(
         let before_rise_times = transition_rise_times.to_vec();
         let before_fall_times = transition_fall_times.to_vec();
         let before_active_flags = transition_active_flags.to_vec();
-        rust_sim_execute_cross_event_body(
+        let executed = rust_sim_execute_cross_event_body(
             sources,
             source_data,
             events,
@@ -3763,6 +3788,9 @@ fn rust_sim_execute_ordered_cross_events(
             file_io.as_deref_mut(),
             Some(&mut *side_effect_log),
         )?;
+        if !executed {
+            continue;
+        }
         let refresh_time = if events[candidate.event_idx].kind == RUST_SIM_EVENT_CROSS {
             event_time + eps.max(event_time.abs() * f64::EPSILON * 8.0)
         } else {

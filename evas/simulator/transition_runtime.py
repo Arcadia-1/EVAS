@@ -21,6 +21,7 @@ from evas.simulator.expr_ir import (
     FunctionCallIR,
     IdentifierIR,
     LiteralIR,
+    TernaryExprIR,
     UnaryExprIR,
     encode_body_expr_ops,
     static_node_ref_name,
@@ -29,6 +30,7 @@ from evas.simulator.rust_backend import RustBackend
 from evas.simulator.stmt_ir import (
     AssignmentIR,
     BlockIR,
+    CaseStatementIR,
     ContributionIR,
     EventStatementIR,
     ForStatementIR,
@@ -280,6 +282,16 @@ def _append_transition_contribution_specs(
     if isinstance(stmt_ir, EventStatementIR):
         return True
 
+    if isinstance(stmt_ir, CaseStatementIR):
+        return _append_dense_case_transition_specs(
+            stmt_ir,
+            bindings,
+            node_slots,
+            output_slots,
+            reference_slots,
+            expr_segments,
+        )
+
     if isinstance(stmt_ir, ForStatementIR):
         unrolled = unroll_static_for_statement(stmt_ir)
         if unrolled is None:
@@ -329,6 +341,125 @@ def _append_transition_contribution_specs(
     reference_slots.append(reference_slot)
     expr_segments.extend(encoded_segments)
     return True
+
+
+def _append_dense_case_transition_specs(
+    stmt_ir: CaseStatementIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    output_slots: list[int],
+    reference_slots: list[Optional[int]],
+    expr_segments: list[Tuple[BodyExprOp, ...]],
+) -> bool:
+    """Encode an enumerated case as one conditional transition per output.
+
+    The no-default form is accepted only for dense integer labels starting at
+    zero, which is the targeted enumerated state-machine shape.  The final
+    label supplies the fallback arm of the expression-level select.
+    """
+
+    branches: list[
+        tuple[
+            Optional[object],
+            list[tuple[int, Optional[int], tuple[object, ...]]],
+        ]
+    ] = []
+    dense_values: list[int] = []
+    default_seen = False
+    for item in stmt_ir.items:
+        specs = _direct_transition_specs(item.body, node_slots)
+        if specs is None or not specs:
+            return False
+        if not item.values:
+            if default_seen:
+                return False
+            default_seen = True
+            branches.append((None, specs))
+            continue
+        cond = None
+        for value in item.values:
+            if not isinstance(value, LiteralIR) or isinstance(value.value, bool):
+                return False
+            numeric = float(value.value)
+            integer = int(numeric)
+            if numeric != float(integer):
+                return False
+            dense_values.append(integer)
+            equal = BinaryExprIR("==", stmt_ir.expr, value)
+            cond = equal if cond is None else BinaryExprIR("||", cond, equal)
+        branches.append((cond, specs))
+
+    if not branches:
+        return False
+    if not default_seen:
+        if sorted(dense_values) != list(range(len(dense_values))):
+            return False
+        fallback_cond, fallback_specs = branches.pop()
+        if fallback_cond is None:
+            return False
+    else:
+        defaults = [specs for cond, specs in branches if cond is None]
+        if len(defaults) != 1:
+            return False
+        fallback_specs = defaults[0]
+        branches = [(cond, specs) for cond, specs in branches if cond is not None]
+
+    fallback_by_target = {
+        (output, reference): args for output, reference, args in fallback_specs
+    }
+    ordered_targets = [
+        (output, reference) for output, reference, _args in fallback_specs
+    ]
+    if len(fallback_by_target) != len(fallback_specs):
+        return False
+
+    branch_maps = []
+    for cond, specs in branches:
+        if cond is None:
+            return False
+        by_target = {(output, reference): args for output, reference, args in specs}
+        if len(by_target) != len(specs) or set(by_target) != set(fallback_by_target):
+            return False
+        branch_maps.append((cond, by_target))
+
+    for output, reference in ordered_targets:
+        selected = list(fallback_by_target[(output, reference)])
+        for cond, by_target in reversed(branch_maps):
+            selected = [
+                TernaryExprIR(cond, true_expr, false_expr)
+                for true_expr, false_expr in zip(by_target[(output, reference)], selected)
+            ]
+        encoded_segments = []
+        for expr in selected:
+            encoded = encode_body_expr_ops(expr, bindings, node_slots)
+            if encoded is None:
+                return False
+            encoded_segments.append(encoded)
+        output_slots.append(output)
+        reference_slots.append(reference)
+        expr_segments.extend(encoded_segments)
+    return True
+
+
+def _direct_transition_specs(
+    stmt_ir: StmtIR,
+    node_slots: dict[str, int],
+) -> Optional[list[tuple[int, Optional[int], tuple[object, ...]]]]:
+    if isinstance(stmt_ir, BlockIR):
+        specs = []
+        for child in stmt_ir.statements:
+            child_specs = _direct_transition_specs(child, node_slots)
+            if child_specs is None:
+                return None
+            specs.extend(child_specs)
+        return specs
+    if not isinstance(stmt_ir, ContributionIR):
+        return None
+    target = _encode_transition_contribution_target(stmt_ir.branch, node_slots)
+    args = _transition_call_args(stmt_ir.expr)
+    if target is None or args is None:
+        return None
+    return [(target[0], target[1], args)]
 
 
 def _transition_temp_assignment_name(stmt_ir: object) -> Optional[str]:

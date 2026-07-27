@@ -32,7 +32,7 @@ from evas.compiler.parser import (
     parse_all as parse_all_va,
 )
 from evas.compiler.preprocessor import preprocess
-from evas.simulator.backend import compile_module
+from evas.simulator.backend import compile_module, transition_case_shape_error
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine, square
 from evas.simulator.indexed import (
     build_indexed_run_plan,
@@ -634,7 +634,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         if conditional_depth > 0 and _expr_has_call(stmt.expr, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() contribution "
-                "is inside a conditional/event/loop/case statement"
+                "is inside a conditional/event/loop statement"
             )
         _validate_supported_function_calls(stmt.expr, user_function_names)
         return
@@ -647,7 +647,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         if conditional_depth > 0 and _expr_has_call(stmt.value, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() expression "
-                "is inside a conditional/event/loop/case statement"
+                "is inside a conditional/event/loop statement"
             )
         _validate_supported_function_calls(stmt.target, user_function_names)
         _validate_supported_function_calls(stmt.value, user_function_names)
@@ -702,7 +702,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         for item in stmt.items:
             for value in item.values:
                 _validate_supported_function_calls(value, user_function_names)
-            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names, in_event, user_function_names)
+            _validate_transition_statement(item.body, conditional_depth, genvar_names, in_event, user_function_names)
 
 
 def _contains_branch_access(value) -> bool:
@@ -1036,6 +1036,11 @@ def _validate_va_spectre_compat(module) -> None:
                 "discipline declarations in a non-ANSI module body"
             )
     if module.analog_block is not None:
+        case_error = transition_case_shape_error(module)
+        if case_error is not None:
+            raise ValueError(
+                "Unsupported case-selected transition() semantics: " + case_error
+            )
         genvar_names = {
             v.name for v in module.variables if getattr(v, "is_genvar", False)
         }

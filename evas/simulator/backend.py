@@ -52,6 +52,243 @@ class CompilationError(Exception):
     pass
 
 
+def transition_case_shape_error(module: Module) -> Optional[str]:
+    """Return why a case-selected transition cannot use the Rust fast path.
+
+    This deliberately recognizes only the enumerated-state-machine pattern
+    implemented by ``transition_runtime``.  In particular, a no-default case
+    must prove that every write keeps its integer selector inside the dense
+    case-label domain.
+    """
+
+    if module.analog_block is None:
+        return None
+    integer_scalars = {
+        decl.name
+        for decl in module.variables
+        if decl.var_type == ParamType.INTEGER and not decl.is_array
+    }
+    assignments: Dict[str, List[Tuple[Expr, bool]]] = {}
+    task_calls: set[str] = set()
+
+    def collect(
+        stmt,
+        *,
+        in_initial_step: bool = False,
+        guaranteed_initial: bool = False,
+    ) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                collect(
+                    child,
+                    in_initial_step=in_initial_step,
+                    guaranteed_initial=guaranteed_initial,
+                )
+            return
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, Identifier):
+                assignments.setdefault(stmt.target.name, []).append(
+                    (stmt.value, in_initial_step and guaranteed_initial)
+                )
+            return
+        if isinstance(stmt, EventStatement):
+            initial = (
+                isinstance(stmt.event, EventExpr)
+                and stmt.event.event_type == EventType.INITIAL_STEP
+            )
+            collect(
+                stmt.body,
+                in_initial_step=initial,
+                guaranteed_initial=initial,
+            )
+            return
+        if isinstance(stmt, IfStatement):
+            collect(stmt.then_body, in_initial_step=in_initial_step)
+            collect(stmt.else_body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, ForStatement):
+            collect(stmt.init, in_initial_step=in_initial_step)
+            collect(stmt.update, in_initial_step=in_initial_step)
+            collect(stmt.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, WhileStatement):
+            collect(stmt.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                collect(item.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, TaskCall):
+            task_calls.add(stmt.name)
+
+    collect(module.analog_block.body)
+
+    def expr_has_transition(expr) -> bool:
+        if isinstance(expr, FunctionCall):
+            return expr.name == "transition" or any(
+                expr_has_transition(arg) for arg in expr.args
+            )
+        if isinstance(expr, BinaryExpr):
+            return expr_has_transition(expr.left) or expr_has_transition(expr.right)
+        if isinstance(expr, UnaryExpr):
+            return expr_has_transition(expr.operand)
+        if isinstance(expr, TernaryExpr):
+            return (
+                expr_has_transition(expr.cond)
+                or expr_has_transition(expr.true_expr)
+                or expr_has_transition(expr.false_expr)
+            )
+        return False
+
+    def direct_transition_targets(stmt) -> Optional[Tuple[tuple, ...]]:
+        if isinstance(stmt, Block):
+            targets: List[tuple] = []
+            for child in stmt.statements:
+                child_targets = direct_transition_targets(child)
+                if child_targets is None:
+                    return None
+                targets.extend(child_targets)
+            return tuple(targets)
+        if not isinstance(stmt, Contribution) or not expr_has_transition(stmt.expr):
+            return None
+        branch = stmt.branch
+        if branch.access_type != "V" or any(
+            index is not None
+            for index in (
+                branch.node1_index,
+                branch.node2_index,
+                branch.node1_index2,
+                branch.node2_index2,
+            )
+        ):
+            return None
+        return ((branch.node1, branch.node2),)
+
+    def stmt_has_transition(stmt) -> bool:
+        if stmt is None:
+            return False
+        if isinstance(stmt, Contribution):
+            return expr_has_transition(stmt.expr)
+        if isinstance(stmt, Assignment):
+            return expr_has_transition(stmt.value)
+        if isinstance(stmt, Block):
+            return any(stmt_has_transition(child) for child in stmt.statements)
+        if isinstance(stmt, EventStatement):
+            return stmt_has_transition(stmt.body)
+        if isinstance(stmt, IfStatement):
+            return stmt_has_transition(stmt.then_body) or stmt_has_transition(
+                stmt.else_body
+            )
+        if isinstance(stmt, (ForStatement, WhileStatement)):
+            return stmt_has_transition(stmt.body)
+        if isinstance(stmt, CaseStatement):
+            return any(stmt_has_transition(item.body) for item in stmt.items)
+        return False
+
+    def literal_int(expr) -> Optional[int]:
+        if not isinstance(expr, NumberLiteral):
+            return None
+        value = float(expr.value)
+        integer = int(value)
+        return integer if value == float(integer) else None
+
+    def bounded_write(expr, selector: str, size: int) -> bool:
+        literal = literal_int(expr)
+        if literal is not None:
+            return 0 <= literal < size
+        if not isinstance(expr, BinaryExpr) or expr.op != "%":
+            return False
+        if literal_int(expr.right) != size:
+            return False
+        left = expr.left
+        if isinstance(left, Identifier):
+            return left.name == selector
+        if not isinstance(left, BinaryExpr) or left.op != "+":
+            return False
+        operands = (left.left, left.right)
+        selector_count = sum(
+            isinstance(part, Identifier) and part.name == selector for part in operands
+        )
+        increments = [literal_int(part) for part in operands if isinstance(part, NumberLiteral)]
+        return (
+            selector_count == 1
+            and len(increments) == 1
+            and increments[0] is not None
+            and increments[0] >= 0
+        )
+
+    def check_case(stmt: CaseStatement) -> Optional[str]:
+        contains_transition = any(stmt_has_transition(item.body) for item in stmt.items)
+        if not contains_transition:
+            return None
+        if not isinstance(stmt.expr, Identifier) or stmt.expr.name not in integer_scalars:
+            return "case-selected transition requires an integer scalar selector"
+        selector = stmt.expr.name
+        values: List[int] = []
+        default_count = 0
+        expected_targets: Optional[set] = None
+        for item in stmt.items:
+            targets = direct_transition_targets(item.body)
+            if targets is None or not targets or len(set(targets)) != len(targets):
+                return "each transition case arm must directly drive one identical output set"
+            target_set = set(targets)
+            if expected_targets is None:
+                expected_targets = target_set
+            elif target_set != expected_targets:
+                return "each transition case arm must directly drive one identical output set"
+            if not item.values:
+                default_count += 1
+                continue
+            if len(item.values) != 1:
+                return "transition case arms require one integer label each"
+            value = literal_int(item.values[0])
+            if value is None:
+                return "transition case labels must be integer literals"
+            values.append(value)
+        if default_count > 1 or len(set(values)) != len(values):
+            return "transition case labels/default must be unique"
+        if default_count == 0:
+            if sorted(values) != list(range(len(values))):
+                return "no-default transition case requires dense labels starting at zero"
+            writes = assignments.get(selector, [])
+            if task_calls or not writes or not any(initial for _expr, initial in writes):
+                return "no-default transition case requires a proven initial selector write"
+            if not all(bounded_write(expr, selector, len(values)) for expr, _ in writes):
+                return "no-default transition case selector writes must remain inside its label domain"
+        return None
+
+    def walk_cases(stmt) -> Optional[str]:
+        if stmt is None:
+            return None
+        if isinstance(stmt, CaseStatement):
+            error = check_case(stmt)
+            if error is not None:
+                return error
+            for item in stmt.items:
+                error = walk_cases(item.body)
+                if error is not None:
+                    return error
+            return None
+        children = []
+        if isinstance(stmt, Block):
+            children = stmt.statements
+        elif isinstance(stmt, EventStatement):
+            children = [stmt.body]
+        elif isinstance(stmt, IfStatement):
+            children = [stmt.then_body, stmt.else_body]
+        elif isinstance(stmt, (ForStatement, WhileStatement)):
+            children = [stmt.body]
+        for child in children:
+            error = walk_cases(child)
+            if error is not None:
+                return error
+        return None
+
+    return walk_cases(module.analog_block.body)
+
+
 _RANDOM_DISTRIBUTION_FUNCTIONS = frozenset(
     {
         "$dist_chi_square",
@@ -7107,6 +7344,12 @@ class _ModuleCompiler:
         """Reject patterns that Spectre VACOMP does not allow."""
         if not self.module.analog_block:
             return
+        case_error = transition_case_shape_error(self.module)
+        if case_error is not None:
+            raise CompilationError(
+                f"Module {self.module.name} has unsupported case-selected "
+                f"transition() semantics: {case_error}."
+            )
         self._event_assigned_vars = set()
         self._non_event_assigned_vars = set()
         self._collect_assignment_contexts(self.module.analog_block.body, in_event=False)
@@ -7147,7 +7390,7 @@ class _ModuleCompiler:
             for item in stmt.items:
                 self._check_stmt_for_restricted_operators(
                     item.body,
-                    conditional_depth + 1,
+                    conditional_depth,
                     in_event,
                 )
             return
@@ -11095,8 +11338,10 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, CaseStatement):
-            for item in stmt.items:
-                self._collect_transition_target_ir_ops_from_stmt(item.body, ops)
+            # This legacy metadata has no selector/guard representation.
+            # Flattening case arms therefore invents simultaneously-active
+            # transition targets.  The full Rust program lowers supported
+            # cases from the statement IR instead.
             return
 
         if isinstance(stmt, EventStatement):

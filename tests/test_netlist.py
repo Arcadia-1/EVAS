@@ -3411,6 +3411,36 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         assert "transition()" in log_path.read_text()
 
+    def test_transition_in_event_latched_case_is_allowed(self):
+        """Spectre accepts case-selected contributions outside runtime loops."""
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        module = parse(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module case_transition(out0, out1);
+                output out0, out1;
+                electrical out0, out1;
+                integer state;
+                analog begin
+                    @(initial_step) state = 0;
+                    case (state)
+                        0: begin
+                            V(out0) <+ transition(1.0, 0, 1n);
+                            V(out1) <+ transition(0.0, 0, 1n);
+                        end
+                        1: begin
+                            V(out0) <+ transition(0.0, 0, 1n);
+                            V(out1) <+ transition(1.0, 0, 1n);
+                        end
+                    endcase
+                end
+            endmodule
+        """))
+
+        netlist_runner._validate_transition_statement(module.analog_block.body)
+        compile_module(module)
+
     def test_transition_in_if_branch_fails(self, tmp_path):
         va_file = tmp_path / "bad_transition_if.va"
         va_file.write_text(textwrap.dedent("""\
