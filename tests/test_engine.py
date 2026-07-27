@@ -3001,6 +3001,13 @@ endmodule
                 continue
             out_p = float(result.signals["OUTP"][index])
             out_n = float(result.signals["OUTN"][index])
+            in_transition = any(
+                edge_time < t < edge_time + 50e-12
+                for edge_time in (30e-9, 70e-9)
+            )
+            if in_transition:
+                assert out_p + out_n == pytest.approx(1.0, abs=1e-12)
+                continue
             out_p_high = out_p > 0.5
             out_n_high = out_n > 0.5
             if out_p_high == out_n_high:

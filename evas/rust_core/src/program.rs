@@ -1124,6 +1124,33 @@ fn rust_sim_expr_segment_reads_time_and_state(
     Ok(false)
 }
 
+fn rust_sim_expr_segment_has_known_post_driver(
+    sources: &[EvasRustSimSourceSpec],
+    transitions: &[EvasRustSimTransitionSpec],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    start: usize,
+    count: usize,
+) -> Result<bool, i32> {
+    let end = start.checked_add(count).ok_or(-967)?;
+    if end > body_expr_ops.len() {
+        return Err(-968);
+    }
+    for op in &body_expr_ops[start..end] {
+        if op.op_kind == BODY_EXPR_READ_TIME {
+            return Ok(true);
+        }
+        if op.op_kind == BODY_EXPR_READ_NODE
+            && (sources.iter().any(|source| source.node_id == op.index)
+                || transitions
+                    .iter()
+                    .any(|transition| transition.output_node_id == op.index))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_collect_cross_events_into(
     sources: &[EvasRustSimSourceSpec],
@@ -1234,7 +1261,15 @@ pub(crate) fn rust_sim_collect_cross_events_into(
             expr_tol,
         )?;
         if !initial_condition_mode && triggered[0] != 0 && cross_times[0].is_finite() {
-            if went_beyond[0] == 0 {
+            if went_beyond[0] == 0
+                && rust_sim_expr_segment_has_known_post_driver(
+                    sources,
+                    transitions,
+                    body_expr_ops,
+                    event.expr_start,
+                    event.expr_count,
+                )?
+            {
                 let post_time = time + 1.0e-18_f64.max(time.abs() * f64::EPSILON * 8.0);
                 let mut post_nodes = node_values.to_vec();
                 rust_sim_write_sources(sources, source_data, &mut post_nodes, post_time)?;
