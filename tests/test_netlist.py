@@ -232,16 +232,22 @@ class TestExtractNodes:
             _extract_nodes("ramp_gen dut (clk rst code_0) param=1")
 
 
-def test_source_without_parenthesized_terminals_fails_loudly(tmp_path):
-    netlist = tmp_path / "missing_source_parentheses.scs"
+def test_source_without_parenthesized_terminals_matches_spectre(tmp_path):
+    netlist = tmp_path / "bare_source_terminals.scs"
     netlist.write_text(
         "Vstim in 0 vsource type=pwl wave=[0 0 1n 0.9]\n"
         "tran tran stop=2n\n"
         "save in\n"
     )
 
-    with pytest.raises(ValueError, match="requires a parenthesized terminal list"):
-        parse_spectre(str(netlist))
+    source = parse_spectre(str(netlist)).sources[0]
+
+    assert (source.name, source.node_pos, source.node_neg, source.kind) == (
+        "Vstim",
+        "in",
+        "0",
+        "voltage",
+    )
 
 
 # ===========================================================================
@@ -391,13 +397,11 @@ class TestAhdlIncludePathFallback:
     """)
 
     def test_fallback_to_filename_in_scs_dir(self, tmp_path, capsys):
-        """If ahdl_include has an absolute path that doesn't exist, EVAS should
-        fall back to the bare filename in the same directory as the .scs file."""
+        """The legacy runner fallback remains until the compile-gate PR."""
         va_file = tmp_path / "veriloga.va"
         va_file.write_text(self.VA_SRC)
 
         scs_content = textwrap.dedent("""\
-            `include "disciplines.vams"
             V1 (out 0) vsource dc=0 type=dc
             I1 (out) dummy
             tran tran stop=10n
@@ -408,6 +412,7 @@ class TestAhdlIncludePathFallback:
 
         from evas.netlist.runner import evas_simulate
         ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+
         assert ok, "evas_simulate should succeed via filename fallback"
 
     def test_relative_path_still_works(self, tmp_path):
@@ -1586,17 +1591,18 @@ class TestNetlistRegressions:
 
         assert header == ["time", "en", "aout"]
 
-    def test_implicit_multiline_pwl_wave_is_rejected(self, tmp_path):
+    def test_plus_continued_multiline_pwl_wave_matches_spectre(self, tmp_path):
         scs = tmp_path / "tb_multiline_pwl.scs"
         scs.write_text(textwrap.dedent("""\
             VIN (vin_i 0) vsource type=pwl wave=[
-                0      0.0
-                20.48u 1.0
-            ]
+            + 0      0.0
+            + 20.48u 1.0 ; Spectre inline comment
+            +]
         """))
 
-        with pytest.raises(ValueError, match="multiline wave=\\[\\.\\.\\.\\] requires backslash"):
-            parse_spectre(str(scs))
+        source = parse_spectre(str(scs)).sources[0]
+
+        assert source.params["wave"] == pytest.approx([0.0, 0.0, 20.48e-6, 1.0])
 
 
 class TestCsvWriter:
@@ -2638,8 +2644,7 @@ class TestEvasProfileMapping:
             output_dir=str(tmp_path / "out"),
         )
         assert ok is False
-        assert "ERROR: Failed to parse" in log_path.read_text()
-        assert "multiline wave=[...] requires backslash" in log_path.read_text()
+        assert "PWL wave must contain at least one time/value pair" in log_path.read_text()
 
 
 class TestSpectreCompatibilityPreflight:
