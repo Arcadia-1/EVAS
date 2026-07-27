@@ -20,6 +20,7 @@ from evas.simulator.expr_ir import (
     lower_expr,
 )
 from evas.simulator.rust_backend import (
+    BODY_EXPR_CONST,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_STATE,
     BodyExprOp,
@@ -117,6 +118,8 @@ def encode_event_due_program(
     event_ir: EventIR,
     bindings: BindingTableIR,
     node_slots: Mapping[str, int],
+    *,
+    constant_state_values: Optional[Mapping[int, float]] = None,
 ) -> Optional[EventDueProgram]:
     """Encode trigger expressions for Rust-side due/order staging.
 
@@ -129,8 +132,9 @@ def encode_event_due_program(
       state-owned absolute timer targets.
     - ``timer(start, 0)`` as the absolute-time form accepted by Spectre, where
       ``start`` may read runtime state.
-    - static ``timer(start, period)`` where positive periodic timer expressions
-      do not read node or state values.
+    - ``timer(start, period)`` where positive periodic timer expressions may
+      read parameters or mutable scalar state. Direct node reads remain
+      fail-closed until their breakpoint semantics are implemented.
     - ``final_step`` without arguments.
 
     The returned plan does not execute event bodies and does not decide global
@@ -139,7 +143,13 @@ def encode_event_due_program(
     """
 
     triggers: list[EventDueTriggerProgram] = []
-    if not _append_event_due_program(event_ir, bindings, node_slots, triggers):
+    if not _append_event_due_program(
+        event_ir,
+        bindings,
+        node_slots,
+        triggers,
+        constant_state_values=constant_state_values or {},
+    ):
         return None
     return EventDueProgram(tuple(triggers))
 
@@ -188,10 +198,18 @@ def _append_event_due_program(
     bindings: BindingTableIR,
     node_slots: Mapping[str, int],
     triggers: list[EventDueTriggerProgram],
+    *,
+    constant_state_values: Mapping[int, float],
 ) -> bool:
     if isinstance(event_ir, CombinedEventIR):
         for child in event_ir.events:
-            if not _append_event_due_program(child, bindings, node_slots, triggers):
+            if not _append_event_due_program(
+                child,
+                bindings,
+                node_slots,
+                triggers,
+                constant_state_values=constant_state_values,
+            ):
                 return False
         return True
 
@@ -253,10 +271,20 @@ def _append_event_due_program(
             return False
         period_ops: Tuple[BodyExprOp, ...] = ()
         if len(event_ir.args) == 2 and not _is_zero_timer_period(event_ir.args[1]):
-            if not _is_static_timer_expr(start_ops):
+            start_ops = _fold_constant_state_reads(
+                start_ops,
+                constant_state_values,
+            )
+            if _timer_expr_reads_node(start_ops):
                 return False
             encoded_period = encode_body_expr_ops(event_ir.args[1], bindings, node_slots)
-            if encoded_period is None or not _is_static_timer_expr(encoded_period):
+            if encoded_period is None:
+                return False
+            encoded_period = _fold_constant_state_reads(
+                encoded_period,
+                constant_state_values,
+            )
+            if _timer_expr_reads_node(encoded_period):
                 return False
             period_ops = encoded_period
         triggers.append(
@@ -287,11 +315,26 @@ def _encode_optional_event_expr(
     return encode_body_expr_ops(expr_ir, bindings, node_slots)
 
 
-def _is_static_timer_expr(expr_ops: Tuple[BodyExprOp, ...]) -> bool:
-    for op in expr_ops:
-        if op.op_kind in {BODY_EXPR_READ_NODE, BODY_EXPR_READ_STATE}:
-            return False
-    return True
+def _timer_expr_reads_node(expr_ops: Tuple[BodyExprOp, ...]) -> bool:
+    return any(op.op_kind == BODY_EXPR_READ_NODE for op in expr_ops)
+
+
+def _fold_constant_state_reads(
+    expr_ops: Tuple[BodyExprOp, ...],
+    constant_state_values: Mapping[int, float],
+) -> Tuple[BodyExprOp, ...]:
+    if not constant_state_values:
+        return expr_ops
+    return tuple(
+        BodyExprOp(
+            BODY_EXPR_CONST,
+            value=float(constant_state_values[op.index]),
+        )
+        if op.op_kind == BODY_EXPR_READ_STATE
+        and op.index in constant_state_values
+        else op
+        for op in expr_ops
+    )
 
 
 def _is_zero_timer_period(expr_ir: ExprIR) -> bool:

@@ -661,6 +661,8 @@ def _iter_body_rejection_tags(
         return
 
     if isinstance(stmt_ir, ContributionIR):
+        if _is_static_zero_current_contribution(stmt_ir):
+            return
         if _encode_contribution_target(stmt_ir.branch, node_slots) is None:
             yield from _iter_contribution_target_tags(stmt_ir.branch, node_slots)
         if encode_body_expr_ops(stmt_ir.expr, bindings, node_slots) is None:
@@ -1358,10 +1360,14 @@ def _append_idtmod_assignment_stmt_ops(
         return False
     if not _has_adjacent_idtmod_hidden_slots(target_name, target_id, bindings):
         return False
-    if len(value.args) > 3:
+    if len(value.args) > 4:
         return False
 
     args = list(value.args)
+    if len(args) == 4:
+        reset_value = _static_numeric_expr_value(args.pop(), {})
+        if reset_value is None or float(reset_value) != 0.0:
+            return False
     if not args:
         args.append(LiteralIR(0.0))
     while len(args) < 3:
@@ -1528,7 +1534,10 @@ def _append_body_stmt_ops(
     expr_ops: list[BodyExprOp],
     *,
     side_effects: object | None = None,
+    voltage_targets_seen: set[int] | None = None,
 ) -> bool:
+    if voltage_targets_seen is None:
+        voltage_targets_seen = set()
     if isinstance(stmt_ir, BlockIR):
         for child in stmt_ir.statements:
             if not _append_body_stmt_ops(
@@ -1538,6 +1547,7 @@ def _append_body_stmt_ops(
                 stmt_ops,
                 expr_ops,
                 side_effects=side_effects,
+                voltage_targets_seen=voltage_targets_seen,
             ):
                 return False
         return True
@@ -1621,6 +1631,7 @@ def _append_body_stmt_ops(
                     stmt_ops,
                     expr_ops,
                     side_effects=side_effects,
+                    voltage_targets_seen=voltage_targets_seen,
                 )
             return False
         target_kind, target_id, target_integer = target
@@ -1655,10 +1666,23 @@ def _append_body_stmt_ops(
         )
 
     if isinstance(stmt_ir, ContributionIR):
+        if _is_static_zero_current_contribution(stmt_ir):
+            return True
         target_id = _encode_contribution_target(stmt_ir.branch, node_slots)
         if target_id is None:
             return False
-        expr = _contribution_expr_with_reference(stmt_ir.branch, stmt_ir.expr)
+        if stmt_ir.branch.access_type == "V":
+            if target_id in voltage_targets_seen:
+                expr = BinaryExprIR(
+                    "+",
+                    _contribution_target_voltage_expr(stmt_ir.branch),
+                    stmt_ir.expr,
+                )
+            else:
+                voltage_targets_seen.add(target_id)
+                expr = _contribution_expr_with_reference(stmt_ir.branch, stmt_ir.expr)
+        else:
+            expr = _contribution_expr_with_reference(stmt_ir.branch, stmt_ir.expr)
         return _append_body_write(
             BODY_TARGET_NODE,
             target_id,
@@ -1692,6 +1716,7 @@ def _append_body_stmt_ops(
             stmt_ops,
             expr_ops,
             side_effects=side_effects,
+            voltage_targets_seen=set(voltage_targets_seen),
         ):
             return False
         if stmt_ir.else_body is not None:
@@ -1711,6 +1736,7 @@ def _append_body_stmt_ops(
                 stmt_ops,
                 expr_ops,
                 side_effects=side_effects,
+                voltage_targets_seen=set(voltage_targets_seen),
             ):
                 return False
         stmt_ops.append(
@@ -1735,6 +1761,7 @@ def _append_body_stmt_ops(
             stmt_ops,
             expr_ops,
             side_effects=side_effects,
+            voltage_targets_seen=voltage_targets_seen,
         )
 
     if isinstance(stmt_ir, WhileStatementIR):
@@ -1759,6 +1786,7 @@ def _append_body_stmt_ops(
             stmt_ops,
             expr_ops,
             side_effects=side_effects,
+            voltage_targets_seen=voltage_targets_seen,
         ):
             return False
         stmt_ops.append(
@@ -1783,6 +1811,7 @@ def _append_body_stmt_ops(
             stmt_ops,
             expr_ops,
             side_effects=side_effects,
+            voltage_targets_seen=voltage_targets_seen,
         )
 
     if isinstance(stmt_ir, SystemTaskIR):
@@ -2633,6 +2662,8 @@ def _collect_body_write_specs(
         )
 
     if isinstance(stmt_ir, ContributionIR):
+        if _is_static_zero_current_contribution(stmt_ir):
+            return ()
         target_id = _encode_contribution_target(stmt_ir.branch, node_slots)
         if target_id is None:
             return None
@@ -2706,6 +2737,16 @@ def _contribution_expr_with_reference(
         node1_index2=branch.node2_index2,
     )
     return BinaryExprIR("+", reference, expr)
+
+
+def _contribution_target_voltage_expr(branch: BranchAccessIR) -> ExprIR:
+    return BranchAccessIR(
+        access_type="V",
+        node1=str(branch.node1),
+        node2=None,
+        node1_index=branch.node1_index,
+        node1_index2=branch.node1_index2,
+    )
 
 
 def _case_statement_to_if_chain(stmt_ir: CaseStatementIR) -> Optional[StmtIR]:
@@ -2887,6 +2928,21 @@ def _static_numeric_expr_value(expr_ir: ExprIR, env: dict[str, int]) -> Optional
         return _static_numeric_expr_value(branch, env)
 
     return None
+
+
+def _is_static_zero_current_contribution(stmt_ir: ContributionIR) -> bool:
+    """Return whether a current contribution is a provable no-op.
+
+    A zero current contribution is commonly used to declare an input terminal
+    high impedance. It has no simulation effect, so the direct Rust program can
+    safely omit it even when the one-terminal branch has no current-state slot.
+    Dynamic or nonzero current contributions remain unsupported.
+    """
+
+    return (
+        stmt_ir.branch.access_type == "I"
+        and _static_numeric_expr_value(stmt_ir.expr, {}) == 0.0
+    )
 
 
 def _stmt_writes_name(stmt_ir: StmtIR, name: str) -> bool:

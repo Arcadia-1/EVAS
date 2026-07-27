@@ -239,6 +239,39 @@ endmodule
     assert encode_event_due_program(stmt_ir.event, bindings, {"clk": 0}) is None
 
 
+def test_event_due_shadow_runtime_fails_closed_on_dynamic_periodic_timer():
+    _build_rust_core()
+    module = parse(
+        """\
+`include "disciplines.vams"
+module dynamic_periodic_timer_shadow();
+    real period = 2n;
+    integer q = 0;
+    analog begin
+        @(timer(1n, period)) begin
+            q = q + 1;
+            period = 1n;
+        end
+    end
+endmodule
+"""
+    )
+    stmt_ir = lower_stmt(module.analog_block.body.statements[0])
+    assert isinstance(stmt_ir, EventStatementIR)
+    bindings = build_state_binding_ir(module)
+    program = encode_event_due_program(stmt_ir.event, bindings, {})
+    assert isinstance(program, EventDueProgram)
+
+    backend = load_rust_backend(default_rust_core_library_path())
+    with pytest.raises(ValueError, match="dynamic periodic timer"):
+        RustEventDueRuntime(program, backend)
+    assert try_build_rust_event_only_analog_block_runtime(
+        module,
+        backend,
+        {},
+    ) is None
+
+
 def test_event_due_runtime_returns_fired_indices_in_source_order():
     _build_rust_core()
     module = parse(

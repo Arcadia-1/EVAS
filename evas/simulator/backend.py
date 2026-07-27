@@ -131,6 +131,7 @@ class CompiledModel:
     _has_post_update_events: bool = True
     _uses_bound_step: bool = True
     _transition_target_probe_count: int = 0
+    _cross_breakpoint_probe_count: int = 0
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
@@ -149,11 +150,18 @@ class CompiledModel:
         self._transition_pending_input: Optional[Dict[str, List]] = None
         self.slew_states: Dict[str, Dict[str, float]] = {}
         self.cross_detectors: Dict[str, CrossDetector] = {}
+        # Accepted event times deliberately live outside speculative analysis
+        # snapshots.  Adaptive refinement may restore detector state after an
+        # event body ran; this monotonic guard prevents that same physical
+        # crossing from executing the body a second time.
+        self._accepted_cross_times: Dict[str, float] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.digital_edge_states: Dict[str, int] = {}
         self.output_nodes: Dict[str, Any] = {}
         self._declared_branch_currents: Dict[str, float] = {}
         self._contributed_branch_currents: Dict[Tuple[str, str], float] = {}
+        self._voltage_contribution_nodes_active: set[str] = set()
+        self._source_waveforms: Dict[str, Callable[[float], float]] = {}
         self._output_nodes_version: int = 0
         self._analysis_mode: str = "tran"
         self._analysis_frequency: float = 0.0
@@ -476,6 +484,7 @@ class CompiledModel:
             "digital_edge_states": copy.deepcopy(self.digital_edge_states),
             "output_nodes": copy.deepcopy(self.output_nodes),
             "contributed_branch_currents": copy.deepcopy(self._contributed_branch_currents),
+            "voltage_contribution_nodes_active": copy.deepcopy(self._voltage_contribution_nodes_active),
             "output_nodes_version": self._output_nodes_version,
             "timer_states": copy.deepcopy(self.timer_states),
             "timer_last_fired": copy.deepcopy(self.timer_last_fired),
@@ -505,6 +514,7 @@ class CompiledModel:
         self.digital_edge_states = snapshot["digital_edge_states"]
         self.output_nodes = snapshot["output_nodes"]
         self._contributed_branch_currents = snapshot.get("contributed_branch_currents", {})
+        self._voltage_contribution_nodes_active = snapshot.get("voltage_contribution_nodes_active", set())
         self._output_nodes_version = snapshot["output_nodes_version"]
         self.timer_states = snapshot["timer_states"]
         self.timer_last_fired = snapshot["timer_last_fired"]
@@ -2115,13 +2125,27 @@ class CompiledModel:
             if param.param_type == ParamType.INTEGER:
                 value = self._to_integer(value)
             child.params[name] = value
+            child._given_params.add(name.lower())
             return
-        child.params[name] = value
+        # Spectre accepts unknown and localparam hierarchical overrides but
+        # does not bind them to the child model.  Keep the accepted syntax
+        # without creating a synthetic parameter that could affect EVAS-only
+        # behavior.
+        return
 
-    def _refresh_child_param_overrides(self) -> None:
+    def _refresh_parameter_defaults(self) -> None:
+        """Refresh non-overridden dependent parameters and localparams."""
+
+    def _refresh_child_param_overrides(
+        self,
+        *,
+        refresh_parameter_defaults: bool = False,
+    ) -> None:
         """Refresh descendant bindings after this model's params are finalized."""
+        if refresh_parameter_defaults:
+            self._refresh_parameter_defaults()
         for child in self._child_models:
-            child._refresh_child_param_overrides()
+            child._refresh_child_param_overrides(refresh_parameter_defaults=True)
 
     def _resolve_external_node_uncached(self, node: str) -> str:
         """Resolve a local model node through node_map and one parent indirection."""
@@ -2289,6 +2313,14 @@ class CompiledModel:
         )
         self._uses_bound_step_tree_cache = cached
         return cached
+
+    def _set_source_waveforms_tree(
+        self,
+        source_waveforms: Dict[str, Callable[[float], float]],
+    ) -> None:
+        self._source_waveforms = source_waveforms
+        for child in self._child_models:
+            child._set_source_waveforms_tree(source_waveforms)
 
     def next_breakpoint(self, time: float) -> Optional[float]:
         best: Optional[float] = None
@@ -2469,6 +2501,13 @@ class CompiledModel:
     ) -> Tuple[float, ...]:
         return ()
 
+    def _cross_breakpoint_probe_values(
+        self,
+        nv: Dict[str, float],
+        time: float,
+    ) -> Tuple[Tuple[float, int, float], ...]:
+        return ()
+
     def transition_target_breakpoint(
         self,
         nv: Dict[str, float],
@@ -2487,12 +2526,113 @@ class CompiledModel:
         if dt <= 0.0:
             return None
 
-        best = self._transition_target_breakpoint_local(nv, time, dt)
+        best = self._cross_breakpoint_local(nv, time, dt)
+        target_bp = self._transition_target_breakpoint_local(nv, time, dt)
+        if target_bp is not None and target_bp > time and target_bp < time + dt:
+            if best is None or target_bp < best:
+                best = target_bp
         for child in self._child_models:
             bp = child.transition_target_breakpoint(nv, time, dt)
             if bp is not None and bp > time and bp < time + dt:
                 if best is None or bp < best:
                     best = bp
+        return best
+
+    def _has_cross_breakpoint_probes_tree(self) -> bool:
+        own = int(getattr(self.__class__, "_cross_breakpoint_probe_count", 0)) > 0
+        return own or any(
+            child._has_cross_breakpoint_probes_tree()
+            for child in self._child_models
+        )
+
+    def _cross_breakpoint_local(
+        self,
+        nv: Dict[str, float],
+        time: float,
+        dt: float,
+    ) -> Optional[float]:
+        if int(getattr(self.__class__, "_cross_breakpoint_probe_count", 0)) <= 0:
+            return None
+        horizon = time + dt
+        if dt <= 0.0 or horizon <= time:
+            return None
+
+        def probe_nv_at(probe_time: float) -> Dict[str, float]:
+            if not self._source_waveforms:
+                return nv
+            probe_nv = dict(nv)
+            for node, waveform in self._source_waveforms.items():
+                try:
+                    probe_nv[node] = float(waveform(probe_time))
+                except Exception:
+                    pass
+            return probe_nv
+
+        try:
+            start_specs = tuple(self._cross_breakpoint_probe_values(probe_nv_at(time), time))
+            end_specs = tuple(self._cross_breakpoint_probe_values(probe_nv_at(horizon), horizon))
+        except Exception:
+            return None
+        if len(start_specs) != len(end_specs) or not start_specs:
+            return None
+
+        best: Optional[float] = None
+        min_sep = max(1.0e-18, abs(dt) * 1.0e-12)
+        for idx, (start_spec, end_spec) in enumerate(zip(start_specs, end_specs)):
+            try:
+                start = float(start_spec[0])
+                direction = int(start_spec[1])
+                expr_tol = abs(float(start_spec[2]))
+                end = float(end_spec[0])
+            except Exception:
+                continue
+            if not (math.isfinite(start) and math.isfinite(end)):
+                continue
+            rising = (
+                direction >= 0
+                and (
+                    (start < -expr_tol and end > expr_tol)
+                    or (abs(start) <= expr_tol and end > expr_tol)
+                )
+            )
+            falling = (
+                direction <= 0
+                and (
+                    (start > expr_tol and end < -expr_tol)
+                    or (abs(start) <= expr_tol and end < -expr_tol)
+                )
+            )
+            if not (rising or falling):
+                continue
+
+            lo = time
+            hi = horizon
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                if mid <= lo or mid >= hi:
+                    break
+                try:
+                    mid_specs = self._cross_breakpoint_probe_values(probe_nv_at(mid), mid)
+                    mid_val = float(mid_specs[idx][0])
+                except Exception:
+                    break
+                if not math.isfinite(mid_val):
+                    break
+                if rising:
+                    if mid_val <= 0.0:
+                        lo = mid
+                    else:
+                        hi = mid
+                else:
+                    if mid_val >= 0.0:
+                        lo = mid
+                    else:
+                        hi = mid
+
+            candidate = max(hi, time + min_sep)
+            if candidate > time and candidate < horizon:
+                if best is None or candidate < best:
+                    best = candidate
         return best
 
     def _transition_target_breakpoint_local(
@@ -3332,11 +3472,27 @@ class CompiledModel:
             )
         return due
 
-    def _reschedule_timer(self, key: str, time: float, period: float):
+    def _reschedule_timer(
+        self,
+        key: str,
+        time: float,
+        period: float,
+        start: Optional[float] = None,
+    ):
         p = float(period)
         if p <= 0.0 or not math.isfinite(p) or key not in self.timer_states:
             return
-        self._set_timer_state(key, self.timer_states[key] + p)
+        if start is None:
+            next_fire = self.timer_states[key] + p
+        else:
+            origin = float(start)
+            if not math.isfinite(origin):
+                return
+            cycle = max(0, math.floor((float(time) - origin) / p) + 1)
+            next_fire = origin + cycle * p
+            if next_fire <= float(time) + 1e-18:
+                next_fire += p
+        self._set_timer_state(key, next_fire)
         self._perf_stats["timer_reschedules"] += 1
 
     def _check_timer_event_batch(self, specs: Tuple[Tuple[Any, ...], ...], time: float) -> Tuple[bool, ...]:
@@ -3788,16 +3944,17 @@ class CompiledModel:
                 time,
                 period,
                 start,
-                reschedule_on_due=True,
+                reschedule_on_due=False,
             )
             if rust_due is not None:
                 if rust_due:
                     self._perf_stats["timer_periodic_fires"] += 1
+                    self._reschedule_timer(key, time, period, start)
                 return rust_due
         due = self._check_timer_due(key, time, period, start)
         if due:
             self._perf_stats["timer_periodic_fires"] += 1
-            self._reschedule_timer(key, time, period)
+            self._reschedule_timer(key, time, period, start)
         return due
 
     def _expire_absolute_timers(self, time: float):
@@ -3836,6 +3993,14 @@ class CompiledModel:
         if v >= 0.0:
             return math.floor(v + 0.5)
         return math.ceil(v - 0.5)
+
+    @staticmethod
+    def _rtoi(value: Any) -> int:
+        """Verilog-A ``$rtoi`` truncates a real value toward zero."""
+        v = float(value)
+        if not math.isfinite(v):
+            return 0
+        return math.trunc(v)
 
     @staticmethod
     def _int_div(left: Any, right: Any) -> int:
@@ -4116,6 +4281,41 @@ class CompiledModel:
         self._event_trace_audit_note_write("output", ext)
         if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
             self._indexed_output_writer(ext, value)
+
+    def _begin_voltage_contributions(self, nodes: Tuple[str, ...], node_voltages: Dict[str, Any]):
+        """Reset per-evaluate voltage contribution outputs before accumulation."""
+        self._voltage_contribution_nodes_active = set()
+        for node in nodes:
+            if node in self.output_nodes:
+                self._output_nodes_version += 1
+                self.output_nodes.pop(node, None)
+                ext = self._resolve_external_node_for_write(node)
+                node_voltages.pop(ext, None)
+
+    def _add_voltage_contribution(
+        self,
+        node: str,
+        value: Any,
+        node_voltages: Dict[str, Any],
+        reference_node: Any = None,
+    ):
+        """Accumulate one continuous voltage contribution for this evaluate."""
+        local_node = str(node)
+        contribution = value
+        if local_node in self._voltage_contribution_nodes_active:
+            output_value = self._get_voltage(local_node, node_voltages) + contribution
+        else:
+            self._voltage_contribution_nodes_active.add(local_node)
+            if local_node in self.output_nodes:
+                self._output_nodes_version += 1
+                self.output_nodes.pop(local_node, None)
+                ext = self._resolve_external_node_for_write(local_node)
+                node_voltages.pop(ext, None)
+            base = 0.0
+            if reference_node is not None:
+                base = self._get_voltage(str(reference_node), node_voltages)
+            output_value = base + contribution
+        self._set_output(local_node, output_value, node_voltages)
 
     def _set_static_branch_output_by_slot(
         self,
@@ -4420,6 +4620,7 @@ class CompiledModel:
             if node not in self.output_nodes:
                 self._output_nodes_version += 1
             self.output_nodes[node] = value
+            self._voltage_contribution_nodes_active.add(str(node))
             node_voltages[node] = value
             self._event_trace_audit_note_write("transition_output", node)
             self._event_trace_audit_note_write("output", node)
@@ -4430,6 +4631,7 @@ class CompiledModel:
         if node not in self.output_nodes:
             self._output_nodes_version += 1
         self.output_nodes[node] = value
+        self._voltage_contribution_nodes_active.add(str(node))
         ext = self._resolve_external_node(node)
         node_voltages[ext] = value
         self._event_trace_audit_note_write("transition_output", ext)
@@ -4599,6 +4801,7 @@ class CompiledModel:
                 if node not in self.output_nodes:
                     self._output_nodes_version += 1
                 self.output_nodes[node] = value
+                self._voltage_contribution_nodes_active.add(str(node))
                 node_voltages[node] = value
                 self._event_trace_audit_note_write("transition_output", node)
                 self._event_trace_audit_note_write("output", node)
@@ -4608,6 +4811,7 @@ class CompiledModel:
                 if node not in self.output_nodes:
                     self._output_nodes_version += 1
                 self.output_nodes[node] = value
+                self._voltage_contribution_nodes_active.add(str(node))
                 ext = self._resolve_external_node(node)
                 node_voltages[ext] = value
                 self._event_trace_audit_note_write("transition_output", ext)
@@ -4713,26 +4917,40 @@ class CompiledModel:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         detector = self.cross_detectors[key]
+        effective_time_tol = max(1e-15, float(time_tol or 0.0))
         before = self._cross_detector_shadow_state(detector)
         # Audit 089: production gate — let Rust own the detector state
         # evolution math. If unavailable or fails, fall back to Python.
         fired = self._check_cross_rust_production(
-            detector, before, time, val, time_tol, expr_tol,
+            detector, before, time, val, effective_time_tol, expr_tol,
         )
         if fired is None:
-            fired = detector.check(time, val, time_tol=time_tol, expr_tol=expr_tol)
+            fired = detector.check(
+                time,
+                val,
+                time_tol=effective_time_tol,
+                expr_tol=expr_tol,
+            )
         self._rust_shadow_check_cross(
             before,
             detector,
             fired,
             time,
             val,
-            time_tol,
+            effective_time_tol,
             expr_tol,
         )
         if fired:
             cross_time = float(detector.t_cross)
-            if cross_time + max(1e-18, float(time_tol or 0.0)) < self._step_latest_cross_event_time:
+            last_accepted = self._accepted_cross_times.get(key)
+            if (
+                last_accepted is not None
+                and abs(cross_time - last_accepted) <= effective_time_tol
+            ):
+                detector.last_triggered = False
+                return False
+            self._accepted_cross_times[key] = cross_time
+            if cross_time + effective_time_tol < self._step_latest_cross_event_time:
                 # Multiple cross() statements can trigger inside one simulator
                 # step. Spectre applies their event bodies in chronological
                 # crossing order, not source order. EVAS does not yet replay a
@@ -4815,7 +5033,7 @@ class CompiledModel:
                 }
             if (
                 prev_cross_directions
-                and abs(float(prev_event_time) - float(self._event_time)) <= max(1e-18, float(time_tol or 0.0))
+                and abs(float(prev_event_time) - float(self._event_time)) <= effective_time_tol
             ):
                 for node, cross_dir in cross_directions.items():
                     if cross_dir or node not in prev_cross_directions:
@@ -4837,7 +5055,12 @@ class CompiledModel:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         cd = self.cross_detectors[key]
-        cd.check(time, val, time_tol=time_tol, expr_tol=expr_tol)
+        cd.check(
+            time,
+            val,
+            time_tol=max(1e-15, float(time_tol or 0.0)),
+            expr_tol=expr_tol,
+        )
         return cd.t_cross
 
     def _check_above(
@@ -5983,7 +6206,9 @@ class _ModuleCompiler:
         self._state_local_fastpath_names: set[str] = set()
         self._fresh_assigned_state_names: set[str] = set()
         self._control_flow_depth = 0
-        self._param_types = {p.name: p.param_type for p in module.parameters}
+        self._param_types = {
+            p.name: p.param_type for p in module_constant_parameters(module)
+        }
         self._var_types = {v.name: v.var_type for v in module.variables}
         self._port_disciplines = {p.name: p.discipline for p in module.port_decls}
         self._branch_decl_by_name = {b.name: b for b in getattr(module, "branches", [])}
@@ -6009,7 +6234,7 @@ class _ModuleCompiler:
 
         static_param_values: Dict[str, Any] = {}
         static_param_env: Dict[str, Any] = {}
-        for p in mod.parameters:
+        for p in module_constant_parameters(mod):
             val = self._eval_expr_static(p.default_value, static_param_env)
             if p.param_type == ParamType.INTEGER:
                 val = CompiledModel._to_integer(val)
@@ -6182,7 +6407,7 @@ class _ModuleCompiler:
         static_env: Dict[str, Any] = {}
 
         # Initialize parameters
-        for p in mod.parameters:
+        for p in module_constant_parameters(mod):
             val = self._eval_expr_static(p.default_value, static_env)
             if p.param_type == ParamType.INTEGER:
                 val = CompiledModel._to_integer(val)
@@ -6282,6 +6507,10 @@ class _ModuleCompiler:
                     f"            self._apply_child_param_override("
                     f"{child_var}, _child_mod, {override.param_name!r}, {value})"
                 )
+            lines.append(
+                f"            {child_var}._refresh_child_param_overrides("
+                "refresh_parameter_defaults=True)"
+            )
             lines.append(f"            {child_var}.node_map = {{}}")
             # Positional and named port connections.
             for ci, c in enumerate(inst.connections):
@@ -6297,11 +6526,33 @@ class _ModuleCompiler:
                 lines.append(f"                {child_var}.node_map[_pname] = _mapped")
             lines.append(f"            self._child_models.append({child_var})")
 
+        lines.append("")
+        lines.append("    def _refresh_parameter_defaults(self):")
+        overridable_param_names = {p.name for p in mod.parameters}
+        for p in module_constant_parameters(mod):
+            if p.name in overridable_param_names:
+                lines.append(
+                    f"        if {p.name.lower()!r} not in self._given_params:"
+                )
+                indent = "            "
+            else:
+                indent = "        "
+            value = self._compile_expr(p.default_value)
+            if p.param_type == ParamType.INTEGER:
+                value = f"self._to_integer({value})"
+            lines.append(f"{indent}self.params[{p.name!r}] = {value}")
+        lines.append("        pass")
+
         # A Spectre instance overrides the parent model parameters after the
         # generated constructor has created its children. Re-evaluate child
         # parameter expressions once those parent parameters are finalized.
         lines.append("")
-        lines.append("    def _refresh_child_param_overrides(self):")
+        lines.append(
+            "    def _refresh_child_param_overrides("
+            "self, *, refresh_parameter_defaults=False):"
+        )
+        lines.append("        if refresh_parameter_defaults:")
+        lines.append("            self._refresh_parameter_defaults()")
         lines.append("        _child_index = 0")
         lines.append("        _primitive_index = 0")
         for inst in mod.instances:
@@ -6324,7 +6575,10 @@ class _ModuleCompiler:
                     f"            self._apply_child_param_override("
                     f"_child, _child_mod, {override.param_name!r}, {value})"
                 )
-            lines.append("            _child._refresh_child_param_overrides()")
+            lines.append(
+                "            _child._refresh_child_param_overrides("
+                "refresh_parameter_defaults=True)"
+            )
             lines.append("            _child_index += 1")
         lines.append("        pass")
 
@@ -6370,8 +6624,12 @@ class _ModuleCompiler:
         self._event_key_cache = {}
         self._stateful_func_key_cache = {}
         self._contributed_nodes = set()
+        voltage_contribution_output_nodes = set()
         if mod.analog_block:
             self._contributed_nodes = self._collect_contributed_nodes(mod.analog_block.body)
+            voltage_contribution_output_nodes = self._collect_voltage_contribution_output_nodes(
+                mod.analog_block.body
+            )
 
         lines.append("")
         lines.append("    def evaluate(self, nv, time):")
@@ -6386,6 +6644,9 @@ class _ModuleCompiler:
         lines.append("            self._reset_transition_pending()")
         lines.append("        self._declared_branch_currents.clear()")
         lines.append("        self._clear_contributed_branch_currents(nv)")
+        lines.append(
+            f"        self._begin_voltage_contributions({tuple(sorted(voltage_contribution_output_nodes))!r}, nv)"
+        )
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.evaluate(nv, time)")
         loop_state_targets: set[str] = set()
@@ -6502,6 +6763,13 @@ class _ModuleCompiler:
         )
         lines.extend(transition_target_probe_lines)
 
+        cross_breakpoint_probe_lines, cross_breakpoint_probe_count = (
+            self._compile_cross_breakpoint_probe_method(mod.analog_block.body)
+            if mod.analog_block
+            else self._compile_cross_breakpoint_probe_method(None)
+        )
+        lines.extend(cross_breakpoint_probe_lines)
+
         # Generate final_step method
         lines.append("")
         lines.append("    def final_step(self, nv, time):")
@@ -6585,6 +6853,7 @@ class _ModuleCompiler:
         cls._evaluate_ir_laplace_nd_ops = tuple(evaluate_ir_laplace_nd_ops)
         cls._transition_target_ir_ops = tuple(transition_target_ir_ops)
         cls._transition_target_probe_count = int(transition_target_probe_count)
+        cls._cross_breakpoint_probe_count = int(cross_breakpoint_probe_count)
         cls._ordered_transition_segment_ir_ops = ordered_transition_segment_ir_ops
         cls._event_lfsr_shift_ir_ops = tuple(self._event_lfsr_shift_ir_ops.values())
         cls._event_static_linear_ir_ops = tuple(
@@ -7306,6 +7575,49 @@ class _ModuleCompiler:
 
         return nodes
 
+    def _collect_voltage_contribution_output_nodes(self, stmt) -> set[str]:
+        nodes: set[str] = set()
+
+        if isinstance(stmt, Block):
+            for s in stmt.statements:
+                nodes.update(self._collect_voltage_contribution_output_nodes(s))
+            return nodes
+
+        if isinstance(stmt, Contribution):
+            branch = stmt.branch
+            if (
+                branch.access_type == "V"
+                and branch.node1_index is None
+                and branch.node1_index2 is None
+            ):
+                nodes.add(branch.node1)
+            return nodes
+
+        if isinstance(stmt, EventStatement):
+            nodes.update(self._collect_voltage_contribution_output_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, IfStatement):
+            nodes.update(self._collect_voltage_contribution_output_nodes(stmt.then_body))
+            if stmt.else_body is not None:
+                nodes.update(self._collect_voltage_contribution_output_nodes(stmt.else_body))
+            return nodes
+
+        if isinstance(stmt, WhileStatement):
+            nodes.update(self._collect_voltage_contribution_output_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, ForStatement):
+            nodes.update(self._collect_voltage_contribution_output_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                nodes.update(self._collect_voltage_contribution_output_nodes(item.body))
+            return nodes
+
+        return nodes
+
     def _empty_static_branch_io(self) -> Dict[str, Any]:
         return {
             "static_voltage_read_nodes": set(),
@@ -7386,7 +7698,9 @@ class _ModuleCompiler:
                 "rejection_tags": ("empty_body",),
             }
 
-        param_names = tuple(str(param.name) for param in getattr(mod, "parameters", ()) or ())
+        param_names = tuple(
+            str(param.name) for param in module_constant_parameters(mod)
+        )
         state_names = tuple(
             str(variable.name)
             for variable in getattr(mod, "variables", ()) or ()
@@ -8267,7 +8581,9 @@ class _ModuleCompiler:
         return all(name in states for name in names)
 
     def _whole_segment_has_params(self, *names: str) -> bool:
-        params = {param.name for param in getattr(self.module, "parameters", ()) or ()}
+        params = {
+            param.name for param in module_constant_parameters(self.module)
+        }
         return all(name in params for name in names)
 
     def _whole_segment_array_width(self, name: str) -> Optional[int]:
@@ -8289,7 +8605,9 @@ class _ModuleCompiler:
         return ()
 
     def _whole_segment_param_names(self) -> set[str]:
-        return {param.name for param in getattr(self.module, "parameters", ()) or ()}
+        return {
+            param.name for param in module_constant_parameters(self.module)
+        }
 
     def _whole_segment_port_names(self) -> set[str]:
         return set(getattr(self.module, "ports", ()) or ())
@@ -13419,21 +13737,33 @@ class _ModuleCompiler:
                 start_expr = self._compile_expr(event.args[0])
                 period_expr = self._compile_expr(event.args[1])
                 specs.append(f"('periodic', {key!r}, {period_expr}, {start_expr})")
-                entries.append((stmt, key, "timer_periodic", period_expr, None))
+                entries.append(
+                    (stmt, key, "timer_periodic", period_expr, start_expr, None)
+                )
             else:
                 target_expr = self._compile_expr(event.args[0])
                 specs.append(f"('absolute', {key!r}, {target_expr})")
-                entries.append((stmt, key, "timer_absolute", None, target_expr))
+                entries.append(
+                    (stmt, key, "timer_absolute", None, None, target_expr)
+                )
 
         lines = [
             f"{prefix}_timer_batch_hits = self._check_timer_event_batch(({', '.join(specs)}), time)"
         ]
-        for idx, (stmt, key, trace_kind, period_expr, target_expr) in enumerate(entries):
+        for idx, (
+            stmt,
+            key,
+            trace_kind,
+            period_expr,
+            start_expr,
+            target_expr,
+        ) in enumerate(entries):
             lines.append(f"{prefix}if _timer_batch_hits[{idx}]:")
             post_lines: Tuple[str, ...]
             if period_expr is not None:
                 post_lines = (
-                    f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})",
+                    f"{prefix}    self._reschedule_timer("
+                    f"{key!r}, time, {period_expr}, {start_expr})",
                 )
             else:
                 post_lines = (
@@ -13549,7 +13879,10 @@ class _ModuleCompiler:
                     lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
                     lines.append(f"{prefix}    self._event_interpolated_node_values = {{}}")
                     lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
-                    lines.append(f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})")
+                    lines.append(
+                        f"{prefix}    self._reschedule_timer("
+                        f"{key!r}, time, {period_expr}, {start_expr})"
+                    )
                 else:
                     target_expr = self._compile_expr(event.args[0])
                     state_owned_target = self._state_owned_timer_target_name(stmt)
@@ -13605,6 +13938,7 @@ class _ModuleCompiler:
             # Combined events: @(initial_step or cross(...))
             conditions = []
             absolute_timer_rearms = []
+            periodic_timer_rearms = []
             for e in event.events:
                 if e.event_type == EventType.INITIAL_STEP:
                     # In evaluate, initial_step never fires again
@@ -13632,7 +13966,13 @@ class _ModuleCompiler:
                     ):
                         start_expr = self._compile_expr(e.args[0])
                         period_expr = self._compile_expr(e.args[1])
-                        conditions.append(f"self._check_timer({key!r}, time, {period_expr}, {start_expr})")
+                        conditions.append(
+                            f"self._check_timer_due("
+                            f"{key!r}, time, {period_expr}, {start_expr})"
+                        )
+                        periodic_timer_rearms.append(
+                            (key, period_expr, start_expr)
+                        )
                     else:
                         target_expr = self._compile_expr(e.args[0])
                         conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
@@ -13660,6 +14000,11 @@ class _ModuleCompiler:
                 for timer_key, target_expr in absolute_timer_rearms:
                     lines.append(
                         f"{prefix}    self._set_timer_state({timer_key!r}, {target_expr})"
+                    )
+                for timer_key, period_expr, start_expr in periodic_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._reschedule_timer("
+                        f"{timer_key!r}, time, {period_expr}, {start_expr})"
                     )
                 lines.append(f"{prefix}    self._event_trace_audit_exit_event()")
                 lines.append(f"{prefix}    self._event_context_active = False")
@@ -14493,9 +14838,17 @@ class _ModuleCompiler:
             ]
 
         expr = self._compile_expr(stmt.expr)
+        reference_arg = "None"
         if branch.node2 is not None:
-            node2_expr = self._compile_node_voltage(branch.node2, branch.node2_index, branch.node2_index2)
-            expr = f"(({node2_expr}) + ({expr}))"
+            if branch.node2_index is not None:
+                idx2 = self._compile_expr(branch.node2_index)
+                if branch.node2_index2 is not None:
+                    idx2_2 = self._compile_expr(branch.node2_index2)
+                    reference_arg = f"self._resolve_dynamic_node({branch.node2!r}, {idx2}, {idx2_2})"
+                else:
+                    reference_arg = f"self._resolve_dynamic_node({branch.node2!r}, {idx2})"
+            else:
+                reference_arg = repr(branch.node2)
 
         if branch.node1_index is not None:
             # Dynamic array-indexed port: V(DOUT[i]) <+ or V(DOUT[i][j]) <+
@@ -14503,16 +14856,10 @@ class _ModuleCompiler:
             if branch.node1_index2 is not None:
                 idx_expr2 = self._compile_expr(branch.node1_index2)
                 node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr}, {idx_expr2})"
-                return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
+                return [f"{prefix}self._add_voltage_contribution({node_expr}, {expr}, nv, {reference_arg})"]
             node_expr = f"self._resolve_dynamic_node({node!r}, {idx_expr})"
-            return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
-        if self.static_branch_fastpath_codegen:
-            slot = self._static_branch_write_slot_by_node.get(node)
-            if slot is not None:
-                return [f"{prefix}self._set_static_branch_output_by_slot({slot}, {expr}, nv)"]
-            return [f"{prefix}self._set_static_branch_output({node!r}, {expr}, nv)"]
-        else:
-            return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
+            return [f"{prefix}self._add_voltage_contribution({node_expr}, {expr}, nv, {reference_arg})"]
+        return [f"{prefix}self._add_voltage_contribution({node!r}, {expr}, nv, {reference_arg})"]
 
     def _compile_assignment(self, stmt: Assignment, indent) -> List[str]:
         prefix = '    ' * indent
@@ -15020,6 +15367,79 @@ class _ModuleCompiler:
         )
         return lines, probe_count
 
+    def _compile_cross_breakpoint_probe_method(self, stmt) -> Tuple[List[str], int]:
+        """Generate side-effect-free probes for cross() event expressions."""
+        specs: List[Tuple[Expr, int, str]] = []
+        self._collect_cross_breakpoint_probe_specs(stmt, specs)
+        lines = [
+            "",
+            "    def _cross_breakpoint_probe_values(self, nv, time):",
+            "        _values = []",
+            "        try:",
+        ]
+        if not specs:
+            lines.append("            pass")
+        for expr, direction, expr_tol in specs:
+            compiled_expr = self._compile_expr(expr)
+            lines.append(
+                f"            _values.append((float({compiled_expr}), {int(direction)}, float({expr_tol})))"
+            )
+        lines.extend(
+            [
+                "        except Exception:",
+                "            return ()",
+                "        return tuple(_values)",
+            ]
+        )
+        return lines, len(specs)
+
+    def _collect_cross_breakpoint_probe_specs(
+        self,
+        stmt,
+        specs: List[Tuple[Expr, int, str]],
+    ) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_cross_breakpoint_probe_specs(child, specs)
+            return
+        if isinstance(stmt, EventStatement):
+            self._collect_cross_breakpoint_probe_event(stmt.event, specs)
+            return
+        if isinstance(stmt, IfStatement):
+            self._collect_cross_breakpoint_probe_specs(stmt.then_body, specs)
+            if stmt.else_body is not None:
+                self._collect_cross_breakpoint_probe_specs(stmt.else_body, specs)
+            return
+        if isinstance(stmt, (WhileStatement, ForStatement)):
+            self._collect_cross_breakpoint_probe_specs(stmt.body, specs)
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._collect_cross_breakpoint_probe_specs(item.body, specs)
+
+    def _collect_cross_breakpoint_probe_event(
+        self,
+        event,
+        specs: List[Tuple[Expr, int, str]],
+    ) -> None:
+        if isinstance(event, CombinedEvent):
+            for child in event.events:
+                self._collect_cross_breakpoint_probe_event(child, specs)
+            return
+        if not isinstance(event, EventExpr) or event.event_type != EventType.CROSS:
+            return
+        if not event.args:
+            return
+        direction = event.direction if event.direction is not None else 0
+        expr_tol = (
+            self._compile_expr(event.expr_tol_expr)
+            if event.expr_tol_expr is not None
+            else "1e-12"
+        )
+        specs.append((event.args[0], int(direction), expr_tol))
+
     def _collect_transition_probe_assignments(
         self,
         stmt,
@@ -15338,7 +15758,7 @@ class _ModuleCompiler:
             return repr(expr.value)
         if isinstance(expr, Identifier):
             name = expr.name
-            for p in self.module.parameters:
+            for p in module_constant_parameters(self.module):
                 if p.name == name:
                     return f"self.params[{name!r}]"
             if name in ("$abstime", "$realtime"):
@@ -15501,7 +15921,7 @@ class _ModuleCompiler:
             return "0.0"
         if name == "$rtoi":
             value = args[0] if args else "0.0"
-            return f"self._to_integer({value})"
+            return f"self._rtoi({value})"
         if name == "$param_given":
             param_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._param_given({param_name})"
@@ -15654,7 +16074,7 @@ class _ModuleCompiler:
             if name in self._local_name_by_var:
                 return self._local_name_by_var[name]
             # Check if it's a parameter
-            for p in self.module.parameters:
+            for p in module_constant_parameters(self.module):
                 if p.name == name:
                     return f"self.params[{name!r}]"
             # Check if it's a variable
@@ -15995,7 +16415,7 @@ class _ModuleCompiler:
             return "0.0"
         if name == '$rtoi':
             value = args[0] if args else "0.0"
-            return f"self._to_integer({value})"
+            return f"self._rtoi({value})"
         if name == '$param_given':
             param_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
             return f"self._param_given({param_name})"
@@ -16484,7 +16904,7 @@ class _ModuleCompiler:
                     return 1e-12
                 return 0.0
             if expr.name == '$rtoi':
-                return CompiledModel._to_integer(args[0] if args else 0.0)
+                return CompiledModel._rtoi(args[0] if args else 0.0)
             if expr.name in {
                 '$param_given',
                 '$analog_node_alias',

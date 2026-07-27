@@ -18,6 +18,13 @@ jobs:
       - run: pip install ruff
       - run: ruff check evas/
 
+  rust-test:
+    name: Test (Rust core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --release --manifest-path evas/rust_core/Cargo.toml
+
   test:
     name: Test (Python ${{ matrix.python-version }} / ${{ matrix.os }})
     needs: lint

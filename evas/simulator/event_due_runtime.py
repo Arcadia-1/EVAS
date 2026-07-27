@@ -12,7 +12,11 @@ from array import array
 from typing import MutableSequence, Optional, Tuple
 
 from evas.simulator.expr_ir import build_state_binding_ir
-from evas.simulator.rust_backend import RustBackend
+from evas.simulator.rust_backend import (
+    BODY_EXPR_READ_STATE,
+    BODY_EXPR_READ_TIME,
+    RustBackend,
+)
 from evas.simulator.schedule_ir import (
     EVENT_DUE_ABOVE,
     EVENT_DUE_CROSS,
@@ -33,6 +37,11 @@ class RustEventDueRuntime:
     """Shadow-only mixed event due runtime backed by Rust primitives."""
 
     def __init__(self, program: EventDueProgram, backend: RustBackend):
+        if _has_dynamic_periodic_timer(program):
+            raise ValueError(
+                "dynamic periodic timer is unsupported by the shadow "
+                "event-due runtime"
+            )
         self.program = program
         self.backend = backend
 
@@ -420,6 +429,19 @@ class RustAnalogBlockEventRuntime:
         return tuple(fired_statements)
 
 
+def _has_dynamic_periodic_timer(program: EventDueProgram) -> bool:
+    dynamic_ops = {BODY_EXPR_READ_STATE, BODY_EXPR_READ_TIME}
+    return any(
+        trigger.kind == EVENT_DUE_TIMER
+        and bool(trigger.timer_period_ops)
+        and any(
+            op.op_kind in dynamic_ops
+            for op in (*trigger.timer_start_ops, *trigger.timer_period_ops)
+        )
+        for trigger in program.triggers
+    )
+
+
 def try_build_rust_event_only_analog_block_runtime(
     module,
     backend: RustBackend,
@@ -449,6 +471,8 @@ def try_build_rust_event_only_analog_block_runtime(
         due_program = encode_event_due_program(stmt_ir.event, bindings, node_slots)
         body_program = encode_event_body_program(stmt_ir, bindings, node_slots)
         if due_program is None or body_program is None:
+            return None
+        if _has_dynamic_periodic_timer(due_program):
             return None
         event_runtimes.append(
             RustEventStatementRuntime(
