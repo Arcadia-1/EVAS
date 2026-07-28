@@ -199,3 +199,101 @@ save trigger pulse
     cleared = data["pulse"][(data["time"] >= 2.3e-9) & (data["time"] <= 3.8e-9)]
     assert asserted.min() > 0.8
     assert cleared.max() < 0.1
+
+
+def test_combined_cross_body_classifies_exact_touch_falling_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A shared +1/-1 cross body must read the fired child's post-cross side."""
+
+    (tmp_path / "support_hysteretic_comparator.va").write_text(
+        """\
+`include "disciplines.vams"
+module support_hysteretic_comparator(vdd, vss, inp, inm, out);
+input vdd, vss, inp, inm;
+output out;
+electrical vdd, vss, inp, inm, out;
+parameter real offset = 0.0;
+parameter real vhys = 50m;
+parameter real td = 120p;
+parameter real tr = 30p;
+real upper_th;
+real lower_th;
+integer state;
+analog begin
+    upper_th = offset + 0.5 * vhys;
+    lower_th = offset - 0.5 * vhys;
+    @(initial_step) begin
+        state = (V(inp, inm) >= upper_th);
+    end
+    @(cross(V(inp, inm) - upper_th, +1)) begin
+        state = 1;
+    end
+    @(cross(V(inp, inm) - lower_th, -1)) begin
+        state = 0;
+    end
+    V(out, vss) <+ transition(state ? 1.0 : 0.0, td, tr, tr) * V(vdd, vss);
+end
+endmodule
+"""
+    )
+    (tmp_path / "hysteresis_trip_characterizer.va").write_text(
+        """\
+`include "disciplines.vams"
+module hysteresis_trip_characterizer(vdd, vss, vin, cmp_out, trip_rise, trip_fall, hyst_width, valid);
+input vdd, vss, vin, cmp_out;
+output trip_rise, trip_fall, hyst_width, valid;
+electrical vdd, vss, vin, cmp_out, trip_rise, trip_fall, hyst_width, valid;
+parameter real tr = 20p;
+real trip_rise_val, trip_fall_val;
+integer has_rise, has_fall;
+analog begin
+    @(initial_step) begin
+        trip_rise_val = 0.0;
+        trip_fall_val = 0.0;
+        has_rise = 0;
+        has_fall = 0;
+    end
+    @(cross(V(cmp_out, vss) - 0.5 * V(vdd, vss), +1) or
+      cross(V(cmp_out, vss) - 0.5 * V(vdd, vss), -1)) begin
+        if (V(cmp_out, vss) >= 0.5 * V(vdd, vss)) begin
+            trip_rise_val = V(vin, vss);
+            has_rise = 1;
+        end else begin
+            trip_fall_val = V(vin, vss);
+            has_fall = 1;
+        end
+    end
+    V(trip_rise, vss) <+ transition(trip_rise_val, 0.0, tr, tr);
+    V(trip_fall, vss) <+ transition(trip_fall_val, 0.0, tr, tr);
+    V(hyst_width, vss) <+ transition(trip_rise_val - trip_fall_val, 0.0, tr, tr);
+    V(valid, vss) <+ transition((has_rise && has_fall) ? V(vdd, vss) : 0.0, 0.0, tr, tr);
+end
+endmodule
+"""
+    )
+    (tmp_path / "tb.scs").write_text(
+        """\
+simulator lang=spectre
+global 0
+ahdl_include "hysteresis_trip_characterizer.va"
+ahdl_include "support_hysteretic_comparator.va"
+Vvdd (vdd 0) vsource dc=0.9
+Vvss (vss 0) vsource dc=0.0
+Vref (vref 0) vsource dc=0.45
+Vvin (vin 0) vsource type=pwl wave=[0 0.420 10n 0.490 20n 0.420 30n 0.500 40n 0.410 44n 0.410]
+XCMP (vdd vss vin vref cmp_out) support_hysteretic_comparator offset=5m vhys=50m td=120p tr=30p
+XMEAS (vdd vss vin cmp_out trip_rise trip_fall hyst_width valid) hysteresis_trip_characterizer
+tran tran stop=44n maxstep=20p
+save vdd vss vin cmp_out trip_rise trip_fall hyst_width valid
+"""
+    )
+    monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+    output_dir = tmp_path / "out"
+    assert evas_simulate(str(tmp_path / "tb.scs"), output_dir=str(output_dir))
+    data = np.genfromtxt(output_dir / "tran.csv", delimiter=",", names=True)
+
+    assert float(data["valid"][-1]) > 0.8
+    assert float(data["trip_rise"][-1]) == pytest.approx(0.481, abs=0.004)
+    assert float(data["trip_fall"][-1]) == pytest.approx(0.429, abs=0.004)
+    assert float(data["hyst_width"][-1]) == pytest.approx(0.052, abs=0.004)

@@ -5170,7 +5170,9 @@ class CompiledModel:
                      time_tol: float = 0.0, expr_tol: float = 1e-12,
                      interp_nodes: Optional[List[str]] = None,
                      nudge_nodes: Optional[Any] = None,
-                     nudge_states: Optional[Dict[str, int]] = None) -> bool:
+                     nudge_states: Optional[Dict[str, int]] = None,
+                     *,
+                     force_post_side_on_exact_touch: bool = False) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         detector = self.cross_detectors[key]
@@ -5276,7 +5278,15 @@ class CompiledModel:
                     )
                     expr_delta += float(sign) * (future_value - event_node_value(node))
                 exact_touch_moves_beyond = expr_delta * float(trigger_dir) > max(float(expr_tol or 0.0), 1e-18)
-            use_post_side = trigger_went_beyond or exact_touch_moves_beyond
+            use_post_side = (
+                trigger_went_beyond
+                or exact_touch_moves_beyond
+                or (
+                    force_post_side_on_exact_touch
+                    and isinstance(nudge_nodes, dict)
+                    and bool(trigger_dir)
+                )
+            )
             if isinstance(nudge_nodes, dict):
                 cross_directions = {
                     node: int(trigger_dir) * (1 if sign > 0 else -1) if use_post_side else 0
@@ -14313,7 +14323,13 @@ class _ModuleCompiler:
                     if self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    conditions.append(self._compile_cross_call(e, key))
+                    conditions.append(
+                        self._compile_cross_call(
+                            e,
+                            key,
+                            force_post_side_on_exact_touch=True,
+                        )
+                    )
                 elif e.event_type == EventType.ABOVE:
                     if self._event_requires_post_update(e):
                         continue
@@ -14465,7 +14481,13 @@ class _ModuleCompiler:
         self._event_key_cache[cache_key] = key
         return key
 
-    def _compile_cross_call(self, event: EventExpr, key: str) -> str:
+    def _compile_cross_call(
+        self,
+        event: EventExpr,
+        key: str,
+        *,
+        force_post_side_on_exact_touch: bool = False,
+    ) -> str:
         expr = self._compile_expr(event.args[0])
         direction = event.direction if event.direction is not None else 0
         time_tol = "0.0"
@@ -14488,7 +14510,8 @@ class _ModuleCompiler:
         return (
             f"self._check_cross({key!r}, time, {expr}, {direction}, "
             f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r}, "
-            f"{nudge_states!r})"
+            f"{nudge_states!r}, "
+            f"force_post_side_on_exact_touch={force_post_side_on_exact_touch!r})"
         )
 
     def _collect_continuous_state_nudges_from_expr(
@@ -14835,7 +14858,13 @@ class _ModuleCompiler:
                     if not self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    conditions.append(self._compile_cross_call(e, key))
+                    conditions.append(
+                        self._compile_cross_call(
+                            e,
+                            key,
+                            force_post_side_on_exact_touch=True,
+                        )
+                    )
                 elif e.event_type == EventType.ABOVE:
                     if not self._event_requires_post_update(e):
                         continue
