@@ -4776,7 +4776,7 @@ def _convert_event_transition_ops(
                 converted_events += 1
             continue
 
-        if isinstance(stmt, (ContributionIR, ForStatementIR)):
+        if isinstance(stmt, (ContributionIR, ForStatementIR, CaseStatementIR)):
             flush_continuous_body()
             transition_program = encode_transition_contribution_program(
                 BlockIR((stmt,)),

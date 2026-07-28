@@ -376,6 +376,7 @@ class Parser:
 
         # Parse port list
         self._ansi_warnings = []  # cleared by _parse_ansi_port_list if ANSI
+        self._ansi_explicit_discipline_names = set()
         ports = []
         if self.match(TokenType.LPAREN):
             ports = self._parse_port_list_header()
@@ -395,6 +396,7 @@ class Parser:
 
         # Attach any parse-time warnings (e.g. shared-discipline ANSI ports)
         module.warnings.extend(getattr(self, '_ansi_warnings', []))
+        self._current_module = module
 
         # Parse module items until the matching end token.
         while not self.at(end_token, TokenType.EOF):
@@ -457,8 +459,13 @@ class Parser:
             elif self.match(TokenType.INOUT):
                 direction = Direction.INOUT
 
-            # Skip discipline
+            # Parse an optional explicit discipline.  PortDecl defaults to
+            # electrical even when the header only says ``input a``; keep a
+            # separate bit of parser metadata so a later body declaration is
+            # rejected only when the ANSI header actually supplied a
+            # discipline.
             discipline = 'electrical'
+            explicit_discipline = False
             if self.at(
                 TokenType.ELECTRICAL,
                 TokenType.VOLTAGE,
@@ -467,6 +474,7 @@ class Parser:
                 TokenType.WREAL,
             ):
                 discipline = self.advance().value
+                explicit_discipline = True
 
             # Check for array
             array_hi, array_lo = None, None
@@ -477,6 +485,8 @@ class Parser:
 
             if direction:
                 pd = PortDecl(name=name, direction=direction, discipline=discipline)
+                if explicit_discipline:
+                    self._ansi_explicit_discipline_names.add(name)
                 if array_hi is not None:
                     pd.is_array = True
                     pd.array_hi = array_hi
@@ -1342,6 +1352,12 @@ class Parser:
                 found = False
                 for pd in module.port_decls:
                     if pd.name == name:
+                        if name in self._ansi_explicit_discipline_names:
+                            raise ParseError(
+                                "Spectre-incompatible discipline declaration "
+                                f"redeclares ANSI port {name!r}",
+                                name_tok,
+                            )
                         pd.discipline = discipline
                         if effective_array_hi is not None:
                             pd.is_array = True
@@ -1408,6 +1424,7 @@ class Parser:
             declared_type = ParamType.STRING
 
         while True:
+            name_token = self.peek()
             name = self._expect_identifier_name("parameter declaration")
 
             default_val = NumberLiteral(0)
@@ -1452,6 +1469,7 @@ class Parser:
                 range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
                 exclude_expr=exclude_expr,
             )
+            param = self._with_location(param, name_token)
             if is_localparam:
                 module.localparams.append(param)
             else:
@@ -1727,11 +1745,75 @@ class Parser:
 
     def _parse_block(self) -> Block:
         begin_tok = self.expect(TokenType.BEGIN)
+        block_name = None
+        if self.match(TokenType.COLON):
+            block_name = self._expect_identifier_name("named block label")
+        local_decls: List[VariableDecl] = []
         stmts = []
+        saw_statement = False
         while not self.at(TokenType.END, TokenType.EOF):
+            if block_name is not None and (
+                self.at(TokenType.REAL, TokenType.INTEGER)
+                or (self.at(TokenType.IDENT) and self.peek().value == "string")
+            ):
+                if saw_statement:
+                    raise ParseError(
+                        "Named-block local declarations must precede statements",
+                        self.peek(),
+                    )
+                local_decls.extend(self._parse_variable_decl_list())
+                continue
+            saw_statement = True
             stmts.append(self._parse_statement())
         self.expect(TokenType.END)
-        return self._with_location(Block(statements=stmts), begin_tok)
+        end_name = None
+        if self.match(TokenType.COLON):
+            end_name = self._expect_identifier_name("named block end label")
+        if end_name is not None and end_name != block_name:
+            raise ParseError(
+                f"Named block end label {end_name!r} does not match "
+                f"begin label {block_name!r}",
+                begin_tok,
+            )
+
+        block = self._with_location(Block(statements=stmts), begin_tok)
+        if block_name is None or not local_decls:
+            return block
+
+        local_names: Dict[str, str] = {}
+        scope_id = self._generate_counter
+        self._generate_counter += 1
+        for decl in local_decls:
+            if decl.name in local_names:
+                raise ParseError(
+                    f"Duplicate named-block local declaration {decl.name!r}",
+                    begin_tok,
+                )
+            if decl.is_array or decl.is_vector or decl.init_values is not None:
+                raise ParseError(
+                    "Named-block locals currently support only uninitialized "
+                    "scalar real, integer, or string declarations",
+                    begin_tok,
+                )
+            local_names[decl.name] = (
+                f"__evas_block_{scope_id}_{decl.name}"
+            )
+
+        for decl in local_decls:
+            cloned_decl = self._clone_generated_ast(
+                decl,
+                loop_name="\0",
+                loop_value=0.0,
+                local_names=local_names,
+            )
+            cloned_decl.name = local_names[decl.name]
+            self._current_module.variables.append(cloned_decl)
+        return self._clone_generated_ast(
+            block,
+            loop_name="\0",
+            loop_value=0.0,
+            local_names=local_names,
+        )
 
     def _parse_statement(self) -> Statement:
         """Parse a single statement."""
@@ -1823,7 +1905,11 @@ class Parser:
         else:
             event = CombinedEvent(events=events)
 
-        body = self._parse_block_or_statement()
+        empty_tok = self.match(TokenType.SEMI)
+        if empty_tok is not None:
+            body = self._with_location(Block(statements=[]), empty_tok)
+        else:
+            body = self._parse_block_or_statement()
         return self._with_location(EventStatement(event=event, body=body), at_tok)
 
     def _parse_single_event(self) -> EventExpr:
@@ -2042,7 +2128,12 @@ class Parser:
             if self.at(TokenType.IDENT) and self.peek().value == 'default':
                 item_tok = self.advance()
                 self.expect(TokenType.COLON)
-                body = self._parse_block_or_statement()
+                null_tok = self.match(TokenType.SEMI)
+                body = (
+                    self._with_location(Block(statements=[]), null_tok)
+                    if null_tok is not None
+                    else self._parse_block_or_statement()
+                )
                 items.append(self._with_location(CaseItem(values=[], body=body), item_tok))
             else:
                 # Parse comma-separated value expressions before ':'
@@ -2051,7 +2142,12 @@ class Parser:
                 while self.match(TokenType.COMMA):
                     values.append(self._parse_expression())
                 self.expect(TokenType.COLON)
-                body = self._parse_block_or_statement()
+                null_tok = self.match(TokenType.SEMI)
+                body = (
+                    self._with_location(Block(statements=[]), null_tok)
+                    if null_tok is not None
+                    else self._parse_block_or_statement()
+                )
                 items.append(self._with_location(CaseItem(values=values, body=body), item_tok))
         self.expect(TokenType.ENDCASE)
         return self._with_location(CaseStatement(expr=sel_expr, items=items), case_tok)
@@ -2074,6 +2170,11 @@ class Parser:
                 if not self.match(TokenType.COMMA):
                     break
             self.expect(TokenType.RPAREN)
+        if name == "$discontinuity" and len(args) != 1:
+            raise ParseError(
+                "Spectre-compatible $discontinuity requires exactly one argument",
+                task_tok,
+            )
         self.match(TokenType.SEMI)
         return self._with_location(SystemTask(name=name, args=args), task_tok)
 

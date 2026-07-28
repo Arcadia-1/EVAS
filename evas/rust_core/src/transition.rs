@@ -128,6 +128,7 @@ pub fn transition_state_step_for_arrays(
             continue;
         }
 
+        let was_preserving_delayed_target = active_flags[idx] == 2;
         transition_evaluate_one(
             &mut current_values[idx],
             target_values[idx],
@@ -139,6 +140,11 @@ pub fn transition_state_step_for_arrays(
             &mut active_flags[idx],
             time,
         );
+        let effective_delay = if was_preserving_delayed_target && active_flags[idx] == 0 {
+            0.0
+        } else {
+            delay
+        };
         transition_set_target_one(
             &mut current_values[idx],
             &mut target_values[idx],
@@ -150,7 +156,7 @@ pub fn transition_state_step_for_arrays(
             &mut active_flags[idx],
             time,
             target,
-            delay,
+            effective_delay,
             rise,
             fall,
         );
@@ -223,10 +229,24 @@ pub(crate) fn transition_set_target_one(
     fall: f64,
 ) {
     let changed = (target - *target_value).abs() > 1.0e-15;
+    if changed && *active_flag == 2 {
+        return;
+    }
     if changed && *active_flag != 0 {
         let t_begin = *start_time + *delay_value;
         let going_up = *target_value > *start_value;
         let ramp_time = if going_up { *rise_time } else { *fall_time };
+        let has_not_visibly_moved = (*current_value - *start_value).abs() <= 1.0e-12;
+        let retargets_to_start = (target - *start_value).abs() <= 1.0e-12;
+        if retargets_to_start
+            && has_not_visibly_moved
+            && (*target_value - *start_value).abs() > 1.0e-12
+            && time >= t_begin - 1.0e-18
+            && time <= t_begin + 1.0e-18
+        {
+            *active_flag = 2;
+            return;
+        }
         let in_active_region = time >= t_begin && time < t_begin + ramp_time;
         if in_active_region {
             let vi = *current_value;

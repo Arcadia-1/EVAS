@@ -52,6 +52,243 @@ class CompilationError(Exception):
     pass
 
 
+def transition_case_shape_error(module: Module) -> Optional[str]:
+    """Return why a case-selected transition cannot use the Rust fast path.
+
+    This deliberately recognizes only the enumerated-state-machine pattern
+    implemented by ``transition_runtime``.  In particular, a no-default case
+    must prove that every write keeps its integer selector inside the dense
+    case-label domain.
+    """
+
+    if module.analog_block is None:
+        return None
+    integer_scalars = {
+        decl.name
+        for decl in module.variables
+        if decl.var_type == ParamType.INTEGER and not decl.is_array
+    }
+    assignments: Dict[str, List[Tuple[Expr, bool]]] = {}
+    task_calls: set[str] = set()
+
+    def collect(
+        stmt,
+        *,
+        in_initial_step: bool = False,
+        guaranteed_initial: bool = False,
+    ) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                collect(
+                    child,
+                    in_initial_step=in_initial_step,
+                    guaranteed_initial=guaranteed_initial,
+                )
+            return
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, Identifier):
+                assignments.setdefault(stmt.target.name, []).append(
+                    (stmt.value, in_initial_step and guaranteed_initial)
+                )
+            return
+        if isinstance(stmt, EventStatement):
+            initial = (
+                isinstance(stmt.event, EventExpr)
+                and stmt.event.event_type == EventType.INITIAL_STEP
+            )
+            collect(
+                stmt.body,
+                in_initial_step=initial,
+                guaranteed_initial=initial,
+            )
+            return
+        if isinstance(stmt, IfStatement):
+            collect(stmt.then_body, in_initial_step=in_initial_step)
+            collect(stmt.else_body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, ForStatement):
+            collect(stmt.init, in_initial_step=in_initial_step)
+            collect(stmt.update, in_initial_step=in_initial_step)
+            collect(stmt.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, WhileStatement):
+            collect(stmt.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                collect(item.body, in_initial_step=in_initial_step)
+            return
+        if isinstance(stmt, TaskCall):
+            task_calls.add(stmt.name)
+
+    collect(module.analog_block.body)
+
+    def expr_has_transition(expr) -> bool:
+        if isinstance(expr, FunctionCall):
+            return expr.name == "transition" or any(
+                expr_has_transition(arg) for arg in expr.args
+            )
+        if isinstance(expr, BinaryExpr):
+            return expr_has_transition(expr.left) or expr_has_transition(expr.right)
+        if isinstance(expr, UnaryExpr):
+            return expr_has_transition(expr.operand)
+        if isinstance(expr, TernaryExpr):
+            return (
+                expr_has_transition(expr.cond)
+                or expr_has_transition(expr.true_expr)
+                or expr_has_transition(expr.false_expr)
+            )
+        return False
+
+    def direct_transition_targets(stmt) -> Optional[Tuple[tuple, ...]]:
+        if isinstance(stmt, Block):
+            targets: List[tuple] = []
+            for child in stmt.statements:
+                child_targets = direct_transition_targets(child)
+                if child_targets is None:
+                    return None
+                targets.extend(child_targets)
+            return tuple(targets)
+        if not isinstance(stmt, Contribution) or not expr_has_transition(stmt.expr):
+            return None
+        branch = stmt.branch
+        if branch.access_type != "V" or any(
+            index is not None
+            for index in (
+                branch.node1_index,
+                branch.node2_index,
+                branch.node1_index2,
+                branch.node2_index2,
+            )
+        ):
+            return None
+        return ((branch.node1, branch.node2),)
+
+    def stmt_has_transition(stmt) -> bool:
+        if stmt is None:
+            return False
+        if isinstance(stmt, Contribution):
+            return expr_has_transition(stmt.expr)
+        if isinstance(stmt, Assignment):
+            return expr_has_transition(stmt.value)
+        if isinstance(stmt, Block):
+            return any(stmt_has_transition(child) for child in stmt.statements)
+        if isinstance(stmt, EventStatement):
+            return stmt_has_transition(stmt.body)
+        if isinstance(stmt, IfStatement):
+            return stmt_has_transition(stmt.then_body) or stmt_has_transition(
+                stmt.else_body
+            )
+        if isinstance(stmt, (ForStatement, WhileStatement)):
+            return stmt_has_transition(stmt.body)
+        if isinstance(stmt, CaseStatement):
+            return any(stmt_has_transition(item.body) for item in stmt.items)
+        return False
+
+    def literal_int(expr) -> Optional[int]:
+        if not isinstance(expr, NumberLiteral):
+            return None
+        value = float(expr.value)
+        integer = int(value)
+        return integer if value == float(integer) else None
+
+    def bounded_write(expr, selector: str, size: int) -> bool:
+        literal = literal_int(expr)
+        if literal is not None:
+            return 0 <= literal < size
+        if not isinstance(expr, BinaryExpr) or expr.op != "%":
+            return False
+        if literal_int(expr.right) != size:
+            return False
+        left = expr.left
+        if isinstance(left, Identifier):
+            return left.name == selector
+        if not isinstance(left, BinaryExpr) or left.op != "+":
+            return False
+        operands = (left.left, left.right)
+        selector_count = sum(
+            isinstance(part, Identifier) and part.name == selector for part in operands
+        )
+        increments = [literal_int(part) for part in operands if isinstance(part, NumberLiteral)]
+        return (
+            selector_count == 1
+            and len(increments) == 1
+            and increments[0] is not None
+            and increments[0] >= 0
+        )
+
+    def check_case(stmt: CaseStatement) -> Optional[str]:
+        contains_transition = any(stmt_has_transition(item.body) for item in stmt.items)
+        if not contains_transition:
+            return None
+        if not isinstance(stmt.expr, Identifier) or stmt.expr.name not in integer_scalars:
+            return "case-selected transition requires an integer scalar selector"
+        selector = stmt.expr.name
+        values: List[int] = []
+        default_count = 0
+        expected_targets: Optional[set] = None
+        for item in stmt.items:
+            targets = direct_transition_targets(item.body)
+            if targets is None or not targets or len(set(targets)) != len(targets):
+                return "each transition case arm must directly drive one identical output set"
+            target_set = set(targets)
+            if expected_targets is None:
+                expected_targets = target_set
+            elif target_set != expected_targets:
+                return "each transition case arm must directly drive one identical output set"
+            if not item.values:
+                default_count += 1
+                continue
+            if len(item.values) != 1:
+                return "transition case arms require one integer label each"
+            value = literal_int(item.values[0])
+            if value is None:
+                return "transition case labels must be integer literals"
+            values.append(value)
+        if default_count > 1 or len(set(values)) != len(values):
+            return "transition case labels/default must be unique"
+        if default_count == 0:
+            if sorted(values) != list(range(len(values))):
+                return "no-default transition case requires dense labels starting at zero"
+            writes = assignments.get(selector, [])
+            if task_calls or not writes or not any(initial for _expr, initial in writes):
+                return "no-default transition case requires a proven initial selector write"
+            if not all(bounded_write(expr, selector, len(values)) for expr, _ in writes):
+                return "no-default transition case selector writes must remain inside its label domain"
+        return None
+
+    def walk_cases(stmt) -> Optional[str]:
+        if stmt is None:
+            return None
+        if isinstance(stmt, CaseStatement):
+            error = check_case(stmt)
+            if error is not None:
+                return error
+            for item in stmt.items:
+                error = walk_cases(item.body)
+                if error is not None:
+                    return error
+            return None
+        children = []
+        if isinstance(stmt, Block):
+            children = stmt.statements
+        elif isinstance(stmt, EventStatement):
+            children = [stmt.body]
+        elif isinstance(stmt, IfStatement):
+            children = [stmt.then_body, stmt.else_body]
+        elif isinstance(stmt, (ForStatement, WhileStatement)):
+            children = [stmt.body]
+        for child in children:
+            error = walk_cases(child)
+            if error is not None:
+                return error
+        return None
+
+    return walk_cases(module.analog_block.body)
+
+
 _RANDOM_DISTRIBUTION_FUNCTIONS = frozenset(
     {
         "$dist_chi_square",
@@ -123,6 +360,7 @@ class CompiledModel:
     _event_transition_plan_side_effect_count = 0
     _event_transition_plan_control_flow_count = 0
     _state_owned_timer_targets = ()
+    _state_owned_timer_target_keys = frozenset()
     _static_branch_fastpath_codegen = False
     _dynamic_node_cache_limit = 4096
     _cmp_eps: float = 0.0
@@ -2487,6 +2725,22 @@ class CompiledModel:
             del history[:keep_from]
         return float(delayed)
 
+    def _absdelay(
+        self,
+        key: str,
+        time: float,
+        value: Any,
+        delay: float,
+        maxdelay: Optional[float] = None,
+    ) -> float:
+        """Sampled scalar transport delay for voltage-domain absdelay()."""
+        d = float(delay)
+        if d < 0.0:
+            raise ValueError("absdelay() delay must be nonnegative")
+        if maxdelay is not None and float(maxdelay) < d:
+            raise ValueError("absdelay() maxdelay must be >= delay")
+        return self._specify_path_delay(f"absdelay:{key}", value, time, d)
+
     def _has_transition_target_probes_tree(self) -> bool:
         own = int(getattr(self.__class__, "_transition_target_probe_count", 0)) > 0
         return own or any(
@@ -3961,6 +4215,8 @@ class CompiledModel:
         for key, armed_target in self.timer_states.items():
             if self.timer_kinds.get(key) != "absolute":
                 continue
+            if key in self._state_owned_timer_target_keys:
+                continue
             last_fired = self.timer_last_fired.get(key)
             if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
                 continue
@@ -4913,7 +5169,10 @@ class CompiledModel:
     def _check_cross(self, key: str, time: float, val: float, direction: int = 0,
                      time_tol: float = 0.0, expr_tol: float = 1e-12,
                      interp_nodes: Optional[List[str]] = None,
-                     nudge_nodes: Optional[Any] = None) -> bool:
+                     nudge_nodes: Optional[Any] = None,
+                     nudge_states: Optional[Dict[str, int]] = None,
+                     *,
+                     force_post_side_on_exact_touch: bool = False) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         detector = self.cross_detectors[key]
@@ -5019,7 +5278,15 @@ class CompiledModel:
                     )
                     expr_delta += float(sign) * (future_value - event_node_value(node))
                 exact_touch_moves_beyond = expr_delta * float(trigger_dir) > max(float(expr_tol or 0.0), 1e-18)
-            use_post_side = trigger_went_beyond or exact_touch_moves_beyond
+            use_post_side = (
+                trigger_went_beyond
+                or exact_touch_moves_beyond
+                or (
+                    force_post_side_on_exact_touch
+                    and isinstance(nudge_nodes, dict)
+                    and bool(trigger_dir)
+                )
+            )
             if isinstance(nudge_nodes, dict):
                 cross_directions = {
                     node: int(trigger_dir) * (1 if sign > 0 else -1) if use_post_side else 0
@@ -5031,6 +5298,15 @@ class CompiledModel:
                     node: int(trigger_dir) if use_post_side else 0
                     for node in set(nudge_nodes or interp_nodes or [])
                 }
+            if trigger_dir and isinstance(nudge_states, dict):
+                for name, sign in nudge_states.items():
+                    if not sign or name not in self.state:
+                        continue
+                    slot = self._indexed_state_ids.get(name, -1)
+                    value = float(self._state_get_by_slot(slot, name))
+                    post_sign = 1.0 if int(trigger_dir) * int(sign) > 0 else -1.0
+                    delta = max(1e-12, abs(value) * 1e-12)
+                    self._state_set(name, value + post_sign * delta)
             if (
                 prev_cross_directions
                 and abs(float(prev_event_time) - float(self._event_time)) <= effective_time_tol
@@ -6181,6 +6457,7 @@ class _ModuleCompiler:
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
+        self._absdelay_counter = 0
         self._system_task_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
@@ -6462,8 +6739,15 @@ class _ModuleCompiler:
                         lines.append(f"        self.arrays[{name!r}][{flat}] = 0")
                 continue
             if init_vals:
-                for i, iv in enumerate(init_vals):
-                    idx = hi_idx - i
+                # Verilog-A aggregate initializers follow declaration order:
+                # the first item initializes the left bound, then proceeds
+                # toward the right bound.  Do not normalize the direction
+                # before assigning values (for example, [0:15] starts at 0,
+                # while [15:0] starts at 15).
+                step = 1 if lo >= hi else -1
+                declared_count = abs(lo - hi) + 1
+                for i, iv in enumerate(init_vals[:declared_count]):
+                    idx = hi + i * step
                     val = self._eval_expr_static(iv, static_env)
                     if self._is_integer_variable(name):
                         val = CompiledModel._to_integer(val)
@@ -6600,6 +6884,13 @@ class _ModuleCompiler:
                 lines.extend(stmt_lines)
         for stmt in mod.continuous_assigns:
             lines.extend(self._compile_assignment(stmt, 2))
+        if mod.analog_block:
+            lines.extend(
+                self._compile_initial_absolute_timer_arms(
+                    mod.analog_block.body,
+                    2,
+                )
+            )
         # Audit 088 fix: initial_step may emit transition_output_lazy via
         # _compile_contribution. Flush so pending state is not orphaned.
         lines.append("        if self._transition_pending_count > 0:")
@@ -6619,6 +6910,7 @@ class _ModuleCompiler:
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
+        self._absdelay_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
         self._event_key_cache = {}
@@ -6744,6 +7036,9 @@ class _ModuleCompiler:
 
         lines.append("")
         lines.append("    def refresh_outputs(self, nv, time):")
+        lines.append(
+            f"        self._begin_voltage_contributions({tuple(sorted(voltage_contribution_output_nodes))!r}, nv)"
+        )
         self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
@@ -6920,6 +7215,7 @@ class _ModuleCompiler:
         cls._state_owned_timer_targets = tuple(
             sorted(self._state_owned_timer_targets.items())
         )
+        cls._state_owned_timer_target_keys = frozenset(self._state_owned_timer_targets)
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
             cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)
@@ -7082,6 +7378,12 @@ class _ModuleCompiler:
         """Reject patterns that Spectre VACOMP does not allow."""
         if not self.module.analog_block:
             return
+        case_error = transition_case_shape_error(self.module)
+        if case_error is not None:
+            raise CompilationError(
+                f"Module {self.module.name} has unsupported case-selected "
+                f"transition() semantics: {case_error}."
+            )
         self._event_assigned_vars = set()
         self._non_event_assigned_vars = set()
         self._collect_assignment_contexts(self.module.analog_block.body, in_event=False)
@@ -7122,7 +7424,7 @@ class _ModuleCompiler:
             for item in stmt.items:
                 self._check_stmt_for_restricted_operators(
                     item.body,
-                    conditional_depth + 1,
+                    conditional_depth,
                     in_event,
                 )
             return
@@ -11070,8 +11372,10 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, CaseStatement):
-            for item in stmt.items:
-                self._collect_transition_target_ir_ops_from_stmt(item.body, ops)
+            # This legacy metadata has no selector/guard representation.
+            # Flattening case arms therefore invents simultaneously-active
+            # transition targets.  The full Rust program lowers supported
+            # cases from the statement IR instead.
             return
 
         if isinstance(stmt, EventStatement):
@@ -12197,38 +12501,40 @@ class _ModuleCompiler:
                 return True
             return self._statement_has_dynamic_breakpoints(stmt.body)
 
+        dynamic_funcs = {"transition", "last_crossing", "absdelay"}
+
         if isinstance(stmt, IfStatement):
             return (
-                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                self._expr_has_function_call(stmt.cond, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.then_body)
                 or self._statement_has_dynamic_breakpoints(stmt.else_body)
             )
 
         if isinstance(stmt, WhileStatement):
             return (
-                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                self._expr_has_function_call(stmt.cond, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.body)
             )
 
         if isinstance(stmt, ForStatement):
             return (
-                self._assignment_has_function_call(stmt.init, {"transition", "last_crossing"})
-                or self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
-                or self._assignment_has_function_call(stmt.update, {"transition", "last_crossing"})
+                self._assignment_has_function_call(stmt.init, dynamic_funcs)
+                or self._expr_has_function_call(stmt.cond, dynamic_funcs)
+                or self._assignment_has_function_call(stmt.update, dynamic_funcs)
                 or self._statement_has_dynamic_breakpoints(stmt.body)
             )
 
         if isinstance(stmt, CaseStatement):
-            if self._expr_has_function_call(stmt.expr, {"transition", "last_crossing"}):
+            if self._expr_has_function_call(stmt.expr, dynamic_funcs):
                 return True
             for item in stmt.items:
-                if any(self._expr_has_function_call(v, {"transition", "last_crossing"}) for v in item.values):
+                if any(self._expr_has_function_call(v, dynamic_funcs) for v in item.values):
                     return True
                 if self._statement_has_dynamic_breakpoints(item.body):
                     return True
             return False
 
-        if self._statement_has_function_call(stmt, {"transition", "last_crossing", "zi_nd"}):
+        if self._statement_has_function_call(stmt, dynamic_funcs | {"zi_nd"}):
             return True
 
         return False
@@ -12473,9 +12779,20 @@ class _ModuleCompiler:
             return False
         if event.event_type not in (EventType.CROSS, EventType.ABOVE):
             return False
-        if not hasattr(self, "_contributed_nodes"):
-            return False
-        return self._expr_references_nodes(event.args[0], self._contributed_nodes)
+        expression = event.args[0]
+        if self._expr_references_nodes(
+            expression,
+            getattr(self, "_contributed_nodes", set()),
+        ):
+            return True
+        # A scalar assigned from a branch in the continuous analog body is an
+        # alias for solver state.  Evaluate events that consume such aliases
+        # after node publication, otherwise the event body can observe the
+        # pre-cross value and leave the just-crossed state unchanged.
+        return self._expr_references_nodes(
+            expression,
+            getattr(self, "_continuous_vars", set()),
+        )
 
     def _is_initial_step_event(self, event) -> bool:
         """Check if event includes initial_step."""
@@ -13575,6 +13892,58 @@ class _ModuleCompiler:
     def _timer_period_is_zero_literal(expr: Expr) -> bool:
         return isinstance(expr, NumberLiteral) and float(expr.value) == 0.0
 
+    def _compile_initial_absolute_timer_arms(self, analog_body, indent: int) -> List[str]:
+        """Arm top-level absolute state timers after initial_step assignment.
+
+        The transient driver asks ``next_breakpoint()`` before the first regular
+        evaluate pass.  For ``@(timer(state_time))`` where ``state_time`` is set
+        in ``initial_step``, the timer must already be visible at that point or
+        sub-step deadlines before the first source/save grid point are skipped.
+        Nested timers are intentionally excluded: they are not active until
+        their enclosing event body executes.
+        """
+        if analog_body is None:
+            return []
+        prefix = '    ' * indent
+        lines: List[str] = []
+        index = 0
+        for stmt in getattr(analog_body, "statements", ()):
+            if not isinstance(stmt, EventStatement):
+                continue
+            events = (
+                stmt.event.events
+                if isinstance(stmt.event, CombinedEvent)
+                else (stmt.event,)
+            )
+            for event in events:
+                if not (
+                    isinstance(event, EventExpr)
+                    and event.event_type == EventType.TIMER
+                    and len(event.args) == 1
+                    and isinstance(event.args[0], Identifier)
+                ):
+                    continue
+                target_name = event.args[0].name
+                if (
+                    target_name not in self._state_scalar_slot_by_name
+                    or self._is_integer_variable(target_name)
+                ):
+                    continue
+                key = self._alloc_event_key("timer", event)
+                target_expr = self._compile_expr(event.args[0])
+                target_var = f"_initial_timer_target_{index}"
+                index += 1
+                lines.append(f"{prefix}{target_var} = float({target_expr})")
+                lines.append(
+                    f"{prefix}if math.isfinite({target_var}) "
+                    f"and {target_var} > time + 1e-18:"
+                )
+                lines.append(f"{prefix}    self.timer_kinds[{key!r}] = 'absolute'")
+                lines.append(
+                    f"{prefix}    self._set_timer_state({key!r}, {target_var})"
+                )
+        return lines
+
     def _is_batchable_timer_event_statement(self, stmt) -> bool:
         if not isinstance(stmt, EventStatement):
             return False
@@ -13587,9 +13956,13 @@ class _ModuleCompiler:
             return False
         return all(self._timer_expr_is_constant_or_param(arg) for arg in event.args)
 
-    def _state_owned_timer_target_name(self, stmt: EventStatement) -> Optional[str]:
+    def _state_owned_timer_target_name(
+        self,
+        stmt: EventStatement,
+        timer_event: Optional[EventExpr] = None,
+    ) -> Optional[str]:
         """Return the scalar state name for a safe ``timer(state)`` fast path."""
-        event = stmt.event
+        event = timer_event if timer_event is not None else stmt.event
         if not isinstance(event, EventExpr) or event.event_type != EventType.TIMER:
             return None
         if len(event.args) != 1 or not isinstance(event.args[0], Identifier):
@@ -13950,7 +14323,13 @@ class _ModuleCompiler:
                     if self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    conditions.append(self._compile_cross_call(e, key))
+                    conditions.append(
+                        self._compile_cross_call(
+                            e,
+                            key,
+                            force_post_side_on_exact_touch=True,
+                        )
+                    )
                 elif e.event_type == EventType.ABOVE:
                     if self._event_requires_post_update(e):
                         continue
@@ -13975,7 +14354,16 @@ class _ModuleCompiler:
                         )
                     else:
                         target_expr = self._compile_expr(e.args[0])
-                        conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
+                        state_owned_target = self._state_owned_timer_target_name(stmt, e)
+                        if state_owned_target is not None:
+                            slot = self._state_scalar_slot_by_name.get(state_owned_target, -1)
+                            self._state_owned_timer_targets[key] = state_owned_target
+                            conditions.append(
+                                f"self._check_state_owned_timer_at("
+                                f"{key!r}, time, {state_owned_target!r}, {slot})"
+                            )
+                        else:
+                            conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
                         absolute_timer_rearms.append((key, target_expr))
 
             if conditions:
@@ -14093,7 +14481,13 @@ class _ModuleCompiler:
         self._event_key_cache[cache_key] = key
         return key
 
-    def _compile_cross_call(self, event: EventExpr, key: str) -> str:
+    def _compile_cross_call(
+        self,
+        event: EventExpr,
+        key: str,
+        *,
+        force_post_side_on_exact_touch: bool = False,
+    ) -> str:
         expr = self._compile_expr(event.args[0])
         direction = event.direction if event.direction is not None else 0
         time_tol = "0.0"
@@ -14105,12 +14499,50 @@ class _ModuleCompiler:
         interp_nodes = sorted(self._collect_branch_nodes_from_expr(event.args[0]))
         raw_nudges = self._collect_branch_nudge_nodes_from_expr(event.args[0])
         nudge_nodes = {node: raw_nudges[node] for node in sorted(raw_nudges)}
+        raw_state_nudges = self._collect_continuous_state_nudges_from_expr(
+            event.args[0]
+        )
+        nudge_states = {
+            name: raw_state_nudges[name] for name in sorted(raw_state_nudges)
+        }
         if nudge_nodes:
             self._needs_future_node_voltages = True
         return (
             f"self._check_cross({key!r}, time, {expr}, {direction}, "
-            f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r})"
+            f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r}, "
+            f"{nudge_states!r}, "
+            f"force_post_side_on_exact_touch={force_post_side_on_exact_touch!r})"
         )
+
+    def _collect_continuous_state_nudges_from_expr(
+        self, expr: Expr, polarity: int = 1
+    ) -> Dict[str, int]:
+        """Return continuous-state aliases and their expression polarity."""
+
+        if isinstance(expr, Identifier):
+            if expr.name in getattr(self, "_continuous_vars", set()):
+                return {expr.name: 1 if polarity > 0 else -1}
+            return {}
+        if isinstance(expr, BinaryExpr):
+            values = self._collect_continuous_state_nudges_from_expr(
+                expr.left, polarity
+            )
+            right_polarity = -polarity if expr.op == "-" else polarity
+            for name, sign in self._collect_continuous_state_nudges_from_expr(
+                expr.right, right_polarity
+            ).items():
+                values[name] = values.get(name, 0) + sign
+            return {
+                name: 1 if sign > 0 else -1
+                for name, sign in values.items()
+                if sign
+            }
+        if isinstance(expr, UnaryExpr):
+            child_polarity = -polarity if expr.op == "-" else polarity
+            return self._collect_continuous_state_nudges_from_expr(
+                expr.operand, child_polarity
+            )
+        return {}
 
     def _compile_above_call(self, event: EventExpr, key: str) -> str:
         expr = self._compile_expr(event.args[0])
@@ -14230,6 +14662,9 @@ class _ModuleCompiler:
         elif kind == "last_crossing":
             key = f"last_cross_{self._last_cross_counter}"
             self._last_cross_counter += 1
+        elif kind == "absdelay":
+            key = f"absdelay_{self._absdelay_counter}"
+            self._absdelay_counter += 1
         elif kind == "ddt":
             key = f"ddt_{self._ddt_counter}"
             self._ddt_counter += 1
@@ -14414,6 +14849,8 @@ class _ModuleCompiler:
 
         if isinstance(event, CombinedEvent):
             conditions = []
+            absolute_timer_rearms = []
+            periodic_timer_rearms = []
             for e in event.events:
                 if not isinstance(e, EventExpr):
                     continue
@@ -14421,12 +14858,30 @@ class _ModuleCompiler:
                     if not self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    conditions.append(self._compile_cross_call(e, key))
+                    conditions.append(
+                        self._compile_cross_call(
+                            e,
+                            key,
+                            force_post_side_on_exact_touch=True,
+                        )
+                    )
                 elif e.event_type == EventType.ABOVE:
                     if not self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("above", e)
                     conditions.append(self._compile_above_call(e, key))
+                elif e.event_type == EventType.TIMER:
+                    key = self._alloc_event_key("timer", e)
+                    if (
+                        len(e.args) == 2
+                        and not self._timer_period_is_zero_literal(e.args[1])
+                    ):
+                        start_expr = self._compile_expr(e.args[0])
+                        period_expr = self._compile_expr(e.args[1])
+                        periodic_timer_rearms.append((key, period_expr, start_expr))
+                    else:
+                        target_expr = self._compile_expr(e.args[0])
+                        absolute_timer_rearms.append((key, target_expr))
             if conditions:
                 hit_vars = []
                 for idx, cond in enumerate(conditions):
@@ -14446,6 +14901,15 @@ class _ModuleCompiler:
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                for timer_key, target_expr in absolute_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._set_timer_state({timer_key!r}, {target_expr})"
+                    )
+                for timer_key, period_expr, start_expr in periodic_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._reschedule_timer("
+                        f"{timer_key!r}, time, {period_expr}, {start_expr})"
+                    )
                 lines.append(f"{prefix}    self._event_trace_audit_exit_event()")
                 lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
@@ -16441,6 +16905,15 @@ class _ModuleCompiler:
         if name == 'transition':
             key_expr, target, delay, rise, fall = self._compile_transition_call_parts(expr)
             return f"self._transition({key_expr}, time, {target}, {delay}, {rise}, {fall})"
+
+        if name == 'absdelay':
+            base_key = self._alloc_stateful_func_key("absdelay", expr)
+            value = args[0] if len(args) > 0 else "0.0"
+            delay = args[1] if len(args) > 1 else "0.0"
+            maxdelay = args[2] if len(args) > 2 else "None"
+            if self._in_loop_var:
+                return f"self._absdelay(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {value}, {delay}, {maxdelay})"
+            return f"self._absdelay({base_key!r}, time, {value}, {delay}, {maxdelay})"
 
         if name == 'slew':
             base_key = self._alloc_stateful_func_key("slew", expr)

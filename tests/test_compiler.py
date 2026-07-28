@@ -1236,6 +1236,104 @@ class TestParserEventStatements:
         stmt = stmts[0]
         assert isinstance(stmt.body, Block)
 
+    def test_named_analog_and_event_blocks_accept_local_declarations(self):
+        src = """
+        module m(out);
+        output out;
+        electrical out;
+        analog begin : behavioral
+            @(timer(0, 1n)) begin : poll_block
+                integer state;
+                state = 1;
+            end
+            V(out) <+ 0.0;
+        end
+        endmodule
+        """
+        module = _parse(src)
+        assert [variable.name for variable in module.variables] == [
+            "__evas_block_0_state"
+        ]
+        event = module.analog_block.body.statements[0]
+        assert event.body.statements[0].target.name == "__evas_block_0_state"
+
+    def test_named_block_locals_are_lexically_renamed_without_sibling_collisions(self):
+        src = """
+        module m(out);
+        output out;
+        electrical out;
+        integer state;
+        analog begin
+            begin : first
+                integer state;
+                state = 1;
+            end : first
+            begin : second
+                integer state;
+                state = 2;
+            end : second
+            state = 3;
+            V(out) <+ state;
+        end
+        endmodule
+        """
+        module = _parse(src)
+        assert [variable.name for variable in module.variables] == [
+            "state",
+            "__evas_block_0_state",
+            "__evas_block_1_state",
+        ]
+        first, second, outside, _ = module.analog_block.body.statements
+        assert first.statements[0].target.name == "__evas_block_0_state"
+        assert second.statements[0].target.name == "__evas_block_1_state"
+        assert outside.target.name == "state"
+
+    def test_named_block_declarations_must_precede_statements(self):
+        src = """
+        module m();
+        analog begin : behavioral
+            x = 1;
+            integer x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="must precede statements"):
+            _parse(src)
+
+    def test_named_block_end_label_must_match(self):
+        src = """
+        module m();
+        analog begin : expected
+            integer x;
+            x = 1;
+        end : other
+        endmodule
+        """
+        with pytest.raises(ParseError, match="does not match"):
+            _parse(src)
+
+    def test_duplicate_named_block_local_is_rejected(self):
+        src = """
+        module m();
+        analog begin : behavioral
+            integer x;
+            real x;
+            x = 1;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="Duplicate named-block local"):
+            _parse(src)
+
+    def test_empty_combined_event_statement_preserves_following_statement(self):
+        stmts = _stmts(
+            "@(cross(V(a) - 0.45, +1) or cross(V(b) - 0.45, -1)); x = 1;"
+        )
+        assert isinstance(stmts[0], EventStatement)
+        assert isinstance(stmts[0].body, Block)
+        assert stmts[0].body.statements == []
+        assert isinstance(stmts[1], Assignment)
+
     def test_local_declaration_in_event_block_is_rejected(self):
         src = """
         module m(clk, vin, out);
@@ -1300,6 +1398,12 @@ class TestParserCaseStatement:
         stmt = stmts[0]
         assert isinstance(stmt, CaseStatement)
         assert len(stmt.items) == 2
+
+    def test_case_null_statement_parses_as_empty_block(self):
+        stmt = _stmts("case (x) 1: ; 2: y = 1; endcase")[0]
+        assert isinstance(stmt.items[0].body, Block)
+        assert stmt.items[0].body.statements == []
+        assert isinstance(stmt.items[1].body, Assignment)
 
     def test_case_with_default(self):
         stmts = _stmts("case (x) 0: y = 0; default: y = -1; endcase")
@@ -1533,6 +1637,11 @@ class TestParserExpressions:
 
 class TestParserSystemTask:
 
+    def test_discontinuity_requires_exactly_one_argument(self):
+        """Spectre VACOMP-1206 rejects a bare $discontinuity task."""
+        with pytest.raises(ParseError, match="exactly one argument"):
+            _stmts("$discontinuity;")
+
     def test_strobe_no_args(self):
         stmts = _stmts("$strobe;")
         stmt = stmts[0]
@@ -1759,6 +1868,33 @@ class TestAnsiSharedDisciplineWarning:
         """
         m = _parse(src)
         assert m.warnings == []
+
+    def test_ansi_typed_ports_cannot_be_redeclared_in_module_body(self):
+        """Spectre VACOMP-1697 rejects a second discipline declaration."""
+        src = """
+        module m(
+            input electrical inp,
+            output electrical out
+        );
+        electrical inp, out;
+        analog V(out) <+ V(inp);
+        endmodule
+        """
+        with pytest.raises(ParseError, match="redeclares ANSI port"):
+            _parse(src)
+
+    def test_ansi_direction_only_ports_accept_body_discipline_declaration(self):
+        src = """
+        module m(input a, output b);
+        electrical a, b;
+        analog V(b) <+ V(a);
+        endmodule
+        """
+        module = _parse(src)
+        assert [(port.name, port.discipline) for port in module.port_decls] == [
+            ("a", "electrical"),
+            ("b", "electrical"),
+        ]
 
     def test_shared_discipline_still_parses_correctly(self):
         """EVAS must still simulate even with the warning — tolerant behaviour."""

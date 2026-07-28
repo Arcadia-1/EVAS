@@ -1064,6 +1064,107 @@ fn collects_same_step_cross_events_by_interpolated_time() {
 }
 
 #[test]
+fn collects_accepted_pwl_cross_after_source_breakpoint() {
+    let sources = [EvasRustSimSourceSpec {
+        kind: RUST_SIM_SOURCE_PWL,
+        flags: 0,
+        node_id: 0,
+        data_start: 0,
+        data_count: 4,
+        p0: 0.0,
+        p1: 0.0,
+        p2: 0.0,
+        p3: 0.0,
+        p4: 0.0,
+        p5: 0.0,
+        p6: 0.0,
+        p7: 0.0,
+    }];
+    let source_data = [0.0, 0.999e-9, 1.0e-9, 3.0e-9, 0.0, 0.0, 1.0, 1.0];
+    let expr_ops = [
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_READ_NODE,
+            index: 0,
+            value: 0.0,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_CONST,
+            index: 0,
+            value: 0.45,
+        },
+        EvasRustBodyExprOp {
+            op_kind: BODY_EXPR_SUB,
+            index: 0,
+            value: 0.0,
+        },
+    ];
+    let events = [EvasRustSimEventSpec {
+        kind: RUST_SIM_EVENT_CROSS,
+        phase: RUST_SIM_EVENT_PHASE_PRE,
+        direction: 0,
+        expr_start: 0,
+        expr_count: 3,
+        time_tol_start: 0,
+        time_tol_count: 0,
+        expr_tol_start: 0,
+        expr_tol_count: 0,
+        timer_start_expr_start: 0,
+        timer_start_expr_count: 0,
+        timer_period_expr_start: 0,
+        timer_period_expr_count: 0,
+        body_stmt_start: 0,
+        body_stmt_count: 1,
+    }];
+    let mut node_values = [0.0];
+    let mut cross_prev_values = [-0.45];
+    let mut cross_prev_times = [0.999e-9];
+    let mut cross_pprev_values = [-0.45];
+    let mut cross_pprev_times = [0.0];
+    let mut cross_initialized = [1_u8];
+    let mut cross_last_times = [-1.0];
+    let mut candidates = Vec::new();
+    let time = 0.99945e-9;
+
+    rust_sim_write_sources(&sources, &source_data, &mut node_values, time).unwrap();
+    rust_sim_collect_cross_events_into(
+        &sources,
+        &source_data,
+        &[],
+        &events,
+        &expr_ops,
+        &node_values,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut cross_prev_values,
+        &mut cross_prev_times,
+        &mut cross_pprev_values,
+        &mut cross_pprev_times,
+        &mut cross_initialized,
+        &mut cross_last_times,
+        time,
+        false,
+        RUST_SIM_EVENT_PHASE_PRE,
+        true,
+        0.0,
+        &mut candidates,
+    )
+    .unwrap();
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].event_idx, 0);
+}
+
+#[test]
 fn steps_above_detectors_from_arrays() {
     let mut prev_values = [0.0, -1.0, 1.0];
     let mut prev_times = [0.0, 0.0, 0.0];

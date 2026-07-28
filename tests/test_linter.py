@@ -758,6 +758,137 @@ def test_unsupported_continuous_time_operator_is_tiered():
     assert has_compat_errors(diags)
 
 
+def test_strict_spectre_rejects_parameter_default_on_exclusive_bound():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module exclusive_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 0 from (0:inf);
+            analog begin
+                V(out) <+ tdel;
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert not has_compat_errors(extension_diags)
+    assert has_compat_errors(strict_diags)
+    assert any(
+        "parameter tdel default 0" in diag.message
+        and "exclusive lower bound" in diag.message
+        for diag in strict_diags
+    )
+
+
+def test_strict_spectre_accepts_parameter_default_inside_range():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module inside_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 1p from (0:inf);
+            analog begin
+                V(out) <+ tdel;
+            end
+        endmodule
+    """)
+
+    assert not has_compat_errors(lint_source(source, strict_spectre=True))
+
+
+def test_strict_spectre_rejects_typed_old_style_function_input():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module typed_function(out);
+            output out;
+            electrical out;
+            analog function real clip01;
+                input real y;
+                begin
+                    clip01 = y;
+                end
+            endfunction
+            analog begin
+                V(out) <+ clip01(0.5);
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert not has_compat_errors(extension_diags)
+    assert has_compat_errors(strict_diags)
+    assert any("input y; real y;" in diag.message for diag in strict_diags)
+
+
+def test_strict_spectre_accepts_split_old_style_function_input_type():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module split_function(out);
+            output out;
+            electrical out;
+            analog function real clip01;
+                input y;
+                real y;
+                begin
+                    clip01 = y;
+                end
+            endfunction
+            analog begin
+                V(out) <+ clip01(0.5);
+            end
+        endmodule
+    """)
+
+    assert not has_compat_errors(lint_source(source, strict_spectre=True))
+
+
+def test_strict_spectre_rejects_source_local_custom_discipline():
+    source = textwrap.dedent("""\
+        discipline electrical
+            potential Voltage;
+            flow Current;
+        enddiscipline
+        module missing_semicolon(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert not has_compat_errors(extension_diags)
+    assert has_compat_errors(strict_diags)
+    assert any(
+        "custom nature/discipline" in diag.message
+        and "disciplines.vams" in diag.message
+        for diag in strict_diags
+    )
+
+
+def test_strict_spectre_accepts_builtin_discipline_include():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module terminated_header(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    assert not has_compat_errors(lint_source(source, strict_spectre=True))
+
+
 def test_unsupported_random_distribution_is_behavioral_event_tiered():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
@@ -1227,6 +1358,98 @@ def test_strict_spectre_does_not_treat_comment_or_string_backticks_as_macros():
     )
 
 
+def test_strict_spectre_rejects_parameter_default_on_exclusive_range_bound():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module exclusive_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 0 from (0:inf);
+            analog begin
+                V(out) <+ transition(1.0, tdel, 20p, 20p);
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "parameter tdel default 0 violates the exclusive lower bound 0" in messages
+    assert has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_allows_parameter_default_on_inclusive_range_bound():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module inclusive_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 0 from [0:inf);
+            analog begin
+                V(out) <+ transition(1.0, tdel, 20p, 20p);
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(strict_diags)
+    assert not has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_rejects_realtime_call_parentheses():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module realtime_call(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ sin($realtime());
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "standalone Spectre requires $realtime without parentheses" in messages
+    assert has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_rejects_typed_subprogram_arg_declaration():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module typed_arg(out);
+            output out;
+            electrical out;
+            analog function real clip01;
+                input real x;
+                begin
+                    clip01 = x;
+                end
+            endfunction
+            analog begin
+                V(out) <+ clip01(1.0);
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "typed subprogram argument declaration" in messages
+    assert has_compat_errors(strict_diags)
+
+
 def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     va_file = tmp_path / "model.va"
     va_file.write_text(textwrap.dedent("""\
@@ -1250,6 +1473,31 @@ def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     diags = lint_file(scs_file)
 
     assert {"EVAS-AHDL-W5004", "EVAS-AHDL-W5005"} <= _codes(diags)
+
+
+def test_lint_spectre_netlist_strict_rejects_fake_ground_instance(tmp_path):
+    scs_file = tmp_path / "tb.scs"
+    scs_file.write_text(
+        "simulator lang=spectre\ngnd (0)\ntran tran stop=1n\n",
+        encoding="utf-8",
+    )
+
+    extension_diags = lint_file(scs_file)
+    strict_diags = lint_file(scs_file, strict_spectre=True)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert any("use `global 0`" in diag.message for diag in strict_diags)
+
+
+def test_lint_spectre_netlist_strict_accepts_global_ground(tmp_path):
+    scs_file = tmp_path / "tb.scs"
+    scs_file.write_text(
+        "simulator lang=spectre\nglobal 0\ntran tran stop=1n\n",
+        encoding="utf-8",
+    )
+
+    assert not has_compat_errors(lint_file(scs_file, strict_spectre=True))
 
 
 def test_lint_spectre_netlist_does_not_fallback_to_include_basename(tmp_path):

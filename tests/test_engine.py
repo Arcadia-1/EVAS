@@ -4817,6 +4817,52 @@ endmodule
         assert rust_result.signals["OUT"][-1] == pytest.approx(1.0, abs=1e-12)
         assert rust._perf_stats["rust_sim_program_enabled"] == 1
         assert rust._perf_stats["generic_executor_runs"] == 0
+
+
+    def test_initial_step_arms_top_level_combined_absolute_timer_before_first_step(self):
+        src = """\
+`include "disciplines.vams"
+module combined_initial_timer(ref, out);
+    input voltage ref;
+    output voltage out;
+    real next_edge;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            next_edge = 1n;
+            count = 0;
+        end
+        @(timer(next_edge) or cross(V(ref) - 0.5, +1)) begin
+            if ($abstime >= next_edge - 1p) begin
+                count = count + 1;
+                next_edge = next_edge + 1n;
+            end
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"ref": "REF", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("REF", dc(0.0))
+        sim.add_model(model)
+        sim.record("OUT")
+
+        result = sim.run(
+            tstop=5e-9,
+            tstep=5e-9,
+            record_step=1e-9,
+            max_step=5e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["OUT"][-1] >= 4.0
+        assert model._perf_stats["timer_absolute_fires"] >= 4
+        assert model._perf_stats["timer_absolute_expirations"] == 0
+
+
     def test_rust_sim_program_state_owned_timer_rearms_with_abstime(self):
         _build_rust_core_or_skip()
         src = """\
@@ -13402,6 +13448,25 @@ endmodule
 
         assert model.arrays["stage"][0] == pytest.approx(0.625)
         assert model.output_nodes["y"] == pytest.approx(0.625)
+
+    def test_array_aggregate_initializer_follows_declared_direction(self):
+        src = """\
+module aggregate_array_direction(out);
+    output wreal out;
+    real ascending[0:3] = '{0.1, 0.2, 0.3, 0.4};
+    real descending[3:0] = '{1.1, 1.2, 1.3, 1.4};
+    assign out = ascending[0] + descending[3];
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.arrays["ascending"] == pytest.approx(
+            {0: 0.1, 1: 0.2, 2: 0.3, 3: 0.4}
+        )
+        assert model.arrays["descending"] == pytest.approx(
+            {3: 1.1, 2: 1.2, 1: 1.3, 0: 1.4}
+        )
 
     def test_initial_step_analysis_filters_are_accepted_like_spectre(self):
         src = """\

@@ -32,7 +32,7 @@ from evas.compiler.parser import (
     parse_all as parse_all_va,
 )
 from evas.compiler.preprocessor import preprocess
-from evas.simulator.backend import compile_module
+from evas.simulator.backend import compile_module, transition_case_shape_error
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine, square
 from evas.simulator.indexed import (
     build_indexed_run_plan,
@@ -64,7 +64,6 @@ RUST_EVAS_ENGINE = "evas-rust"
 DEFAULT_EVAS_ENGINE = RUST_EVAS_ENGINE
 _RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
 _DEVELOPER_ENGINE_OVERRIDE: Optional[str] = None
-
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
     "fast": {"refine_factor": 8, "refine_steps": 4, "reltol_min": 5e-3},
@@ -183,6 +182,135 @@ def _normalize_evas_engine(engine: str) -> str:
     raise ValueError(
         f"unsupported EVAS engine {engine!r}; expected {RUST_EVAS_ENGINE!r}"
     )
+
+
+def _netlist_rust_unsupported_features(
+    netlist: SpectreNetlist,
+) -> Tuple[str, ...]:
+    """Return syntax features that are not safe on the Rust production engine.
+
+    Production execution is Rust-only.  This narrow syntax gate prevents EVAS
+    from silently running constructs whose Rust lowering is absent or whose
+    event semantics are not yet Spectre-compatible.
+    """
+
+    features: set[str] = set()
+    source_dir = Path(netlist.source_dir)
+    for include in netlist.ahdl_includes:
+        include_path = Path(include.path)
+        va_path = (
+            include_path.resolve()
+            if include_path.is_absolute()
+            else (source_dir / include_path).resolve()
+        )
+        if not va_path.is_file():
+            continue
+        try:
+            source = va_path.read_text(encoding="utf-8", errors="replace")
+            preprocessed, _defines, _default_transition = preprocess(
+                source,
+                source_dir=str(va_path.parent),
+            )
+            modules = parse_all_va(preprocessed)
+        except Exception:
+            # The normal compile gate owns diagnostics for malformed sources.
+            continue
+        for module in modules:
+            array_names = {
+                variable.name
+                for variable in module.variables
+                if getattr(variable, "is_array", False)
+            }
+            if array_names:
+                static_names = {
+                    parameter.name
+                    for parameter in va_ast.module_constant_parameters(module)
+                }
+                static_names.update(
+                    variable.name
+                    for variable in module.variables
+                    if getattr(variable, "is_genvar", False)
+                )
+                for access in _iter_array_accesses(module):
+                    if access.name not in array_names:
+                        continue
+                    if not _is_static_array_index(access.index, static_names):
+                        features.add("dynamic_state_array_access")
+                        break
+            if _module_uses_time_dependent_cross(module):
+                features.add("time_dependent_cross_event")
+    return tuple(sorted(features))
+
+
+def _iter_array_accesses(value):
+    if value is None:
+        return
+    if isinstance(value, va_ast.ArrayAccess):
+        yield value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_array_accesses(item)
+    elif is_dataclass(value):
+        for field in fields(value):
+            yield from _iter_array_accesses(getattr(value, field.name))
+
+
+def _is_static_array_index(value, static_names: set[str]) -> bool:
+    if isinstance(value, va_ast.NumberLiteral):
+        return True
+    if isinstance(value, va_ast.Identifier):
+        return value.name in static_names
+    if isinstance(value, (va_ast.UnaryExpr, va_ast.BinaryExpr)):
+        return all(
+            _is_static_array_index(getattr(value, field.name), static_names)
+            for field in fields(value)
+            if field.name != "op"
+        )
+    return False
+
+
+def _module_uses_time_dependent_cross(module) -> bool:
+    """Detect cross() expressions whose value advances with simulation time.
+
+    The Rust SimProgram currently samples cross expressions only when another
+    scheduled event or circuit update wakes the model.  An expression such as
+    ``cross($abstime - deadline, +1)`` therefore cannot schedule its own future
+    crossing and must fail closed until Rust can schedule it correctly.
+    """
+
+    analog_block = getattr(module, "analog_block", None)
+    if analog_block is None:
+        return False
+    for value in _iter_dataclass_values(analog_block.body):
+        if not isinstance(value, va_ast.EventStatement):
+            continue
+        events = (
+            value.event.events
+            if isinstance(value.event, va_ast.CombinedEvent)
+            else (value.event,)
+        )
+        for event in events:
+            if event.event_type != va_ast.EventType.CROSS or not event.args:
+                continue
+            if any(
+                isinstance(item, va_ast.Identifier)
+                and item.name.lower() in {"$abstime", "$realtime"}
+                for item in _iter_dataclass_values(event.args[0])
+            ):
+                return True
+    return False
+
+
+def _iter_dataclass_values(value):
+    if value is None:
+        return
+    yield value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_dataclass_values(item)
+    elif is_dataclass(value):
+        for field in fields(value):
+            yield from _iter_dataclass_values(getattr(value, field.name))
 
 
 def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
@@ -459,7 +587,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         if conditional_depth > 0 and _expr_has_call(stmt.expr, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() contribution "
-                "is inside a conditional/event/loop/case statement"
+                "is inside a conditional/event/loop statement"
             )
         _validate_supported_function_calls(stmt.expr, user_function_names)
         return
@@ -472,7 +600,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         if conditional_depth > 0 and _expr_has_call(stmt.value, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() expression "
-                "is inside a conditional/event/loop/case statement"
+                "is inside a conditional/event/loop statement"
             )
         _validate_supported_function_calls(stmt.target, user_function_names)
         _validate_supported_function_calls(stmt.value, user_function_names)
@@ -527,7 +655,7 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
         for item in stmt.items:
             for value in item.values:
                 _validate_supported_function_calls(value, user_function_names)
-            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names, in_event, user_function_names)
+            _validate_transition_statement(item.body, conditional_depth, genvar_names, in_event, user_function_names)
 
 
 def _contains_branch_access(value) -> bool:
@@ -833,6 +961,11 @@ def _validate_va_spectre_compat(module) -> None:
                 "discipline declarations in a non-ANSI module body"
             )
     if module.analog_block is not None:
+        case_error = transition_case_shape_error(module)
+        if case_error is not None:
+            raise ValueError(
+                "Unsupported case-selected transition() semantics: " + case_error
+            )
         genvar_names = {
             v.name for v in module.variables if getattr(v, "is_genvar", False)
         }
@@ -1814,6 +1947,20 @@ def _build_spectre_compile_context(
                 log.write(f"ERROR: {message}")
             add_error("parse", message)
             return finish(ok=False, stage="parse")
+
+    if require_rust_lowering:
+        unsupported_rust_features = _netlist_rust_unsupported_features(netlist)
+        if unsupported_rust_features:
+            feature_list = ", ".join(unsupported_rust_features)
+            message = (
+                "Rust production engine does not support these Verilog-A "
+                f"features: {feature_list}. EVAS does not fall back to the "
+                "Python simulation engine."
+            )
+            if log is not None:
+                log.write(f"ERROR [rust_lowering]: {message}")
+            add_error("rust_lowering", message)
+            return finish(ok=False, stage="rust_lowering")
 
     if has_transistors(netlist):
         message = "Netlist contains transistor-level devices."

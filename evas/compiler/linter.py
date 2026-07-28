@@ -10,7 +10,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
-from evas.netlist.spectre_parser import parse_spectre
+from evas.netlist.spectre_parser import (
+    parse_spectre,
+    strict_spectre_netlist_diagnostics,
+)
 from evas.support_tiers import (
     AMS_DIGITAL,
     BEHAVIORAL_EVENT,
@@ -215,10 +218,25 @@ def lint_spectre_netlist(
     strict_spectre: bool = False,
 ) -> List[Diagnostic]:
     scs_path = Path(path).resolve()
+    diagnostics: List[Diagnostic] = []
+    if strict_spectre:
+        prefix = "EVAS-NETLIST-ESPECTRESTRICT: "
+        diagnostics.extend(
+            _diag(
+                code="EVAS-COMP-ESPECTRESTRICT",
+                message=(
+                    message[len(prefix):]
+                    if message.startswith(prefix)
+                    else message
+                ),
+                file=str(scs_path),
+            )
+            for message in strict_spectre_netlist_diagnostics(str(scs_path))
+        )
     try:
         netlist = parse_spectre(str(scs_path))
     except Exception as exc:
-        return [
+        return diagnostics + [
             _diag(
                 code="EVAS-COMP-ENETLIST",
                 message=f"failed to parse Spectre netlist: {exc}",
@@ -226,7 +244,6 @@ def lint_spectre_netlist(
             )
         ]
 
-    diagnostics: List[Diagnostic] = []
     scs_dir = Path(netlist.source_dir)
     for inc in netlist.ahdl_includes:
         va_path = _resolve_ahdl_include(inc.path, scs_dir)
@@ -286,9 +303,15 @@ def lint_source(
     diagnostics: List[Diagnostic] = []
     strict_token_diagnostics: List[Diagnostic] = []
     try:
+        if strict_spectre:
+            strict_token_diagnostics.extend(
+                _lint_strict_source_declarations(source, filename)
+            )
         pp_src, _defines, _default_transition = preprocess(source, source_dir=source_dir)
         if strict_spectre:
-            strict_token_diagnostics = _lint_strict_spectre_tokens(pp_src, filename)
+            strict_token_diagnostics.extend(
+                _lint_strict_spectre_tokens(pp_src, filename)
+            )
         range_diagnostics = _lint_nonconstant_discipline_ranges(pp_src, filename)
         modules = parse_all(pp_src)
     except PreprocessorError as exc:
@@ -606,12 +629,62 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
         tokens = tokenize(source)
     except Exception:
         return diagnostics
-    for token in tokens:
+    in_function = False
+    function_header_terminated = False
+    for index, token in enumerate(tokens):
         if token.type == TokenType.EOF:
             break
+        if token.type == TokenType.FUNCTION:
+            in_function = True
+            function_header_terminated = False
+        elif token.type == TokenType.ENDFUNCTION:
+            in_function = False
+            function_header_terminated = False
+        elif in_function and token.type == TokenType.SEMI:
+            function_header_terminated = True
+
+        if (
+            in_function
+            and function_header_terminated
+            and token.type in {TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT}
+            and index + 1 < len(tokens)
+            and tokens[index + 1].type in {TokenType.REAL, TokenType.INTEGER}
+        ):
+            name = "argument"
+            if index + 2 < len(tokens):
+                name = tokens[index + 2].value
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "typed old-style analog function argument",
+                    BEHAVIORAL_EVENT,
+                    f"declare `input {name}; real {name};` (or the matching "
+                    "integer type) as separate declarations",
+                    filename,
+                    line=token.line,
+                    column=token.col,
+                )
+            )
+
         spec = _STRICT_TOKEN_REJECTIONS.get(token.type)
         if spec is None and token.type == TokenType.IDENT:
             spec = _STRICT_IDENT_REJECTIONS.get(token.value.lower())
+        if (
+            token.type == TokenType.IDENT
+            and token.value == "$realtime"
+            and index + 2 < len(tokens)
+            and tokens[index + 1].type == TokenType.LPAREN
+            and tokens[index + 2].type == TokenType.RPAREN
+        ):
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "$realtime()",
+                    BEHAVIORAL_EVENT,
+                    "standalone Spectre requires $realtime without parentheses",
+                    filename,
+                    line=token.line,
+                    column=token.col,
+                )
+            )
         if spec is None:
             continue
         feature, tier, detail = spec
@@ -625,6 +698,85 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
                 column=token.col,
             )
         )
+    diagnostics.extend(_lint_strict_subprogram_arg_tokens(tokens, filename))
+    return diagnostics
+
+
+def _lint_strict_subprogram_arg_tokens(
+    tokens: Sequence[Token],
+    filename: str,
+) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    in_subprogram = False
+    for index, token in enumerate(tokens):
+        if token.type in {TokenType.FUNCTION, TokenType.TASK}:
+            in_subprogram = True
+            continue
+        if token.type in {TokenType.ENDFUNCTION, TokenType.ENDTASK, TokenType.EOF}:
+            in_subprogram = False
+            continue
+        if not in_subprogram or token.type not in {
+            TokenType.INPUT,
+            TokenType.OUTPUT,
+            TokenType.INOUT,
+        }:
+            continue
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else None
+        if next_token is None or next_token.type not in {
+            TokenType.REAL,
+            TokenType.INTEGER,
+        }:
+            continue
+        diagnostics.append(
+            _strict_spectre_diag(
+                "typed subprogram argument declaration",
+                BEHAVIORAL_EVENT,
+                (
+                    "standalone Spectre rejects declarations such as "
+                    f"{token.value} {next_token.value}; use old-style "
+                    "argument naming plus a separate type declaration"
+                ),
+                filename,
+                line=token.line,
+                column=token.col,
+            )
+        )
+    return diagnostics
+
+
+def _lint_strict_source_declarations(
+    source: str,
+    filename: str,
+) -> List[Diagnostic]:
+    """Reject source-local custom nature/discipline definitions.
+
+    Preprocessing expands ``disciplines.vams`` into the token stream, so this
+    check deliberately runs on the unexpanded source.  Built-in discipline
+    includes remain accepted while candidate-local redefinitions do not get
+    silently skipped by EVAS's module-oriented parser.
+    """
+    diagnostics: List[Diagnostic] = []
+    try:
+        tokens = tokenize(source)
+    except Exception:
+        return diagnostics
+    for token in tokens:
+        if token.type != TokenType.IDENT:
+            continue
+        if token.value.lower() not in {"discipline", "nature"}:
+            continue
+        diagnostics.append(
+            _strict_spectre_diag(
+                "source-local custom nature/discipline declaration",
+                BEHAVIORAL_EVENT,
+                "EVAS does not elaborate custom nature/discipline definitions; "
+                "include `disciplines.vams` and use its built-in electrical "
+                "discipline instead",
+                filename,
+                line=token.line,
+                column=token.col,
+            )
+        )
     return diagnostics
 
 
@@ -633,6 +785,58 @@ def _lint_strict_spectre_module(
     filename: str,
 ) -> List[Diagnostic]:
     diagnostics: List[Diagnostic] = []
+    for param in va_ast.module_constant_parameters(module):
+        default = _numeric_value(param.default_value)
+        lower = (
+            _numeric_value(param.range_lo)
+            if param.range_lo is not None
+            else None
+        )
+        upper = (
+            _numeric_value(param.range_hi)
+            if param.range_hi is not None
+            else None
+        )
+        if (
+            default is not None
+            and lower is not None
+            and (
+                default < lower
+                or (default == lower and not param.range_lo_inclusive)
+            )
+        ):
+            boundary = "inclusive" if param.range_lo_inclusive else "exclusive"
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "parameter default outside its declared range",
+                    BEHAVIORAL_EVENT,
+                    f"parameter {param.name} default {default:g} violates the "
+                    f"{boundary} lower bound {lower:g}",
+                    filename,
+                    module=module.name,
+                    node=param,
+                )
+            )
+        if (
+            default is not None
+            and upper is not None
+            and (
+                default > upper
+                or (default == upper and not param.range_hi_inclusive)
+            )
+        ):
+            boundary = "inclusive" if param.range_hi_inclusive else "exclusive"
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "parameter default outside its declared range",
+                    BEHAVIORAL_EVENT,
+                    f"parameter {param.name} default {default:g} violates the "
+                    f"{boundary} upper bound {upper:g}",
+                    filename,
+                    module=module.name,
+                    node=param,
+                )
+            )
     constant_index_names = {
         param.name for param in va_ast.module_constant_parameters(module)
     }
@@ -773,7 +977,6 @@ def _lint_strict_spectre_module(
             scalar_integer_names,
         )
     return diagnostics
-
 
 def _lint_strict_spectre_statement(
     stmt: va_ast.Statement,
