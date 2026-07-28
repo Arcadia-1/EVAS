@@ -6861,6 +6861,13 @@ class _ModuleCompiler:
                 lines.extend(stmt_lines)
         for stmt in mod.continuous_assigns:
             lines.extend(self._compile_assignment(stmt, 2))
+        if mod.analog_block:
+            lines.extend(
+                self._compile_initial_absolute_timer_arms(
+                    mod.analog_block.body,
+                    2,
+                )
+            )
         # Audit 088 fix: initial_step may emit transition_output_lazy via
         # _compile_contribution. Flush so pending state is not orphaned.
         lines.append("        if self._transition_pending_count > 0:")
@@ -13846,6 +13853,58 @@ class _ModuleCompiler:
     @staticmethod
     def _timer_period_is_zero_literal(expr: Expr) -> bool:
         return isinstance(expr, NumberLiteral) and float(expr.value) == 0.0
+
+    def _compile_initial_absolute_timer_arms(self, analog_body, indent: int) -> List[str]:
+        """Arm top-level absolute state timers after initial_step assignment.
+
+        The transient driver asks ``next_breakpoint()`` before the first regular
+        evaluate pass.  For ``@(timer(state_time))`` where ``state_time`` is set
+        in ``initial_step``, the timer must already be visible at that point or
+        sub-step deadlines before the first source/save grid point are skipped.
+        Nested timers are intentionally excluded: they are not active until
+        their enclosing event body executes.
+        """
+        if analog_body is None:
+            return []
+        prefix = '    ' * indent
+        lines: List[str] = []
+        index = 0
+        for stmt in getattr(analog_body, "statements", ()):
+            if not isinstance(stmt, EventStatement):
+                continue
+            events = (
+                stmt.event.events
+                if isinstance(stmt.event, CombinedEvent)
+                else (stmt.event,)
+            )
+            for event in events:
+                if not (
+                    isinstance(event, EventExpr)
+                    and event.event_type == EventType.TIMER
+                    and len(event.args) == 1
+                    and isinstance(event.args[0], Identifier)
+                ):
+                    continue
+                target_name = event.args[0].name
+                if (
+                    target_name not in self._state_scalar_slot_by_name
+                    or self._is_integer_variable(target_name)
+                ):
+                    continue
+                key = self._alloc_event_key("timer", event)
+                target_expr = self._compile_expr(event.args[0])
+                target_var = f"_initial_timer_target_{index}"
+                index += 1
+                lines.append(f"{prefix}{target_var} = float({target_expr})")
+                lines.append(
+                    f"{prefix}if math.isfinite({target_var}) "
+                    f"and {target_var} > time + 1e-18:"
+                )
+                lines.append(f"{prefix}    self.timer_kinds[{key!r}] = 'absolute'")
+                lines.append(
+                    f"{prefix}    self._set_timer_state({key!r}, {target_var})"
+                )
+        return lines
 
     def _is_batchable_timer_event_statement(self, stmt) -> bool:
         if not isinstance(stmt, EventStatement):

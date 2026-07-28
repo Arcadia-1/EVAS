@@ -1397,6 +1397,98 @@ def test_strict_spectre_does_not_treat_comment_or_string_backticks_as_macros():
     )
 
 
+def test_strict_spectre_rejects_parameter_default_on_exclusive_range_bound():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module exclusive_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 0 from (0:inf);
+            analog begin
+                V(out) <+ transition(1.0, tdel, 20p, 20p);
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "parameter tdel default 0 violates the exclusive lower bound 0" in messages
+    assert has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_allows_parameter_default_on_inclusive_range_bound():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module inclusive_bound(out);
+            output out;
+            electrical out;
+            parameter real tdel = 0 from [0:inf);
+            analog begin
+                V(out) <+ transition(1.0, tdel, 20p, 20p);
+            end
+        endmodule
+    """)
+
+    strict_diags = lint_source(source, strict_spectre=True)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(strict_diags)
+    assert not has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_rejects_realtime_call_parentheses():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module realtime_call(out);
+            output out;
+            electrical out;
+            analog begin
+                V(out) <+ sin($realtime());
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "standalone Spectre requires $realtime without parentheses" in messages
+    assert has_compat_errors(strict_diags)
+
+
+def test_strict_spectre_rejects_typed_subprogram_arg_declaration():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module typed_arg(out);
+            output out;
+            electrical out;
+            analog function real clip01;
+                input real x;
+                begin
+                    clip01 = x;
+                end
+            endfunction
+            analog begin
+                V(out) <+ clip01(1.0);
+            end
+        endmodule
+    """)
+
+    extension_diags = lint_source(source)
+    strict_diags = lint_source(source, strict_spectre=True)
+    messages = "\n".join(diag.message for diag in strict_diags)
+
+    assert "EVAS-COMP-ESPECTRESTRICT" not in _codes(extension_diags)
+    assert "EVAS-COMP-ESPECTRESTRICT" in _codes(strict_diags)
+    assert "typed subprogram argument declaration" in messages
+    assert has_compat_errors(strict_diags)
+
+
 def test_lint_spectre_netlist_follows_ahdl_include(tmp_path):
     va_file = tmp_path / "model.va"
     va_file.write_text(textwrap.dedent("""\

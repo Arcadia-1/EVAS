@@ -1424,6 +1424,7 @@ class Parser:
             declared_type = ParamType.STRING
 
         while True:
+            name_token = self.peek()
             name = self._expect_identifier_name("parameter declaration")
 
             default_val = NumberLiteral(0)
@@ -1468,6 +1469,7 @@ class Parser:
                 range_lo_inclusive=range_lo_incl, range_hi_inclusive=range_hi_incl,
                 exclude_expr=exclude_expr,
             )
+            param = self._with_location(param, name_token)
             if is_localparam:
                 module.localparams.append(param)
             else:

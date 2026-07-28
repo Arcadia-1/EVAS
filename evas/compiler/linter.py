@@ -669,6 +669,23 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
         spec = _STRICT_TOKEN_REJECTIONS.get(token.type)
         if spec is None and token.type == TokenType.IDENT:
             spec = _STRICT_IDENT_REJECTIONS.get(token.value.lower())
+        if (
+            token.type == TokenType.IDENT
+            and token.value == "$realtime"
+            and index + 2 < len(tokens)
+            and tokens[index + 1].type == TokenType.LPAREN
+            and tokens[index + 2].type == TokenType.RPAREN
+        ):
+            diagnostics.append(
+                _strict_spectre_diag(
+                    "$realtime()",
+                    BEHAVIORAL_EVENT,
+                    "standalone Spectre requires $realtime without parentheses",
+                    filename,
+                    line=token.line,
+                    column=token.col,
+                )
+            )
         if spec is None:
             continue
         feature, tier, detail = spec
@@ -677,6 +694,49 @@ def _lint_strict_spectre_tokens(source: str, filename: str) -> List[Diagnostic]:
                 feature,
                 tier,
                 detail,
+                filename,
+                line=token.line,
+                column=token.col,
+            )
+        )
+    diagnostics.extend(_lint_strict_subprogram_arg_tokens(tokens, filename))
+    return diagnostics
+
+
+def _lint_strict_subprogram_arg_tokens(
+    tokens: Sequence[Token],
+    filename: str,
+) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    in_subprogram = False
+    for index, token in enumerate(tokens):
+        if token.type in {TokenType.FUNCTION, TokenType.TASK}:
+            in_subprogram = True
+            continue
+        if token.type in {TokenType.ENDFUNCTION, TokenType.ENDTASK, TokenType.EOF}:
+            in_subprogram = False
+            continue
+        if not in_subprogram or token.type not in {
+            TokenType.INPUT,
+            TokenType.OUTPUT,
+            TokenType.INOUT,
+        }:
+            continue
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else None
+        if next_token is None or next_token.type not in {
+            TokenType.REAL,
+            TokenType.INTEGER,
+        }:
+            continue
+        diagnostics.append(
+            _strict_spectre_diag(
+                "typed subprogram argument declaration",
+                BEHAVIORAL_EVENT,
+                (
+                    "standalone Spectre rejects declarations such as "
+                    f"{token.value} {next_token.value}; use old-style "
+                    "argument naming plus a separate type declaration"
+                ),
                 filename,
                 line=token.line,
                 column=token.col,
@@ -918,7 +978,6 @@ def _lint_strict_spectre_module(
             scalar_integer_names,
         )
     return diagnostics
-
 
 def _lint_strict_spectre_statement(
     stmt: va_ast.Statement,
