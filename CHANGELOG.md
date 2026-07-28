@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.8.7] — 2026-07-28
+
+### Fixed — Spectre Event Publication
+- Align accepted cross events, transition targets, and timer publication with
+  audited Spectre ordering.
+- Preserve and republish state-owned timer schedules across combined and nested
+  event bodies.
+- Evaluate continuous-state aliases on the post-cross side while preserving
+  the accepted event timestamp, including exact-touch falling transitions.
+
+### Changed — Rust-Only Production Boundary
+- Keep every production simulation on `evas-rust`; no syntax feature can route
+  execution to the private Python parity engine.
+- Keep `absdelay()` explicitly unsupported and fail closed for runtime-indexed
+  state arrays or time-dependent `cross($abstime/$realtime - ...)` until Rust
+  owns those semantics.
+- Preserve explicit Rust engine identity without fallback metadata in run
+  artifacts.
+
+### Added — Spectre Frontend Coverage
+- Expand strict parser, linter, compile-gate, named-block, timer, event, and
+  cross regression coverage for the supported standalone Spectre subset.
+- Bump the Rust core to 0.2.4; the C ABI remains 20260718.
+
 ## [0.8.6] — 2026-07-27
 
 ### Added — Audited Spectre Acceptance
