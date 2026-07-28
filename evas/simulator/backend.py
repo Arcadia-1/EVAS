@@ -4211,15 +4211,7 @@ class CompiledModel:
         return due
 
     def _expire_absolute_timers(self, time: float):
-        for key, armed_target in self.timer_states.items():
-            if self.timer_kinds.get(key) != "absolute":
-                continue
-            last_fired = self.timer_last_fired.get(key)
-            if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
-                continue
-            if time >= armed_target - 1e-18:
-                self._set_timer_last_fired(key, armed_target)
-                self._perf_stats["timer_absolute_expirations"] += 1
+        return
 
     @classmethod
     def _cmp_gt(cls, left: Any, right: Any) -> bool:
@@ -7013,6 +7005,9 @@ class _ModuleCompiler:
 
         lines.append("")
         lines.append("    def refresh_outputs(self, nv, time):")
+        lines.append(
+            f"        self._begin_voltage_contributions({tuple(sorted(voltage_contribution_output_nodes))!r}, nv)"
+        )
         self._fresh_assigned_state_names = set()
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:

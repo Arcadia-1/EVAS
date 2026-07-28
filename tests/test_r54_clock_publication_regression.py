@@ -12,7 +12,6 @@ from evas.compiler.parser import parse
 from evas.simulator.backend import compile_module
 from evas.simulator.engine import Simulator, dc, pwl
 
-
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 
 
@@ -44,6 +43,23 @@ def _run(source: str, sources: dict[str, object], records: tuple[str, ...], tsto
     )
     assert sim._perf_stats["rust_sim_program_enabled"] == 1
     assert sim._perf_stats["rust_full_model_required_correctness_fallbacks"] == 0
+    return model, result
+
+
+def _run_python(source: str, records: tuple[str, ...], tstop: float):
+    model = compile_module(parse(source))()
+    model.node_map = {name.lower(): name for name in records}
+    sim = Simulator()
+    sim.add_model(model)
+    for name in records:
+        sim.record(name)
+    result = sim.run(
+        tstop=tstop,
+        tstep=250e-12,
+        max_step=250e-12,
+        record_step=10e-12,
+        skip_source_error_control=True,
+    )
     return model, result
 
 
@@ -241,3 +257,35 @@ endmodule
 
     assert model.state["code"] == pytest.approx(1.0)
     assert _sample(result, "TRIM", 1.2e-9) == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("contributions", "expected"),
+    [
+        ("V(mon)<+0.25*level;", 0.25),
+        ("V(mon)<+0.20*level; V(mon)<+0.30*level;", 0.50),
+    ],
+)
+def test_post_update_refresh_rebuilds_direct_voltage_contributions_once(
+    contributions: str,
+    expected: float,
+) -> None:
+    """A same-model output cross must not double refreshed contributions."""
+
+    source = f"""\
+`include "disciplines.vams"
+module post_update_contribution(fb, mon);
+  output voltage fb, mon; integer high, edges; real level;
+  analog begin
+    @(initial_step) begin high=0; edges=0; level=1.0; end
+    @(timer(1n)) high=1;
+    V(fb)<+transition(high ? 0.9 : 0.0,0,20p,20p);
+    @(cross(V(fb)-0.45,+1)) edges=edges+1;
+    {contributions}
+  end
+endmodule
+"""
+    model, result = _run_python(source, ("FB", "MON"), 2e-9)
+
+    assert model.state["edges"] == pytest.approx(1.0)
+    assert max(result.signals["MON"]) == pytest.approx(expected, abs=1e-12)

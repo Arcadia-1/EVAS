@@ -29,6 +29,7 @@ from evas.netlist.runner import (
     _trace_nodes_for_signals,
     _trace_output_signals_for_request,
     _write_csv,
+    compile_spectre_netlist,
     evas_simulate,
 )
 from evas.netlist.spectre_parser import (
@@ -660,6 +661,39 @@ class TestAhdlIncludePathFallback:
         from evas.netlist.runner import evas_simulate
         ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
         assert ok
+
+    def test_spectre_include_va_registers_verilog_a_model(self, tmp_path):
+        """Spectre include of a .va file loads behavioral models like ahdl_include."""
+        dut_dir = tmp_path / "dut"
+        dut_dir.mkdir()
+        va_file = dut_dir / "model.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module differential_vco_clip_idtmod(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    V(out) <+ V(inp);
+                end
+            endmodule
+        """))
+
+        scs_file = tmp_path / "tb.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            include "./dut/model.va"
+            Vin (inp 0) vsource dc=0.7
+            XDUT (inp out) differential_vco_clip_idtmod
+            tran tran stop=1n maxstep=100p
+            save out
+        """))
+
+        result = compile_spectre_netlist(str(scs_file))
+
+        assert result.ok
+        assert "differential_vco_clip_idtmod" in result.models_by_name
 
     def test_reserved_identifier_uses_spectre_vacomp_diagnostic(self, tmp_path):
         va_file = tmp_path / "sin_port.va"

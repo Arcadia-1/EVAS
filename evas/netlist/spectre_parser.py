@@ -5,7 +5,7 @@ Parses real Cadence Spectre netlist syntax:
   simulator lang=spectre       — Accept and skip
   global 0                     — Record ground node
   parameters k=expr ...        — Global parameters with expression evaluation
-  include "file" [section=X]   — Skip (process models)
+  include "file" [section=X]   — Record process includes; load .va files
   ahdl_include "file.va"       — VA model include
   Vname (n+ n-) vsource ...    — DC/pulse/pwl/sin/square source
   Iname (nodes) Model k=v      — VA model instance
@@ -1397,6 +1397,8 @@ def _parse_include(line: str, netlist: SpectreNetlist):
         section = match.group(1)
 
     netlist.includes.append(SpectreInclude(path=path, section=section))
+    if section is None and Path(path).suffix.lower() == ".va":
+        netlist.ahdl_includes.append(AhdlInclude(path=path))
 
 
 # ---------------------------------------------------------------------------

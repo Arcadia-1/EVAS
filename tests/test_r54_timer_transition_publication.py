@@ -598,6 +598,38 @@ endmodule
     assert model._perf_stats["timer_state_owned_fires"] == 6
 
 
+def test_absolute_timer_expire_sweep_does_not_consume_state_owned_body():
+    """A post-update sweep must not mark an unexecuted absolute timer as fired."""
+
+    source = """\
+`include "disciplines.vams"
+module state_owned_expire_guard(out);
+  output out; electrical out;
+  real next_edge; integer count;
+  analog begin
+    @(initial_step) begin next_edge=1n; count=0; end
+    @(timer(next_edge)) begin
+      count = count + 1;
+      next_edge = next_edge + 1n;
+    end
+    V(out) <+ count;
+  end
+endmodule
+"""
+    Model = compile_module(parse(source))
+    assert Model._state_owned_timer_targets == (("timer_0", "next_edge"),)
+
+    model = Model()
+    model.node_map = {"out": "out"}
+    nv = {"out": 0.0}
+    model.evaluate(nv, 0.0)
+
+    model._expire_absolute_timers(2e-9)
+
+    assert model._check_state_owned_timer_at("timer_0", 2e-9, "next_edge")
+    assert model._perf_stats["timer_absolute_expirations"] == 0
+
+
 def test_post_update_combined_cross_body_republishes_absolute_timer_rearm():
     """Self-output combined cross bodies must publish timer rearms for future steps."""
 
