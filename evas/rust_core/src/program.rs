@@ -1124,33 +1124,6 @@ fn rust_sim_expr_segment_reads_time_and_state(
     Ok(false)
 }
 
-fn rust_sim_expr_segment_has_known_post_driver(
-    sources: &[EvasRustSimSourceSpec],
-    transitions: &[EvasRustSimTransitionSpec],
-    body_expr_ops: &[EvasRustBodyExprOp],
-    start: usize,
-    count: usize,
-) -> Result<bool, i32> {
-    let end = start.checked_add(count).ok_or(-967)?;
-    if end > body_expr_ops.len() {
-        return Err(-968);
-    }
-    for op in &body_expr_ops[start..end] {
-        if op.op_kind == BODY_EXPR_READ_TIME {
-            return Ok(true);
-        }
-        if op.op_kind == BODY_EXPR_READ_NODE
-            && (sources.iter().any(|source| source.node_id == op.index)
-                || transitions
-                    .iter()
-                    .any(|transition| transition.output_node_id == op.index))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn rust_sim_expr_segment_positive_state_guard_reads(
     body_expr_ops: &[EvasRustBodyExprOp],
     start: usize,

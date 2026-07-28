@@ -360,6 +360,7 @@ class CompiledModel:
     _event_transition_plan_side_effect_count = 0
     _event_transition_plan_control_flow_count = 0
     _state_owned_timer_targets = ()
+    _state_owned_timer_target_keys = frozenset()
     _static_branch_fastpath_codegen = False
     _dynamic_node_cache_limit = 4096
     _cmp_eps: float = 0.0
@@ -4211,7 +4212,17 @@ class CompiledModel:
         return due
 
     def _expire_absolute_timers(self, time: float):
-        return
+        for key, armed_target in self.timer_states.items():
+            if self.timer_kinds.get(key) != "absolute":
+                continue
+            if key in self._state_owned_timer_target_keys:
+                continue
+            last_fired = self.timer_last_fired.get(key)
+            if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
+                continue
+            if time >= armed_target - 1e-18:
+                self._set_timer_last_fired(key, armed_target)
+                self._perf_stats["timer_absolute_expirations"] += 1
 
     @classmethod
     def _cmp_gt(cls, left: Any, right: Any) -> bool:
@@ -7184,6 +7195,7 @@ class _ModuleCompiler:
         cls._state_owned_timer_targets = tuple(
             sorted(self._state_owned_timer_targets.items())
         )
+        cls._state_owned_timer_target_keys = frozenset(self._state_owned_timer_targets)
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
             cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)

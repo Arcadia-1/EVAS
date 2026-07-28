@@ -630,6 +630,32 @@ endmodule
     assert model._perf_stats["timer_absolute_expirations"] == 0
 
 
+def test_absolute_timer_expire_sweep_still_clears_non_state_owned_timer():
+    """Ordinary absolute timers retain the post-update expiration fast path."""
+
+    source = """\
+`include "disciplines.vams"
+module ordinary_expire_guard(out);
+  output out; electrical out; integer count;
+  analog begin
+    @(initial_step) count=0;
+    @(timer(1n)) count=count+1;
+    V(out)<+count;
+  end
+endmodule
+"""
+    Model = compile_module(parse(source))
+    assert Model._state_owned_timer_target_keys == frozenset()
+
+    model = Model()
+    nv = {"out": 0.0}
+    model.evaluate(nv, 0.0)
+    model._expire_absolute_timers(2e-9)
+
+    assert model.timer_last_fired["timer_0"] == pytest.approx(1e-9)
+    assert model._perf_stats["timer_absolute_expirations"] == 1
+
+
 def test_post_update_combined_cross_body_republishes_absolute_timer_rearm():
     """Self-output combined cross bodies must publish timer rearms for future steps."""
 
