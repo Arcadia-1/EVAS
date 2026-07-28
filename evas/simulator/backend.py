@@ -5169,7 +5169,8 @@ class CompiledModel:
     def _check_cross(self, key: str, time: float, val: float, direction: int = 0,
                      time_tol: float = 0.0, expr_tol: float = 1e-12,
                      interp_nodes: Optional[List[str]] = None,
-                     nudge_nodes: Optional[Any] = None) -> bool:
+                     nudge_nodes: Optional[Any] = None,
+                     nudge_states: Optional[Dict[str, int]] = None) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         detector = self.cross_detectors[key]
@@ -5287,6 +5288,15 @@ class CompiledModel:
                     node: int(trigger_dir) if use_post_side else 0
                     for node in set(nudge_nodes or interp_nodes or [])
                 }
+            if trigger_dir and isinstance(nudge_states, dict):
+                for name, sign in nudge_states.items():
+                    if not sign or name not in self.state:
+                        continue
+                    slot = self._indexed_state_ids.get(name, -1)
+                    value = float(self._state_get_by_slot(slot, name))
+                    post_sign = 1.0 if int(trigger_dir) * int(sign) > 0 else -1.0
+                    delta = max(1e-12, abs(value) * 1e-12)
+                    self._state_set(name, value + post_sign * delta)
             if (
                 prev_cross_directions
                 and abs(float(prev_event_time) - float(self._event_time)) <= effective_time_tol
@@ -12759,9 +12769,20 @@ class _ModuleCompiler:
             return False
         if event.event_type not in (EventType.CROSS, EventType.ABOVE):
             return False
-        if not hasattr(self, "_contributed_nodes"):
-            return False
-        return self._expr_references_nodes(event.args[0], self._contributed_nodes)
+        expression = event.args[0]
+        if self._expr_references_nodes(
+            expression,
+            getattr(self, "_contributed_nodes", set()),
+        ):
+            return True
+        # A scalar assigned from a branch in the continuous analog body is an
+        # alias for solver state.  Evaluate events that consume such aliases
+        # after node publication, otherwise the event body can observe the
+        # pre-cross value and leave the just-crossed state unchanged.
+        return self._expr_references_nodes(
+            expression,
+            getattr(self, "_continuous_vars", set()),
+        )
 
     def _is_initial_step_event(self, event) -> bool:
         """Check if event includes initial_step."""
@@ -14456,12 +14477,49 @@ class _ModuleCompiler:
         interp_nodes = sorted(self._collect_branch_nodes_from_expr(event.args[0]))
         raw_nudges = self._collect_branch_nudge_nodes_from_expr(event.args[0])
         nudge_nodes = {node: raw_nudges[node] for node in sorted(raw_nudges)}
+        raw_state_nudges = self._collect_continuous_state_nudges_from_expr(
+            event.args[0]
+        )
+        nudge_states = {
+            name: raw_state_nudges[name] for name in sorted(raw_state_nudges)
+        }
         if nudge_nodes:
             self._needs_future_node_voltages = True
         return (
             f"self._check_cross({key!r}, time, {expr}, {direction}, "
-            f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r})"
+            f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r}, "
+            f"{nudge_states!r})"
         )
+
+    def _collect_continuous_state_nudges_from_expr(
+        self, expr: Expr, polarity: int = 1
+    ) -> Dict[str, int]:
+        """Return continuous-state aliases and their expression polarity."""
+
+        if isinstance(expr, Identifier):
+            if expr.name in getattr(self, "_continuous_vars", set()):
+                return {expr.name: 1 if polarity > 0 else -1}
+            return {}
+        if isinstance(expr, BinaryExpr):
+            values = self._collect_continuous_state_nudges_from_expr(
+                expr.left, polarity
+            )
+            right_polarity = -polarity if expr.op == "-" else polarity
+            for name, sign in self._collect_continuous_state_nudges_from_expr(
+                expr.right, right_polarity
+            ).items():
+                values[name] = values.get(name, 0) + sign
+            return {
+                name: 1 if sign > 0 else -1
+                for name, sign in values.items()
+                if sign
+            }
+        if isinstance(expr, UnaryExpr):
+            child_polarity = -polarity if expr.op == "-" else polarity
+            return self._collect_continuous_state_nudges_from_expr(
+                expr.operand, child_polarity
+            )
+        return {}
 
     def _compile_above_call(self, event: EventExpr, key: str) -> str:
         expr = self._compile_expr(event.args[0])

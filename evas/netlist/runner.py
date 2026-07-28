@@ -249,6 +249,8 @@ def _netlist_python_compatibility_features(
                         break
             if _module_uses_continuous_state_cross(module):
                 features.add("continuous_state_cross_event")
+            if _module_uses_time_dependent_cross(module):
+                features.add("time_dependent_cross_event")
     return tuple(sorted(features))
 
 
@@ -319,6 +321,39 @@ def _module_uses_continuous_state_cross(module) -> bool:
                 if isinstance(item, va_ast.Identifier)
             }
             if identifiers & continuously_assigned:
+                return True
+    return False
+
+
+def _module_uses_time_dependent_cross(module) -> bool:
+    """Detect cross() expressions whose value advances with simulation time.
+
+    The Rust SimProgram currently samples cross expressions only when another
+    scheduled event or circuit update wakes the model.  An expression such as
+    ``cross($abstime - deadline, +1)`` therefore cannot schedule its own future
+    crossing.  The compatibility engine evaluates these expressions along the
+    transient timeline and preserves the expected Spectre behavior.
+    """
+
+    analog_block = getattr(module, "analog_block", None)
+    if analog_block is None:
+        return False
+    for value in _iter_dataclass_values(analog_block.body):
+        if not isinstance(value, va_ast.EventStatement):
+            continue
+        events = (
+            value.event.events
+            if isinstance(value.event, va_ast.CombinedEvent)
+            else (value.event,)
+        )
+        for event in events:
+            if event.event_type != va_ast.EventType.CROSS or not event.args:
+                continue
+            if any(
+                isinstance(item, va_ast.Identifier)
+                and item.name.lower() in {"$abstime", "$realtime"}
+                for item in _iter_dataclass_values(event.args[0])
+            ):
                 return True
     return False
 

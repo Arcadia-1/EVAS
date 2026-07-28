@@ -318,6 +318,110 @@ def test_continuous_state_cross_uses_python_compatibility_engine(
     assert data["out"][-1] == pytest.approx(1.0, abs=0.05)
 
 
+def test_continuous_state_cross_body_observes_post_cross_side(
+    tmp_path, monkeypatch
+):
+    va_file = tmp_path / "continuous_state_cross_side.va"
+    va_file.write_text(textwrap.dedent("""\
+        `include "disciplines.vams"
+
+        module continuous_state_cross_side(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            real sampled_input;
+            real target;
+
+            analog begin
+                sampled_input = V(inp);
+                @(initial_step or cross(sampled_input - 0.5, +1)) begin
+                    if (sampled_input >= 0.5)
+                        target = 1.0;
+                    else
+                        target = 0.0;
+                end
+                V(out) <+ transition(target, 0, 10p, 10p);
+            end
+        endmodule
+    """))
+    scs_file = tmp_path / "tb_continuous_state_cross_side.scs"
+    scs_file.write_text(textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        ahdl_include "continuous_state_cross_side.va"
+        Vin (inp 0) vsource type=pwl wave=[0 0 0.4n 0 0.5n 1 1n 1]
+        XDUT (inp out) continuous_state_cross_side
+        tran tran stop=1n maxstep=10p
+        save out
+    """))
+
+    monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
+    monkeypatch.delenv("EVAS_ENGINE", raising=False)
+    out_dir = tmp_path / "out"
+    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+
+    assert data["out"][-1] == pytest.approx(1.0, abs=0.05)
+
+
+def test_time_dependent_cross_uses_python_compatibility_engine(
+    tmp_path, monkeypatch
+):
+    va_file = tmp_path / "time_dependent_cross.va"
+    va_file.write_text(textwrap.dedent("""\
+        `include "disciplines.vams"
+
+        module time_dependent_cross(trigger, out);
+            input trigger;
+            output out;
+            electrical trigger, out;
+            real deadline;
+            integer state;
+
+            analog begin
+                @(initial_step) begin
+                    deadline = 1.0;
+                    state = 0;
+                end
+                @(cross(V(trigger) - 0.5, +1)) begin
+                    deadline = $abstime + 0.2n;
+                    state = 1;
+                end
+                @(cross($abstime - deadline, +1)) state = 0;
+                V(out) <+ transition(state ? 1.0 : 0.0, 0, 10p, 10p);
+            end
+        endmodule
+    """))
+    scs_file = tmp_path / "tb_time_dependent_cross.scs"
+    scs_file.write_text(textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        ahdl_include "time_dependent_cross.va"
+        Vin (trigger 0) vsource type=pwl wave=[0 0 0.1n 0 0.2n 1 1n 1]
+        XDUT (trigger out) time_dependent_cross
+        tran tran stop=1n maxstep=10p
+        save out
+    """))
+
+    monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
+    monkeypatch.delenv("EVAS_ENGINE", raising=False)
+    out_dir = tmp_path / "out"
+    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    identity = json.loads(
+        (out_dir / "evas_identity.json").read_text(encoding="utf-8")
+    )
+
+    assert identity["engine_requested"] == "evas-rust"
+    assert identity["engine"] == "python"
+    assert identity["engine_fallback_kind"] == "syntax_feature_gate"
+    assert identity["engine_fallback_features"] == [
+        "time_dependent_cross_event"
+    ]
+    assert np.max(data["out"]) > 0.9
+    assert data["out"][-1] == pytest.approx(0.0, abs=0.05)
+
+
 def test_evas2_integer_division_matches_spectre_bit_decode(tmp_path, monkeypatch):
     _build_rust_core_or_skip()
     va_file = tmp_path / "int_div_decode.va"
