@@ -598,6 +598,41 @@ endmodule
     assert model._perf_stats["timer_state_owned_fires"] == 6
 
 
+def test_post_update_combined_cross_body_republishes_absolute_timer_rearm():
+    """Self-output combined cross bodies must publish timer rearms for future steps."""
+
+    source = """\
+`include "disciplines.vams"
+module post_update_combined_rearm(clk, count_o);
+  output clk, count_o; electrical clk, count_o;
+  real next_edge; integer drive, count;
+  analog begin
+    @(initial_step) begin next_edge=2n; drive=0; count=0; end
+    @(timer(1n)) drive = 1;
+    @(timer(next_edge) or cross(V(clk)-0.45,+1)) begin
+      count = count + 1;
+      next_edge = $abstime + 0.5n;
+    end
+    V(clk) <+ drive ? 0.9 : 0.0;
+    V(count_o) <+ count;
+  end
+endmodule
+"""
+    Model = compile_module(parse(source))
+    assert Model._has_post_update_events is True
+    assert Model._state_owned_timer_targets == (("timer_1", "next_edge"),)
+
+    model = Model()
+    model.node_map = {"clk": "clk", "count_o": "count_o"}
+    sim = Simulator()
+    sim.add_model(model)
+    sim.record("count_o")
+    result = sim.run(tstop=1.75e-9, tstep=250e-12, max_step=250e-12)
+
+    assert result.signals["count_o"][-1] == pytest.approx(2.0, abs=1e-12)
+    assert model._perf_stats["timer_state_owned_fires"] >= 1
+
+
 def test_transition_target_positive_control_publishes_before_gated_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

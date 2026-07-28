@@ -14761,6 +14761,8 @@ class _ModuleCompiler:
 
         if isinstance(event, CombinedEvent):
             conditions = []
+            absolute_timer_rearms = []
+            periodic_timer_rearms = []
             for e in event.events:
                 if not isinstance(e, EventExpr):
                     continue
@@ -14774,6 +14776,18 @@ class _ModuleCompiler:
                         continue
                     key = self._alloc_event_key("above", e)
                     conditions.append(self._compile_above_call(e, key))
+                elif e.event_type == EventType.TIMER:
+                    key = self._alloc_event_key("timer", e)
+                    if (
+                        len(e.args) == 2
+                        and not self._timer_period_is_zero_literal(e.args[1])
+                    ):
+                        start_expr = self._compile_expr(e.args[0])
+                        period_expr = self._compile_expr(e.args[1])
+                        periodic_timer_rearms.append((key, period_expr, start_expr))
+                    else:
+                        target_expr = self._compile_expr(e.args[0])
+                        absolute_timer_rearms.append((key, target_expr))
             if conditions:
                 hit_vars = []
                 for idx, cond in enumerate(conditions):
@@ -14793,6 +14807,15 @@ class _ModuleCompiler:
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                for timer_key, target_expr in absolute_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._set_timer_state({timer_key!r}, {target_expr})"
+                    )
+                for timer_key, period_expr, start_expr in periodic_timer_rearms:
+                    lines.append(
+                        f"{prefix}    self._reschedule_timer("
+                        f"{timer_key!r}, time, {period_expr}, {start_expr})"
+                    )
                 lines.append(f"{prefix}    self._event_trace_audit_exit_event()")
                 lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
