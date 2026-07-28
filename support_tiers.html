@@ -326,10 +326,9 @@ state/filter updates inside the behavioral evaluator. This is intentionally
 separate from current-domain contribution stamping or full Spectre
 transfer-function solving.</p>
 <p>Spectre-restricted placements, such as conditional <code class="docutils literal notranslate"><span class="pre">idt()</span></code> or event-local
-analog contributions, are reported through compatibility diagnostics. Legal
-continuous-time operators without an EVAS implementation, for example
-<code class="docutils literal notranslate"><span class="pre">absdelay()</span></code>, report <code class="docutils literal notranslate"><span class="pre">EVAS-COMP-EUNSUPPORTED</span></code> with
-<code class="docutils literal notranslate"><span class="pre">support_tier=&quot;behavioral-continuous-time&quot;</span></code>.</p>
+analog contributions, are reported through compatibility diagnostics.
+Unsupported operators such as <code class="docutils literal notranslate"><span class="pre">absdelay()</span></code> are classified as
+<code class="docutils literal notranslate"><span class="pre">behavioral-continuous-time</span></code> rather than as generic parser gaps.</p>
 </section>
 <section id="noise-and-stochastic-semantics">
 <h2>Noise and Stochastic Semantics<a class="headerlink" href="#noise-and-stochastic-semantics" title="Link to this heading">¶</a></h2>

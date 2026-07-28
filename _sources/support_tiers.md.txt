@@ -52,10 +52,9 @@ separate from current-domain contribution stamping or full Spectre
 transfer-function solving.
 
 Spectre-restricted placements, such as conditional `idt()` or event-local
-analog contributions, are reported through compatibility diagnostics. Legal
-continuous-time operators without an EVAS implementation, for example
-`absdelay()`, report `EVAS-COMP-EUNSUPPORTED` with
-`support_tier="behavioral-continuous-time"`.
+analog contributions, are reported through compatibility diagnostics.
+Unsupported operators such as `absdelay()` are classified as
+`behavioral-continuous-time` rather than as generic parser gaps.
 
 ## Noise and Stochastic Semantics
 
