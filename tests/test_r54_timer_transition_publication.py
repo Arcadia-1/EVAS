@@ -10,7 +10,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from evas.compiler.parser import parse
 from evas.netlist.runner import evas_simulate
+from evas.simulator.backend import compile_module
+from evas.simulator.engine import Simulator, dc
 
 
 def _simulate(
@@ -554,6 +557,45 @@ save count_o
     settled = data["count_o"][data["time"] >= 1.2e-9]
     assert settled.min() == pytest.approx(1.0, abs=1e-12)
     assert settled.max() == pytest.approx(1.0, abs=1e-12)
+
+
+def test_combined_absolute_timer_member_uses_state_owned_due_path():
+    """Combined timer/cross members keep the standalone state-owned timer path."""
+
+    source = """\
+`include "disciplines.vams"
+module combined_absolute_rearm(ref, clk, fired_o);
+  input ref; output clk, fired_o; electrical ref, clk, fired_o;
+  real next_edge, half_period, sense; integer clk_state, fired;
+  analog begin
+    @(initial_step) begin next_edge=0.5n; half_period=0.5n; clk_state=0; fired=0; end
+    sense = V(ref) - 0.45;
+    @(timer(next_edge) or cross(sense,+1)) begin
+      if ($abstime >= next_edge - 1p) begin
+        clk_state = !clk_state;
+        fired = fired + 1;
+        next_edge = next_edge + half_period;
+      end
+    end
+    V(clk) <+ transition(clk_state ? 0.9 : 0.0,0,10p,10p);
+    V(fired_o) <+ fired;
+  end
+endmodule
+"""
+    Model = compile_module(parse(source))
+    assert Model._state_owned_timer_targets == (("timer_0", "next_edge"),)
+
+    model = Model()
+    model.node_map = {"ref": "ref", "clk": "clk", "fired_o": "fired_o"}
+    sim = Simulator()
+    sim.add_source("ref", dc(0.0))
+    sim.add_model(model)
+    sim.record("fired_o")
+    result = sim.run(tstop=3e-9, tstep=3e-9, max_step=3e-9)
+
+    assert result.signals["fired_o"].max() == pytest.approx(6.0, abs=1e-12)
+    assert model._perf_stats["timer_state_owned_checks"] > 0
+    assert model._perf_stats["timer_state_owned_fires"] == 6
 
 
 def test_transition_target_positive_control_publishes_before_gated_deadline(

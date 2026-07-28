@@ -13918,9 +13918,13 @@ class _ModuleCompiler:
             return False
         return all(self._timer_expr_is_constant_or_param(arg) for arg in event.args)
 
-    def _state_owned_timer_target_name(self, stmt: EventStatement) -> Optional[str]:
+    def _state_owned_timer_target_name(
+        self,
+        stmt: EventStatement,
+        timer_event: Optional[EventExpr] = None,
+    ) -> Optional[str]:
         """Return the scalar state name for a safe ``timer(state)`` fast path."""
-        event = stmt.event
+        event = timer_event if timer_event is not None else stmt.event
         if not isinstance(event, EventExpr) or event.event_type != EventType.TIMER:
             return None
         if len(event.args) != 1 or not isinstance(event.args[0], Identifier):
@@ -14306,7 +14310,16 @@ class _ModuleCompiler:
                         )
                     else:
                         target_expr = self._compile_expr(e.args[0])
-                        conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
+                        state_owned_target = self._state_owned_timer_target_name(stmt, e)
+                        if state_owned_target is not None:
+                            slot = self._state_scalar_slot_by_name.get(state_owned_target, -1)
+                            self._state_owned_timer_targets[key] = state_owned_target
+                            conditions.append(
+                                f"self._check_state_owned_timer_at("
+                                f"{key!r}, time, {state_owned_target!r}, {slot})"
+                            )
+                        else:
+                            conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
                         absolute_timer_rearms.append((key, target_expr))
 
             if conditions:
