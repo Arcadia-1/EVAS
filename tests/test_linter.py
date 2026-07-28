@@ -736,10 +736,10 @@ def test_unsupported_function_is_compat_error():
     assert has_compat_errors(diags)
 
 
-def test_absdelay_voltage_transport_delay_subset_is_supported():
+def test_unsupported_continuous_time_operator_is_tiered():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
-        module absdelay_ct(inp, out);
+        module unsupported_ct(inp, out);
             input inp;
             output out;
             electrical inp, out;
@@ -750,50 +750,11 @@ def test_absdelay_voltage_transport_delay_subset_is_supported():
     """)
 
     diags = lint_source(source)
-
-    assert "EVAS-COMP-EUNSUPPORTED" not in _codes(diags)
-    assert not has_compat_errors(diags)
-
-
-def test_absdelay_rejects_wrong_arity():
-    source = textwrap.dedent("""\
-        `include "disciplines.vams"
-        module bad_absdelay(inp, out);
-            input inp;
-            output out;
-            electrical inp, out;
-            analog begin
-                V(out) <+ absdelay(V(inp));
-            end
-        endmodule
-    """)
-
-    diags = lint_source(source)
     diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EUNSUPPORTED")
 
-    assert "absdelay() expects 2 or 3 arguments" in diag.message
     assert diag.support_tier == BEHAVIORAL_CONTINUOUS_TIME
-    assert has_compat_errors(diags)
-
-
-def test_absdelay_rejects_negative_static_delay():
-    source = textwrap.dedent("""\
-        `include "disciplines.vams"
-        module bad_absdelay(inp, out);
-            input inp;
-            output out;
-            electrical inp, out;
-            analog begin
-                V(out) <+ absdelay(V(inp), -1n);
-            end
-        endmodule
-    """)
-
-    diags = lint_source(source)
-    diag = next(diag for diag in diags if diag.code == "EVAS-COMP-EUNSUPPORTED")
-
-    assert "absdelay() delay must be nonnegative" in diag.message
-    assert diag.support_tier == BEHAVIORAL_CONTINUOUS_TIME
+    assert "absdelay()" in diag.message
+    assert f"support-tier: {BEHAVIORAL_CONTINUOUS_TIME}" in diag.format_text()
     assert has_compat_errors(diags)
 
 

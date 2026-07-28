@@ -177,11 +177,8 @@ Continuous-time policy: `ddt()`, `idt()`, `idtmod()`, `laplace_nd()`,
 `zi_zd()`, `zi_zp()`, and `limexp()` are supported as voltage-domain
 behavioral transient approximations in ordinary analog statements. EVAS rejects
 Spectre-illegal conditional/event-body placements through lint or compile-time
-diagnostics. `absdelay()` is supported as a sampled voltage-domain scalar
-transport-delay subset through the deterministic Python compatibility engine.
-The subset accepts two or three arguments, requires a nonnegative evaluated
-delay, and requires `maxdelay >= delay` when the third argument is present; it
-does not claim full Spectre continuous-time `absdelay()` equivalence.
+diagnostics. Unsupported continuous-time operators such as `absdelay()` are
+reported as `behavioral-continuous-time`, not as generic parser gaps.
 
 Noise and stochastic policy: in ordinary transient analysis,
 `white_noise()`, `flicker_noise()`, and `noise_table()` contribute zero
@@ -202,12 +199,6 @@ Vector and indexing policy: pure expression bit-select, part-select,
 concatenation, replication, reduction, packed logic vectors, and integer/real
 state arrays are separate from electrical topology. Static `generate`/`genvar`
 elaboration is supported for a limited behavioral/continuous-assign subset.
-Runtime-indexed integer/real state arrays are supported through the
-deterministic Python compatibility engine; aggregate initializers follow the
-declared range direction (`[0:N]` or `[N:0]`).
-Likewise, `cross()` expressions fed by scalar state assigned continuously in
-the same analog body use that compatibility engine to preserve Spectre event
-ordering; direct `cross(V(...))` remains on the Rust engine.
 Runtime voltage-domain electrical indexing such as `V(bus[i])` and
 `V(bus[i]) <+ ...` is supported by dynamic node resolution; dynamic current
 indexing remains part of the unsupported `conservative-current-kcl` tier.
@@ -243,7 +234,6 @@ indexing remains part of the unsupported `conservative-current-kcl` tier.
 | `analysis("ac")`, `ac_stim()` | ✅ (behavioral Python sweep helper) |
 | `white_noise()`, `flicker_noise()`, `noise_table()` | ✅ (behavioral PSD / integrated-noise helper) |
 | `ddt()`, `idt()`, `laplace_*()`, `zi_*()`, `limexp()` | limited `behavioral-continuous-time` approximation |
-| `absdelay()` | sampled voltage-domain scalar subset via deterministic Python compatibility engine |
 | `generate` / `genvar` | limited static-elaboration subset |
 | `connectrules` | unsupported `ams-digital` scope |
 | custom `nature` / `discipline` semantics beyond the bundled VAMS stubs | not supported by design |

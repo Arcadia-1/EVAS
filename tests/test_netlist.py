@@ -121,7 +121,7 @@ def test_evas2_cross_zero_event_uses_python_event_semantics(tmp_path, monkeypatc
     assert data["out"][idx] == pytest.approx(1.0, abs=0.05)
 
 
-def test_absdelay_delays_voltage_domain_sampled_waveform(tmp_path, monkeypatch):
+def test_absdelay_fails_closed_without_python_fallback(tmp_path, monkeypatch):
     va_file = tmp_path / "absdelay_probe.va"
     va_file.write_text(textwrap.dedent("""\
         `include "disciplines.vams"
@@ -154,29 +154,23 @@ def test_absdelay_delays_voltage_domain_sampled_waveform(tmp_path, monkeypatch):
     monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
     monkeypatch.delenv("EVAS_ENGINE", raising=False)
     out_dir = tmp_path / "out"
-    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
-    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    log_path = tmp_path / "evas.log"
+    assert not evas_simulate(
+        str(scs_file),
+        output_dir=str(out_dir),
+        log_path=str(log_path),
+    )
     identity = json.loads(
         (out_dir / "evas_identity.json").read_text(encoding="utf-8")
     )
 
-    assert identity["engine_requested"] == "evas-rust"
-    assert identity["engine"] == "python"
-    assert identity["engine_fallback_kind"] == "syntax_feature_gate"
-    assert identity["engine_fallback_features"] == ["absdelay"]
-
-    before_rise = int(np.argmin(np.abs(data["time"] - 0.45e-9)))
-    after_rise = int(np.argmin(np.abs(data["time"] - 0.55e-9)))
-    before_fall = int(np.argmin(np.abs(data["time"] - 1.25e-9)))
-    after_fall = int(np.argmin(np.abs(data["time"] - 1.35e-9)))
-
-    assert data["out"][before_rise] == pytest.approx(0.0, abs=0.05)
-    assert data["out"][after_rise] == pytest.approx(1.0, abs=0.05)
-    assert data["out"][before_fall] == pytest.approx(1.0, abs=0.05)
-    assert data["out"][after_fall] == pytest.approx(0.0, abs=0.05)
+    assert identity["engine"] == "evas-rust"
+    assert "engine_fallback_kind" not in identity
+    assert "engine_fallback_features" not in identity
+    assert "absdelay()" in log_path.read_text(encoding="utf-8")
 
 
-def test_absdelay_delays_event_updated_real_state(tmp_path):
+def test_absdelay_event_updated_state_fails_closed(tmp_path):
     va_file = tmp_path / "absdelay_state_probe.va"
     va_file.write_text(textwrap.dedent("""\
         `include "disciplines.vams"
@@ -210,16 +204,16 @@ def test_absdelay_delays_event_updated_real_state(tmp_path):
     """))
 
     out_dir = tmp_path / "out"
-    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
-    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    log_path = tmp_path / "evas.log"
+    assert not evas_simulate(
+        str(scs_file),
+        output_dir=str(out_dir),
+        log_path=str(log_path),
+    )
+    assert "absdelay()" in log_path.read_text(encoding="utf-8")
 
-    before_delay = int(np.argmin(np.abs(data["time"] - 0.45e-9)))
-    after_delay = int(np.argmin(np.abs(data["time"] - 0.55e-9)))
-    assert data["out"][before_delay] == pytest.approx(0.0, abs=0.05)
-    assert data["out"][after_delay] == pytest.approx(1.0, abs=0.05)
 
-
-def test_dynamic_state_array_access_uses_python_compatibility_engine(
+def test_dynamic_state_array_access_fails_closed_without_python_fallback(
     tmp_path, monkeypatch
 ):
     va_file = tmp_path / "dynamic_array_lookup.va"
@@ -253,22 +247,22 @@ def test_dynamic_state_array_access_uses_python_compatibility_engine(
     monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
     monkeypatch.delenv("EVAS_ENGINE", raising=False)
     out_dir = tmp_path / "out"
-    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
-    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    log_path = tmp_path / "evas.log"
+    assert not evas_simulate(
+        str(scs_file),
+        output_dir=str(out_dir),
+        log_path=str(log_path),
+    )
     identity = json.loads(
         (out_dir / "evas_identity.json").read_text(encoding="utf-8")
     )
 
-    assert identity["engine_requested"] == "evas-rust"
-    assert identity["engine"] == "python"
-    assert identity["engine_fallback_kind"] == "syntax_feature_gate"
-    assert identity["engine_fallback_features"] == [
-        "dynamic_state_array_access"
-    ]
-    assert data["out"][-1] == pytest.approx(0.3)
+    assert identity["engine"] == "evas-rust"
+    assert "engine_fallback_kind" not in identity
+    assert "dynamic_state_array_access" in log_path.read_text(encoding="utf-8")
 
 
-def test_continuous_state_cross_uses_python_compatibility_engine(
+def test_continuous_state_cross_runs_on_rust_without_python_fallback(
     tmp_path, monkeypatch
 ):
     va_file = tmp_path / "continuous_state_cross.va"
@@ -310,15 +304,12 @@ def test_continuous_state_cross_uses_python_compatibility_engine(
         (out_dir / "evas_identity.json").read_text(encoding="utf-8")
     )
 
-    assert identity["engine_requested"] == "evas-rust"
-    assert identity["engine"] == "python"
-    assert identity["engine_fallback_features"] == [
-        "continuous_state_cross_event"
-    ]
+    assert identity["engine"] == "evas-rust"
+    assert "engine_fallback_kind" not in identity
     assert data["out"][-1] == pytest.approx(1.0, abs=0.05)
 
 
-def test_continuous_state_cross_body_observes_post_cross_side(
+def test_continuous_state_cross_body_observes_post_cross_side_on_rust(
     tmp_path, monkeypatch
 ):
     va_file = tmp_path / "continuous_state_cross_side.va"
@@ -364,7 +355,7 @@ def test_continuous_state_cross_body_observes_post_cross_side(
     assert data["out"][-1] == pytest.approx(1.0, abs=0.05)
 
 
-def test_time_dependent_cross_uses_python_compatibility_engine(
+def test_time_dependent_cross_fails_closed_without_python_fallback(
     tmp_path, monkeypatch
 ):
     va_file = tmp_path / "time_dependent_cross.va"
@@ -406,20 +397,19 @@ def test_time_dependent_cross_uses_python_compatibility_engine(
     monkeypatch.setattr(netlist_runner, "_DEVELOPER_ENGINE_OVERRIDE", None)
     monkeypatch.delenv("EVAS_ENGINE", raising=False)
     out_dir = tmp_path / "out"
-    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
-    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    log_path = tmp_path / "evas.log"
+    assert not evas_simulate(
+        str(scs_file),
+        output_dir=str(out_dir),
+        log_path=str(log_path),
+    )
     identity = json.loads(
         (out_dir / "evas_identity.json").read_text(encoding="utf-8")
     )
 
-    assert identity["engine_requested"] == "evas-rust"
-    assert identity["engine"] == "python"
-    assert identity["engine_fallback_kind"] == "syntax_feature_gate"
-    assert identity["engine_fallback_features"] == [
-        "time_dependent_cross_event"
-    ]
-    assert np.max(data["out"]) > 0.9
-    assert data["out"][-1] == pytest.approx(0.0, abs=0.05)
+    assert identity["engine"] == "evas-rust"
+    assert "engine_fallback_kind" not in identity
+    assert "time_dependent_cross_event" in log_path.read_text(encoding="utf-8")
 
 
 def test_evas2_integer_division_matches_spectre_bit_decode(tmp_path, monkeypatch):

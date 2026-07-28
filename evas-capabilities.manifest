@@ -17,8 +17,6 @@ V(node) <+
 V(node1, node2) <+
 # --- Events ---
 @(cross())
-# cross() expressions fed by scalar state assigned continuously in the same
-# analog body use the deterministic Python compatibility engine.
 @(above())
 @(initial_step)
 @(timer())
@@ -26,10 +24,6 @@ V(node1, node2) <+
 # combined: @(event1 or event2)
 # --- Operators ---
 transition()
-# Sampled voltage-domain scalar transport-delay subset. Calls are routed to
-# the deterministic Python compatibility engine; this is not a claim of full
-# Spectre continuous-time absdelay equivalence.
-absdelay()
 slew()
 last_crossing()
 ddt()
@@ -51,9 +45,6 @@ real
 integer
 genvar
 arrays
-# Runtime-indexed integer/real state arrays are routed to the deterministic
-# Python compatibility engine; declaration-order aggregate initialization is
-# preserved for both ascending and descending ranges.
 bit select
 part select
 concatenation

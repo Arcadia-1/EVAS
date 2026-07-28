@@ -64,8 +64,6 @@ RUST_EVAS_ENGINE = "evas-rust"
 DEFAULT_EVAS_ENGINE = RUST_EVAS_ENGINE
 _RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
 _DEVELOPER_ENGINE_OVERRIDE: Optional[str] = None
-_PYTHON_COMPATIBILITY_FUNCTIONS = frozenset({"absdelay"})
-
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
     "fast": {"refine_factor": 8, "refine_steps": 4, "reltol_min": 5e-3},
@@ -186,13 +184,14 @@ def _normalize_evas_engine(engine: str) -> str:
     )
 
 
-def _netlist_python_compatibility_features(
+def _netlist_rust_unsupported_features(
     netlist: SpectreNetlist,
 ) -> Tuple[str, ...]:
-    """Return supported syntax features that require the Python engine.
+    """Return syntax features that are not safe on the Rust production engine.
 
-    This is a narrow, syntax-driven compatibility route. It never falls back
-    because Rust compilation or simulation failed.
+    Production execution is Rust-only.  This narrow syntax gate prevents EVAS
+    from silently running constructs whose Rust lowering is absent or whose
+    event semantics are not yet Spectre-compatible.
     """
 
     features: set[str] = set()
@@ -212,19 +211,10 @@ def _netlist_python_compatibility_features(
                 source,
                 source_dir=str(va_path.parent),
             )
-            tokens = tokenize_va(preprocessed)
             modules = parse_all_va(preprocessed)
         except Exception:
             # The normal compile gate owns diagnostics for malformed sources.
             continue
-        for current, following in zip(tokens, tokens[1:]):
-            name = str(current.value).lower()
-            if (
-                current.type == TokenType.IDENT
-                and following.type == TokenType.LPAREN
-                and name in _PYTHON_COMPATIBILITY_FUNCTIONS
-            ):
-                features.add(name)
         for module in modules:
             array_names = {
                 variable.name
@@ -247,8 +237,6 @@ def _netlist_python_compatibility_features(
                     if not _is_static_array_index(access.index, static_names):
                         features.add("dynamic_state_array_access")
                         break
-            if _module_uses_continuous_state_cross(module):
-                features.add("continuous_state_cross_event")
             if _module_uses_time_dependent_cross(module):
                 features.add("time_dependent_cross_event")
     return tuple(sorted(features))
@@ -281,58 +269,13 @@ def _is_static_array_index(value, static_names: set[str]) -> bool:
     return False
 
 
-def _module_uses_continuous_state_cross(module) -> bool:
-    """Detect cross() expressions fed by procedural continuous state.
-
-    Rust currently does not guarantee Spectre's ordering for a scalar assigned
-    in the continuously evaluated analog body and then consumed by a separate
-    cross event in that same body.  Route only this syntactic dependency to the
-    compatibility engine; direct cross(V(...)) remains on Rust.
-    """
-
-    analog_block = getattr(module, "analog_block", None)
-    if analog_block is None:
-        return False
-    state_names = {
-        variable.name
-        for variable in module.variables
-        if not getattr(variable, "is_array", False)
-    }
-    continuously_assigned = _continuous_assignment_targets(
-        analog_block.body,
-        state_names,
-    )
-    if not continuously_assigned:
-        return False
-    for value in _iter_dataclass_values(analog_block.body):
-        if not isinstance(value, va_ast.EventStatement):
-            continue
-        events = (
-            value.event.events
-            if isinstance(value.event, va_ast.CombinedEvent)
-            else (value.event,)
-        )
-        for event in events:
-            if event.event_type != va_ast.EventType.CROSS or not event.args:
-                continue
-            identifiers = {
-                item.name
-                for item in _iter_dataclass_values(event.args[0])
-                if isinstance(item, va_ast.Identifier)
-            }
-            if identifiers & continuously_assigned:
-                return True
-    return False
-
-
 def _module_uses_time_dependent_cross(module) -> bool:
     """Detect cross() expressions whose value advances with simulation time.
 
     The Rust SimProgram currently samples cross expressions only when another
     scheduled event or circuit update wakes the model.  An expression such as
     ``cross($abstime - deadline, +1)`` therefore cannot schedule its own future
-    crossing.  The compatibility engine evaluates these expressions along the
-    transient timeline and preserves the expected Spectre behavior.
+    crossing and must fail closed until Rust can schedule it correctly.
     """
 
     analog_block = getattr(module, "analog_block", None)
@@ -356,31 +299,6 @@ def _module_uses_time_dependent_cross(module) -> bool:
             ):
                 return True
     return False
-
-
-def _continuous_assignment_targets(value, state_names: set[str], in_event=False):
-    targets: set[str] = set()
-    if value is None:
-        return targets
-    if isinstance(value, va_ast.EventStatement):
-        return _continuous_assignment_targets(value.body, state_names, True)
-    if isinstance(value, va_ast.Assignment) and not in_event:
-        if isinstance(value.target, va_ast.Identifier):
-            if value.target.name in state_names:
-                targets.add(value.target.name)
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            targets.update(
-                _continuous_assignment_targets(item, state_names, in_event)
-            )
-    elif is_dataclass(value):
-        for field in fields(value):
-            targets.update(
-                _continuous_assignment_targets(
-                    getattr(value, field.name), state_names, in_event
-                )
-            )
-    return targets
 
 
 def _iter_dataclass_values(value):
@@ -564,7 +482,7 @@ def _expr_has_call(expr, call_name: str) -> bool:
 
 
 _SUPPORTED_FUNCTION_CALLS = {
-    'transition', 'absdelay', 'slew', 'ddt', 'idt', 'idtmod', 'cross', 'last_crossing',
+    'transition', 'slew', 'ddt', 'idt', 'idtmod', 'cross', 'last_crossing',
     'limexp',
     'laplace_nd', 'laplace_np', 'laplace_zd', 'laplace_zp',
     'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
@@ -985,34 +903,6 @@ def _validate_supported_function_calls(expr, user_function_names: Optional[set] 
                 )
                 + format_support_tier_hint(support_tier)
             )
-        _validate_absdelay_call(call)
-
-
-def _static_numeric_literal(expr) -> Optional[float]:
-    if isinstance(expr, va_ast.NumberLiteral):
-        return float(expr.value)
-    if isinstance(expr, va_ast.UnaryExpr) and expr.op in {"+", "-"}:
-        value = _static_numeric_literal(expr.operand)
-        if value is None:
-            return None
-        return value if expr.op == "+" else -value
-    return None
-
-
-def _validate_absdelay_call(call) -> None:
-    if call.name.lower() != "absdelay":
-        return
-    if len(call.args) not in {2, 3}:
-        raise ValueError(
-            "unsupported Verilog-A feature: absdelay() expects 2 or 3 "
-            "arguments in EVAS"
-        )
-    delay = _static_numeric_literal(call.args[1])
-    if delay is not None and delay < 0.0:
-        raise ValueError(
-            "unsupported Verilog-A feature: absdelay() delay must be "
-            "nonnegative"
-        )
 
 
 def _iter_contributions(stmt):
@@ -2058,6 +1948,20 @@ def _build_spectre_compile_context(
             add_error("parse", message)
             return finish(ok=False, stage="parse")
 
+    if require_rust_lowering:
+        unsupported_rust_features = _netlist_rust_unsupported_features(netlist)
+        if unsupported_rust_features:
+            feature_list = ", ".join(unsupported_rust_features)
+            message = (
+                "Rust production engine does not support these Verilog-A "
+                f"features: {feature_list}. EVAS does not fall back to the "
+                "Python simulation engine."
+            )
+            if log is not None:
+                log.write(f"ERROR [rust_lowering]: {message}")
+            add_error("rust_lowering", message)
+            return finish(ok=False, stage="rust_lowering")
+
     if has_transistors(netlist):
         message = "Netlist contains transistor-level devices."
         if log is not None:
@@ -2405,22 +2309,11 @@ def compile_spectre_netlist(
     ``Simulator.run`` or advances transient time.
     """
     scs_path = Path(scs_file).resolve()
-    try:
-        netlist = parse_spectre(str(scs_path))
-    except Exception:
-        netlist = None
-    python_features = (
-        _netlist_python_compatibility_features(netlist)
-        if netlist is not None
-        else ()
-    )
     return _build_spectre_compile_context(
         scs_path,
-        netlist=netlist,
         ahdllint=ahdllint,
         ahdllint_min_transition=ahdllint_min_transition,
         spectre_strict=spectre_strict,
-        require_rust_lowering=not python_features,
     )
 
 
@@ -2507,28 +2400,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log_file.close()
         return False
 
-    requested_engine = evas_engine
-    python_features = _netlist_python_compatibility_features(netlist)
-    compatibility_routed = (
-        developer_engine is None
-        and evas_engine == RUST_EVAS_ENGINE
-        and bool(python_features)
-    )
-    if compatibility_routed:
-        evas_engine = PYTHON_EVAS_ENGINE
-        log.write(
-            "Compatibility engine route: "
-            f"{RUST_EVAS_ENGINE} -> {PYTHON_EVAS_ENGINE} "
-            f"for {', '.join(python_features)}"
-        )
-        log.write("")
-
     identity = collect_build_identity()
     identity["engine"] = evas_engine
-    identity["engine_requested"] = requested_engine
-    if compatibility_routed:
-        identity["engine_fallback_kind"] = "syntax_feature_gate"
-        identity["engine_fallback_features"] = list(python_features)
     write_build_identity(out_dir / "evas_identity.json", identity)
     log.write("Build identity:")
     log.write(f"    package_version = {identity['package_version']}")

@@ -16,7 +16,6 @@ from evas.netlist.spectre_parser import (
 )
 from evas.support_tiers import (
     AMS_DIGITAL,
-    BEHAVIORAL_CONTINUOUS_TIME,
     BEHAVIORAL_EVENT,
     CONSERVATIVE_CURRENT_KCL,
     format_support_tier_hint,
@@ -1866,8 +1865,6 @@ def _lint_expr(
                 expr, diagnostics, filename, module, min_transition,
                 continuous_vars,
             )
-        elif name == "absdelay":
-            _lint_absdelay_call(expr, diagnostics, filename, module)
         elif name == "ddt" and any(_expr_has_call(arg, "ddt") for arg in expr.args):
             diagnostics.append(
                 _diag(
@@ -1916,45 +1913,6 @@ def _lint_expr(
                 arg, diagnostics, filename, module, min_transition,
                 discrete_vars, continuous_vars, user_function_names, symbol_types,
             )
-
-
-def _lint_absdelay_call(
-    expr: va_ast.FunctionCall,
-    diagnostics: List[Diagnostic],
-    filename: str,
-    module: str,
-) -> None:
-    if len(expr.args) not in {2, 3}:
-        diagnostics.append(
-            _diag(
-                code="EVAS-COMP-EUNSUPPORTED",
-                message=(
-                    "absdelay() expects 2 or 3 arguments in EVAS's "
-                    "voltage-domain sampled transport-delay subset"
-                ),
-                file=filename,
-                module=module,
-                support_tier=BEHAVIORAL_CONTINUOUS_TIME,
-                node=expr,
-            )
-        )
-        return
-
-    delay_value = _numeric_value(expr.args[1])
-    if delay_value is not None and delay_value < 0.0:
-        diagnostics.append(
-            _diag(
-                code="EVAS-COMP-EUNSUPPORTED",
-                message=(
-                    "absdelay() delay must be nonnegative in EVAS's "
-                    "voltage-domain sampled transport-delay subset"
-                ),
-                file=filename,
-                module=module,
-                support_tier=BEHAVIORAL_CONTINUOUS_TIME,
-                node=expr,
-            )
-        )
 
 
 def _lint_transition_call(
@@ -2946,7 +2904,7 @@ _REAL_RETURN_FUNCTIONS = {
 
 
 _SUPPORTED_FUNCTIONS = {
-    "transition", "absdelay", "slew", "ddt", "idt", "idtmod", "cross", "last_crossing",
+    "transition", "slew", "ddt", "idt", "idtmod", "cross", "last_crossing",
     "limexp", "laplace_nd", "laplace_np", "laplace_zd", "laplace_zp",
     "zi_nd", "zi_np", "zi_zd", "zi_zp", "ln", "log", "exp", "sqrt",
     "abs", "pow", "min", "max", "sin", "cos", "tan", "tanh", "floor",
