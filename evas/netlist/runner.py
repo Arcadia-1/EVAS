@@ -2474,7 +2474,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
     requested_engine = evas_engine
     python_features = _netlist_python_compatibility_features(netlist)
-    if evas_engine == RUST_EVAS_ENGINE and python_features:
+    compatibility_routed = (
+        developer_engine is None
+        and evas_engine == RUST_EVAS_ENGINE
+        and bool(python_features)
+    )
+    if compatibility_routed:
         evas_engine = PYTHON_EVAS_ENGINE
         log.write(
             "Compatibility engine route: "
@@ -2486,7 +2491,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     identity = collect_build_identity()
     identity["engine"] = evas_engine
     identity["engine_requested"] = requested_engine
-    if python_features and requested_engine == RUST_EVAS_ENGINE:
+    if compatibility_routed:
         identity["engine_fallback_kind"] = "syntax_feature_gate"
         identity["engine_fallback_features"] = list(python_features)
     write_build_identity(out_dir / "evas_identity.json", identity)

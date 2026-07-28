@@ -3764,11 +3764,6 @@ fn rust_sim_execute_ordered_cross_events(
         if !executed {
             continue;
         }
-        let refresh_time = if events[candidate.event_idx].kind == RUST_SIM_EVENT_CROSS {
-            event_time + eps.max(event_time.abs() * f64::EPSILON * 8.0)
-        } else {
-            event_time
-        };
         fired += rust_sim_refresh_sources_continuous_outputs_fixed_point(
             sources,
             source_data,
@@ -3803,7 +3798,7 @@ fn rust_sim_execute_ordered_cross_events(
             side_effect_log,
             file_io.as_deref_mut(),
             body_time,
-            refresh_time,
+            event_time,
             default_transition,
             has_pre_always_events,
         )?;
